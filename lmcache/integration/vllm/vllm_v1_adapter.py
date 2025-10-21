@@ -178,22 +178,25 @@ class RequestTracker:
         """
         # vLLM 0.9.0 update: request.block_ids changed from list[int] to
         # list[list[int]]
-        # Need to check the type of request.block_ids
+        # HPU (Gaudi3) can return triple-nested lists: list[list[list[int]]]
+        # Need to recursively flatten all nested structures
 
-        unfolded_block_ids = []
+        def _flatten_block_ids(block_ids):
+            """Recursively flatten nested block_ids lists"""
+            if not block_ids:
+                return []
+            if not isinstance(block_ids[0], list):
+                return block_ids.copy()
+            # Recursively flatten
+            result = []
+            for item in block_ids:
+                if isinstance(item, list):
+                    result.extend(_flatten_block_ids(item))
+                else:
+                    result.append(item)
+            return result
 
-        if not isinstance(new_request.block_ids[0], list):
-            unfolded_block_ids = new_request.block_ids.copy()
-        else:
-            # According to the vLLM code
-            # (https://github.com/vllm-project/vllm/blob/main/vllm/v1/core/
-            # sched/scheduler.py#L943),
-            # only one KVCacheGroup is supported in connector for now.
-
-            # TODO: Please support multiple KVCacheGroup in connector.
-            # NOTE: Also, `update` method in RequestTracker should be
-            # updated accordingly.
-            unfolded_block_ids = new_request.block_ids[0].copy()
+        unfolded_block_ids = _flatten_block_ids(new_request.block_ids)
 
         # NOTE: Initialized in `update_state_after_alloc`
         disagg_spec = tmp_disagg_tracker.pop(new_request.req_id, None)
@@ -235,21 +238,20 @@ class RequestTracker:
             new_block_ids = []
         elif isinstance(new_block_ids, tuple):
             new_block_ids = new_block_ids[0]
-        elif isinstance(new_block_ids, list) and all(
-            isinstance(elem, int) for elem in new_block_ids
-        ):
-            pass
-        elif isinstance(new_block_ids, list) and any(
-            isinstance(elem, list) for elem in new_block_ids
-        ):
-            # Handle nested lists (HPU compatibility)
-            flattened: list[int] = []
-            for elem in new_block_ids:
-                if isinstance(elem, list):
-                    flattened.extend(elem)
-                else:
-                    flattened.append(elem)
-            new_block_ids = flattened
+        elif isinstance(new_block_ids, list):
+            # Recursively flatten nested lists (HPU can return triple-nested lists)
+            def _flatten_list(lst):
+                result = []
+                for item in lst:
+                    if isinstance(item, list):
+                        result.extend(_flatten_list(item))
+                    else:
+                        result.append(item)
+                return result
+            
+            # Check if we have nested lists
+            if new_block_ids and isinstance(new_block_ids[0], list):
+                new_block_ids = _flatten_list(new_block_ids)
         else:
             raise ValueError(f"Unsupported new_block_ids type {type(new_block_ids)}")
         self.allocated_block_ids.extend(new_block_ids)
