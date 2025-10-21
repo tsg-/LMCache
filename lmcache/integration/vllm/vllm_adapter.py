@@ -21,14 +21,25 @@ try:
     # Third Party
     from vllm.attention.backends.flash_attn import FlashAttentionMetadata
 except (ModuleNotFoundError, ImportError):
-    # vllm_flash_attn is not installed, try the ROCm FA metadata
-    from vllm.attention.backends.rocm_flash_attn import (
-        ROCmFlashAttentionMetadata as FlashAttentionMetadata,
-    )
+    if hasattr(torch, "hpu") and torch.hpu.is_available():
+        # Third Party
+        try:
+            from vllm_gaudi.attention.backends.hpu_attn import HPUAttentionMetadata
+        except (ModuleNotFoundError, ImportError):
+            from vllm.attention.backends.hpu_attn import HPUAttentionMetadata
+    else:
+        # vllm_flash_attn is not installed, try the ROCm FA metadata
+        # Third Party
+        from vllm.attention.backends.rocm_flash_attn import (
+            ROCmFlashAttentionMetadata as FlashAttentionMetadata,
+        )
 
-# Third Party
-from vllm.attention.backends.flashmla import FlashMLAMetadata
-from vllm.attention.backends.mla.common import MLACommonMetadata
+try:
+    # Third Party
+    from vllm.attention.backends.flashmla import FlashMLAMetadata
+    from vllm.attention.backends.mla.common import MLACommonMetadata
+except (ModuleNotFoundError, ImportError):
+    pass
 from vllm.config import (
     CacheConfig,
     ModelConfig,
