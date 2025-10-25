@@ -14,9 +14,11 @@ from lmcache.v1.compute.blend.utils import LMCBlenderBuilder
 from lmcache.v1.memory_management import GPUMemoryAllocator  # noqa: E501
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 
-if torch.cuda.is_available():
+try:
     # First Party
-    import lmcache.c_ops as lmc_ops
+    import lmcache.c_ops as lmc_ops  # type: ignore
+except (ModuleNotFoundError, ImportError):
+    lmc_ops = None
 
 logger = init_logger(__name__)
 
@@ -228,17 +230,37 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
 
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
 
-        kv_cache_pointers = self._initialize_pointers(self.kvcaches)
-
-        lmc_ops.multi_layer_kv_transfer(
-            memory_obj.tensor,
-            kv_cache_pointers,
-            slot_mapping[start:end],
-            self.device,
-            self.page_buffer_size,
-            False,
-            self.use_mla,
-        )
+        if lmc_ops is None:
+            # Manual fallback (no extension). Only supports non-MLA currently.
+            if self.use_mla:
+                raise RuntimeError(
+                    "Fallback path without lmcache.c_ops does not support MLA format"
+                )
+            b = self.kvcaches[0].shape[1]
+            page_size = self.kvcaches[0].shape[2]
+            num_heads = self.kvcaches[0].shape[3]
+            head_size = self.kvcaches[0].shape[4]
+            page_buffer_size = b * page_size
+            flat_indices = slot_mapping[start:end]
+            for layer_idx in range(self.num_layers):
+                kvcache_layer = self.kvcaches[layer_idx]
+                k_flat_k = kvcache_layer[0].view(page_buffer_size, num_heads * head_size)
+                k_flat_v = kvcache_layer[1].view(page_buffer_size, num_heads * head_size)
+                k_src = memory_obj.tensor[0, layer_idx].to(k_flat_k.device)
+                v_src = memory_obj.tensor[1, layer_idx].to(k_flat_v.device)
+                k_flat_k.index_copy_(0, flat_indices, k_src)
+                k_flat_v.index_copy_(0, flat_indices, v_src)
+        else:
+            kv_cache_pointers = self._initialize_pointers(self.kvcaches)
+            lmc_ops.multi_layer_kv_transfer(  # type: ignore
+                memory_obj.tensor,
+                kv_cache_pointers,
+                slot_mapping[start:end],
+                self.device,
+                self.page_buffer_size,
+                False,
+                self.use_mla,
+            )
 
     @_lmcache_nvtx_annotate
     def from_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
@@ -271,11 +293,32 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
 
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
 
-        kv_cache_pointers = self._initialize_pointers(self.kvcaches)
-
-        with torch.cuda.stream(self.store_stream):
+        if lmc_ops is None:
+            if self.use_mla:
+                raise RuntimeError(
+                    "Fallback path without lmcache.c_ops does not support MLA format"
+                )
+            b = self.kvcaches[0].shape[1]
+            page_size = self.kvcaches[0].shape[2]
+            num_heads = self.kvcaches[0].shape[3]
+            head_size = self.kvcaches[0].shape[4]
+            page_buffer_size = b * page_size
+            flat_indices = slot_mapping[start:end]
+            # Prepare destination tensor slices
+            for layer_idx in range(self.num_layers):
+                kvcache_layer = self.kvcaches[layer_idx]
+                k_flat_k = kvcache_layer[0].view(page_buffer_size, num_heads * head_size)
+                k_flat_v = kvcache_layer[1].view(page_buffer_size, num_heads * head_size)
+                memory_obj.tensor[0, layer_idx].copy_(
+                    k_flat_k.index_select(0, flat_indices), non_blocking=True
+                )
+                memory_obj.tensor[1, layer_idx].copy_(
+                    k_flat_v.index_select(0, flat_indices), non_blocking=True
+                )
+        else:
+            kv_cache_pointers = self._initialize_pointers(self.kvcaches)
             if self.gpu_buffer is None or end - start != self.gpu_buffer.shape[2]:
-                lmc_ops.multi_layer_kv_transfer(
+                lmc_ops.multi_layer_kv_transfer(  # type: ignore
                     memory_obj.tensor,
                     kv_cache_pointers,
                     slot_mapping[start:end],
@@ -288,7 +331,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
                 # kvcaches -> gpu_buffer -> memobj
                 assert self.gpu_buffer.device == self.kvcaches[0].device
                 tmp_gpu_buffer = self.gpu_buffer[:, :, : end - start, :]
-                lmc_ops.multi_layer_kv_transfer(
+                lmc_ops.multi_layer_kv_transfer(  # type: ignore
                     tmp_gpu_buffer,
                     kv_cache_pointers,
                     slot_mapping[start:end],
@@ -299,11 +342,9 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
                 )
                 memory_obj.tensor.copy_(tmp_gpu_buffer, non_blocking=True)
 
-        if not memory_obj.tensor.is_cuda:
-            # Force a synchronize if the target buffer is NOT CUDA device
-            # NOTE: for better performance, we may not want to sync for every
-            # memory object
-            self.store_stream.synchronize()
+            if not memory_obj.tensor.is_cuda:
+                # Force a synchronize if the target buffer is NOT CUDA device
+                self.store_stream.synchronize()
 
         if self.use_mla:
             memory_obj.metadata.fmt = MemoryFormat.KV_MLA_FMT

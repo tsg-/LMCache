@@ -16,8 +16,10 @@ from lmcache.storage_backend.serde.cachegen_basics import (
 from lmcache.storage_backend.serde.serde import Deserializer
 from lmcache.utils import _lmcache_nvtx_annotate
 
-if torch.cuda.is_available():
-    import lmcache.c_ops as lmc_ops
+try:
+    import lmcache.c_ops as lmc_ops  # type: ignore
+except (ModuleNotFoundError, ImportError):
+    lmc_ops = None
 
 # First Party
 import lmcache.storage_backend.serde.cachegen_basics as CGBasics
@@ -73,7 +75,8 @@ def decode_chunk(
         .cumsum(0)
         .reshape(data_chunk.bytestream_lengths.shape)
     )
-    lmc_ops.decode_fast_prefsum(cdf, bytes_tensor, length_prefsum, target_buffer)
+    assert lmc_ops is not None, "lmcache.c_ops extension not available for decode"
+    lmc_ops.decode_fast_prefsum(cdf, bytes_tensor, length_prefsum, target_buffer)  # type: ignore
 
 
 @_lmcache_nvtx_annotate

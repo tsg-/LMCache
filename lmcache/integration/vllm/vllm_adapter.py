@@ -53,20 +53,33 @@ from vllm.utils import cdiv, round_down
 from lmcache.integration.vllm.utils import ENGINE_NAME
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
-from lmcache.v1.cache_engine import LMCacheEngineBuilder
+from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
+from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.integration.vllm.utils import lmcache_get_or_create_config as lmcache_get_config
+from lmcache.integration.vllm.utils import mla_enabled
+from lmcache.integration.vllm.utils import create_lmcache_metadata
+from lmcache.v1.gpu_connector import (
+    VLLMBufferLayerwiseGPUConnector,
+    VLLMPagedMemGPUConnectorV2,
+    VLLMPagedMemLayerwiseGPUConnector,
+)
+from lmcache.v1.hpu_connector import VLLMPagedMemHPUConnectorV2
 
 # FIXME(Jiayi): temporarily comment this out
 # from lmcache_vllm.blend_adapter import remove_request_id_indices
 
 logger = init_logger(__name__)
 
-LMCACHE_CUDA_STREAM = torch.cuda.Stream()
-
-SUPPORTED_BACKEND_METADATA = (
-    FlashAttentionMetadata,
-    FlashMLAMetadata,
-    MLACommonMetadata,
-)
+if hasattr(torch, "hpu") and torch.hpu.is_available():
+    # On HPU we use HPU attention metadata directly
+    SUPPORTED_BACKEND_METADATA = HPUAttentionMetadata  # type: ignore[name-defined]
+else:
+    LMCACHE_CUDA_STREAM = torch.cuda.Stream()
+    SUPPORTED_BACKEND_METADATA = (
+        FlashAttentionMetadata,
+        FlashMLAMetadata,
+        MLACommonMetadata,
+    )
 
 VLLM_CACHE_CONFIG: Optional[CacheConfig] = None
 VLLM_MODEL_CONFIG: Optional[ModelConfig] = None
@@ -88,6 +101,136 @@ class RetrieveStatus(Enum):
     # (3) prefix_prefill
     CHUNK_PREFILL = auto()  # not last chunk
     NONE = auto()
+
+
+def need_gpu_interm_buffer(lmcache_config: LMCacheEngineConfig) -> bool:
+    """Whether an intermediate GPU buffer is required.
+
+    If NIXL is enabled we rely on peer direct / paging abstractions and can
+    avoid an extra staging buffer. Otherwise retain the original behavior.
+    """
+    if getattr(lmcache_config, "enable_nixl", False):  # pragma: no cover
+        return False
+    return True
+
+
+def init_lmcache_engine(
+    model_config: ModelConfig,
+    parallel_config: ParallelConfig,
+    cache_config: CacheConfig,
+    scheduler_config: SchedulerConfig,
+) -> Optional[LMCacheEngine]:
+    """Initialize LMCache v1 engine if configuration env is present.
+
+    Returns None when engine already initialized or config file not provided.
+    """
+    if LMCacheEngineBuilder.get(ENGINE_NAME) is not None:
+        return None
+
+    config = lmcache_get_config()
+    assert isinstance(config, LMCacheEngineConfig), "Expecting v1 LMCacheEngineConfig"
+
+    # Build metadata & capture global handles
+    metadata, _ignored_cfg = create_lmcache_metadata(
+        model_config=model_config,
+        parallel_config=parallel_config,
+        cache_config=cache_config,
+    )
+
+    use_mla = mla_enabled(model_config)
+    if use_mla and (config.remote_serde not in (None, "naive")):
+        raise ValueError("MLA only works with naive serde mode.")
+
+    # Derive kv shape parameters (duplicated minimal logic — kept small)
+    num_layer = model_config.get_num_layers(parallel_config)
+    chunk_size = config.chunk_size
+    num_kv_head = model_config.get_num_kv_heads(parallel_config)
+    head_size = model_config.get_head_size()
+    kv_shape = (num_layer, 1 if use_mla else 2, chunk_size, num_kv_head, head_size)
+
+    # Device selection
+    if hasattr(torch, "hpu") and torch.hpu.is_available():
+        device = torch.device(f"hpu:{parallel_config.rank}")
+    else:
+        torch.cuda.device(parallel_config.rank)
+        device = torch.device(f"cuda:{parallel_config.rank}")
+
+    # Rebuild metadata with kv_shape override (create_lmcache_metadata already
+    # built a kv_shape, but we recompute to follow upstream patch semantics)
+    from lmcache.config import LMCacheEngineMetadata  # local import to avoid cycles
+
+    metadata = LMCacheEngineMetadata(
+        model_config.model,
+        parallel_config.world_size,
+        parallel_config.rank,
+        "vllm",
+        metadata.kv_dtype,
+        kv_shape,
+        use_mla,
+    )
+
+    use_gpu = need_gpu_interm_buffer(config)
+
+    BaseVLLMGPUConnector = Union[
+        VLLMBufferLayerwiseGPUConnector,
+        VLLMPagedMemGPUConnectorV2,
+        VLLMPagedMemLayerwiseGPUConnector,
+    ]
+
+    # Extend union only when HPU is available
+    if hasattr(torch, "hpu") and torch.hpu.is_available():
+        ExtendedConnectorUnion = Union[BaseVLLMGPUConnector, VLLMPagedMemHPUConnectorV2]  # noqa: F841
+
+    hidden_dim_size = num_kv_head * head_size  # When use_mla True, num_kv_head==1
+
+    if use_mla and config.use_layerwise:
+        raise ValueError("layerwise MLA connector is not supported yet")
+
+    if config.use_layerwise:
+        if getattr(config, "enable_blending", False):
+            vllm_gpu_connector = VLLMBufferLayerwiseGPUConnector(
+                hidden_dim_size,
+                num_layer,
+                use_gpu=use_gpu,
+                chunk_size=chunk_size,
+                dtype=metadata.kv_dtype,
+                device=device,
+            )
+        else:
+            vllm_gpu_connector = VLLMPagedMemLayerwiseGPUConnector(
+                hidden_dim_size,
+                num_layer,
+                use_gpu=use_gpu,
+                chunk_size=chunk_size,
+                dtype=metadata.kv_dtype,
+                device=device,
+            )
+    else:
+        if device.type == "hpu":
+            vllm_gpu_connector = VLLMPagedMemHPUConnectorV2(
+                hidden_dim_size,
+                num_layer,
+                use_gpu=use_gpu,
+                chunk_size=chunk_size,
+                dtype=metadata.kv_dtype,
+                device=device,
+                use_mla=use_mla,
+            )
+        else:
+            vllm_gpu_connector = VLLMPagedMemGPUConnectorV2(
+                hidden_dim_size,
+                num_layer,
+                use_gpu=use_gpu,
+                chunk_size=chunk_size,
+                dtype=metadata.kv_dtype,
+                device=device,
+                use_mla=use_mla,
+            )
+
+    engine = LMCacheEngineBuilder.get_or_create(
+        ENGINE_NAME, config, metadata, vllm_gpu_connector
+    )
+    return engine
 
 
 def broadcast_seq_group_list(

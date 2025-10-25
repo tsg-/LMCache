@@ -16,8 +16,10 @@ from lmcache.storage_backend.serde.cachegen_basics import (
 from lmcache.storage_backend.serde.serde import Serializer
 from lmcache.utils import _lmcache_nvtx_annotate
 
-if torch.cuda.is_available():
-    import lmcache.c_ops as lmc_ops
+try:
+    import lmcache.c_ops as lmc_ops  # type: ignore
+except (ModuleNotFoundError, ImportError):
+    lmc_ops = None  # Fallback: encoder operations will not be available
 
 # First Party
 import lmcache.storage_backend.serde.cachegen_basics as CGBasics
@@ -264,7 +266,8 @@ def encode_ntokens(
 
     :return byte_tensor: the byte tensor
     """
-    lmc_ops.encode_fast_new(
+    assert lmc_ops is not None, "lmcache.c_ops extension not available for encode"
+    lmc_ops.encode_fast_new(  # type: ignore
         cdf_int,
         encode_input,
         output_buffer,
@@ -297,8 +300,9 @@ def encode_function(
         nlayers, chunk_size, nchannels
     )
 
-    new_cdf_key = lmc_ops.calculate_cdf(new_key, int(key_bins.max()))
-    new_cdf_value = lmc_ops.calculate_cdf(new_value, int(value_bins.max()))
+    assert lmc_ops is not None, "lmcache.c_ops extension required for CacheGen encoding"
+    new_cdf_key = lmc_ops.calculate_cdf(new_key, int(key_bins.max()))  # type: ignore
+    new_cdf_value = lmc_ops.calculate_cdf(new_value, int(value_bins.max()))  # type: ignore
     cdf_int = torch.cat([new_cdf_key, new_cdf_value])
 
     output_buffer = torch.zeros(
