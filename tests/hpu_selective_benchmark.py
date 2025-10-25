@@ -44,6 +44,8 @@ from __future__ import annotations
 
 # Standard
 import argparse
+import logging
+import os
 import statistics as stats
 import sys
 import time
@@ -57,6 +59,50 @@ from lmcache.config import LMCacheEngineMetadata
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.hpu_connector import VLLMPagedMemHPUConnectorV2
+
+
+class S3UploadErrorHandler(logging.Handler):
+    """Custom logging handler to detect S3 upload failures and exit immediately.
+    
+    This prevents fallback to CPU-only cache when S3 is explicitly requested.
+    If --use-s3 is specified, any S3 upload failure is fatal.
+    """
+    
+    def __init__(self, strict_s3=False):
+        super().__init__()
+        self.strict_s3 = strict_s3
+        self.s3_errors_seen = 0
+    
+    def emit(self, record):
+        if record.levelno >= logging.ERROR:
+            msg = self.format(record)
+            
+            # Detect S3 upload failures
+            is_s3_upload_error = (
+                "Failed to upload" in msg and 
+                "S3" in msg and 
+                ("AWS_ERROR_S3_INVALID_RESPONSE_STATUS" in msg or 
+                 "status': 404" in msg or
+                 "Invalid response status" in msg)
+            )
+            
+            if is_s3_upload_error:
+                self.s3_errors_seen += 1
+                print(f"\n[HPU-BENCH] FATAL: S3 upload failed - {msg}", file=sys.stderr, flush=True)
+                
+                if self.strict_s3:
+                    print("[HPU-BENCH] ERROR: S3 backend was explicitly requested but is failing", file=sys.stderr, flush=True)
+                    print("[HPU-BENCH] ERROR: Not falling back to CPU-only cache", file=sys.stderr, flush=True)
+                
+                print("[HPU-BENCH] Possible causes:", file=sys.stderr, flush=True)
+                print("[HPU-BENCH]   - S3 endpoint is unreachable or misconfigured", file=sys.stderr, flush=True)
+                print("[HPU-BENCH]   - Bucket does not exist or wrong bucket name", file=sys.stderr, flush=True)
+                print("[HPU-BENCH]   - Invalid credentials or insufficient permissions", file=sys.stderr, flush=True)
+                print("[HPU-BENCH]   - Network connectivity issues", file=sys.stderr, flush=True)
+                print("[HPU-BENCH] Check LMCACHE_CONFIG_FILE and S3 configuration", file=sys.stderr, flush=True)
+                
+                # Exit immediately - do NOT allow fallback to CPU-only cache
+                os._exit(1)
 
 
 def parse_args():
@@ -83,6 +129,9 @@ def parse_args():
     p.add_argument("--verify", action="store_true", help="Check tensor equality for sampled indices")
     p.add_argument("--sample-checks", type=int, default=4, help="Number of random layers to sample when verifying")
     p.add_argument("--verbose", action="store_true")
+    p.add_argument("--use-s3", action="store_true", help="Use S3 backend from LMCACHE_CONFIG_FILE")
+    p.add_argument("--config-file", type=str, default="/root/lmcache_config.yaml", 
+                   help="Path to LMCache config file (for S3 backend)")
     return p.parse_args()
 
 
@@ -113,12 +162,35 @@ def ensure_hpu():
 
 
 def build_engine(args, device, dtype, hidden_dim_size, kv_shape):
-    cfg = LMCacheEngineConfig.from_defaults()
-    cfg.chunk_size = args.page_size
-    cfg.max_local_cpu_size = max(0.05, (hidden_dim_size * 2 * args.num_layers * args.page_size * 2) / (1024**3))
-    cfg.enable_async_loading = False
-    cfg.use_layerwise = False
-    cfg.enable_controller = False
+    # If S3 backend requested, load config from file
+    if args.use_s3:
+        os.environ['LMCACHE_CONFIG_FILE'] = args.config_file
+        from lmcache.integration.vllm.utils import lmcache_get_or_create_config
+        cfg = lmcache_get_or_create_config()
+        print(f"[HPU-BENCH] Using S3 backend: {cfg.remote_url}")
+        # Override settings to match benchmark requirements
+        cfg.chunk_size = args.page_size
+        # Disable async loading for simpler synchronous benchmark
+        cfg.enable_async_loading = False
+        # Enable local CPU cache to stage data before S3 upload
+        cfg.local_cpu = True
+        total_tokens = args.num_pages * args.page_size
+        dtype_bytes = torch.finfo(dtype).bits // 8 if dtype in (torch.float16, torch.bfloat16, torch.float32) else 2
+        required_gb = (total_tokens * args.num_layers * 2 * hidden_dim_size * dtype_bytes) / (1024**3)
+        cfg.max_local_cpu_size = max(1.0, required_gb * 2)  # 2x for safety
+        print(f"[HPU-BENCH] Local CPU cache enabled: {cfg.max_local_cpu_size:.2f} GB")
+    else:
+        cfg = LMCacheEngineConfig.from_defaults()
+        cfg.chunk_size = args.page_size
+        # Calculate required size: total_tokens * num_layers * 2 (K+V) * hidden_dim * dtype_bytes
+        total_tokens = args.num_pages * args.page_size
+        dtype_bytes = torch.finfo(dtype).bits // 8 if dtype in (torch.float16, torch.bfloat16, torch.float32) else 2
+        required_gb = (total_tokens * args.num_layers * 2 * hidden_dim_size * dtype_bytes) / (1024**3)
+        # Add 50% headroom for metadata and fragmentation
+        cfg.max_local_cpu_size = max(0.5, required_gb * 1.5)
+        cfg.enable_async_loading = False
+        cfg.use_layerwise = False
+        cfg.enable_controller = False
 
     metadata = LMCacheEngineMetadata(
         model_name="dummy-hpu-model",
@@ -215,6 +287,14 @@ def sample_verify(original, current, mask, tolerance, args):
 
 def main():
     args = parse_args()
+    
+    # Install S3 error handler to exit immediately on upload failures
+    # If --use-s3 is specified, enable strict mode (no CPU fallback)
+    lmcache_logger = logging.getLogger("lmcache")
+    s3_handler = S3UploadErrorHandler(strict_s3=args.use_s3)
+    s3_handler.setLevel(logging.ERROR)
+    lmcache_logger.addHandler(s3_handler)
+    
     ensure_hpu()
     torch.manual_seed(args.seed)
     device = torch.device("hpu")
@@ -235,11 +315,23 @@ def main():
     original = [kv.detach().clone() for kv in kvcaches]
 
     # Store full content once
+    print("[HPU-BENCH] Storing KV cache to backends...", flush=True)
     engine.store(
         tokens=torch.arange(total_tokens, dtype=torch.long),
         slot_mapping=slot_mapping,
         kvcaches=kvcaches,
     )
+    
+    # Clear local CPU cache to force S3 retrieval (if S3 backend is enabled)
+    if args.use_s3:
+        print("[HPU-BENCH] Clearing local CPU cache to force S3 retrieval...", flush=True)
+        if hasattr(engine, 'storage_manager'):
+            # Clear only the LocalCPUBackend, leaving S3 intact
+            num_cleared = engine.storage_manager.clear(locations=["LocalCPUBackend"])
+            print(f"[HPU-BENCH] Cleared {num_cleared} tokens from local CPU cache", flush=True)
+            print("[HPU-BENCH] All retrievals will now come from S3 backend", flush=True)
+        else:
+            print("[HPU-BENCH] WARNING: Could not access storage_manager to clear cache", flush=True)
 
     # Precompute masks
     if args.token_counts:
@@ -272,19 +364,24 @@ def main():
             continue
 
         # Warmup
-        for _ in range(args.warmup):
+        print(f"[HPU-BENCH] Warmup for fraction={frac:.3f} ({need_tokens} tokens)...", flush=True)
+        for i in range(args.warmup):
+            print(f"[HPU-BENCH]   Warmup iter {i+1}/{args.warmup}: zeroing KV caches...", flush=True)
             for kv in kvcaches:
                 kv.zero_()
+            print(f"[HPU-BENCH]   Warmup iter {i+1}/{args.warmup}: calling retrieve...", flush=True)
             engine.retrieve(
                 tokens=torch.arange(total_tokens, dtype=torch.long),
                 mask=mask,
                 slot_mapping=slot_mapping,
                 kvcaches=kvcaches,
             )
+            print(f"[HPU-BENCH]   Warmup iter {i+1}/{args.warmup}: done", flush=True)
 
         # Timed iterations
+        print(f"[HPU-BENCH] Running {args.iterations} timed iterations...", flush=True)
         times_ms: List[float] = []
-        for _ in range(args.iterations):
+        for i in range(args.iterations):
             for kv in kvcaches:
                 kv.zero_()
             t0 = time.perf_counter()
@@ -313,6 +410,9 @@ def main():
         )
 
     print("[HPU-BENCH] Done.")
+    
+    # Force exit to prevent hanging from background threads (use os._exit for immediate termination)
+    os._exit(0)
 
 
 if __name__ == "__main__":  # pragma: no cover
