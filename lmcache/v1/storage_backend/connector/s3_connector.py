@@ -336,6 +336,7 @@ class S3Connector(RemoteConnector):
         """
         Download a file from S3.
         """
+        logger.info(f"[S3-GET] Downloading from S3: {key_str}")
         headers = HttpHeaders()
         headers.add("Host", self.s3_endpoint)
 
@@ -371,15 +372,20 @@ class S3Connector(RemoteConnector):
 
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         key_str = key.to_string()
+        logger.info(f"[S3-GET-START] S3 connector get() called for: {key_str}")
 
         obj_size = self.object_size_cache.get(key_str, None)
 
         if obj_size is None:
+            logger.info(f"[S3-GET] Object size not cached, checking S3: {key_str}")
             obj_size = await self._get_object_size_async(key_str)
             if obj_size <= 0:
+                logger.info(f"[S3-GET] Object not found in S3: {key_str}")
                 self.object_size_cache[key_str] = 0
                 return None
             self.object_size_cache[key_str] = obj_size
+        else:
+            logger.info(f"[S3-GET] Object size cached ({obj_size} bytes): {key_str}")
 
         await self.inflight_sema.acquire()
 
@@ -540,6 +546,7 @@ class S3Connector(RemoteConnector):
         """
 
         key_str = key.to_string()
+        logger.info(f"[S3-PUT] Uploading to S3: {key_str}")
 
         # TODO(Jiayi): Please support this
         assert memory_obj.get_physical_size() == self.s3_part_size, (

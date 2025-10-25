@@ -315,7 +315,10 @@ def main():
     original = [kv.detach().clone() for kv in kvcaches]
 
     # Store full content once
-    print("[HPU-BENCH] Storing KV cache to backends...", flush=True)
+    print("[HPU-BENCH] ========================================", flush=True)
+    print("[HPU-BENCH] STORING phase: GPU → LMCache storage backends", flush=True)
+    print("[HPU-BENCH]   Cache tiers: LocalCPUBackend (L1) + RemoteBackend/S3 (L2 if enabled)", flush=True)
+    print("[HPU-BENCH] ========================================", flush=True)
     engine.store(
         tokens=torch.arange(total_tokens, dtype=torch.long),
         slot_mapping=slot_mapping,
@@ -324,14 +327,42 @@ def main():
     
     # Clear local CPU cache to force S3 retrieval (if S3 backend is enabled)
     if args.use_s3:
-        print("[HPU-BENCH] Clearing local CPU cache to force S3 retrieval...", flush=True)
+        # Wait for S3 uploads to complete
+        print("[HPU-BENCH] ========================================", flush=True)
+        print("[HPU-BENCH] S3 MODE: Forcing S3 backend (L2) retrieval", flush=True)
+        print("[HPU-BENCH]   Step 1: Waiting for async S3 uploads to complete...", flush=True)
+        time.sleep(2.0)  # Give async uploads time to finish
+        
+        print("[HPU-BENCH]   Step 2: Clearing LocalCPUBackend (L1) cache...", flush=True)
         if hasattr(engine, 'storage_manager'):
-            # Clear only the LocalCPUBackend, leaving S3 intact
+            # First, try clearing with the official API
             num_cleared = engine.storage_manager.clear(locations=["LocalCPUBackend"])
-            print(f"[HPU-BENCH] Cleared {num_cleared} tokens from local CPU cache", flush=True)
-            print("[HPU-BENCH] All retrievals will now come from S3 backend", flush=True)
+            print(f"[HPU-BENCH]     storage_manager.clear() returned: {num_cleared} tokens", flush=True)
+            
+            # Force additional cleanup - access the backend directly
+            if "LocalCPUBackend" in engine.storage_manager.storage_backends:
+                local_backend = engine.storage_manager.storage_backends["LocalCPUBackend"]
+                if hasattr(local_backend, 'cache'):
+                    cache_size_before = len(local_backend.cache) if hasattr(local_backend.cache, '__len__') else 'unknown'
+                    print(f"[HPU-BENCH]     LocalCPUBackend.cache has {cache_size_before} entries", flush=True)
+                    if hasattr(local_backend.cache, 'clear'):
+                        local_backend.cache.clear()
+                        print("[HPU-BENCH]     Force-cleared LocalCPUBackend.cache dictionary", flush=True)
+                    # Also clear the allocator's memory pool
+                    if hasattr(local_backend, 'allocator') and hasattr(local_backend.allocator, 'free_all'):
+                        local_backend.allocator.free_all()
+                        print("[HPU-BENCH]     Force-freed LocalCPUBackend.allocator memory pool", flush=True)
+            
+            print("[HPU-BENCH]   Result: LocalCPUBackend (L1) is empty", flush=True)
+            print("[HPU-BENCH]   Next retrieve() will fetch from RemoteBackend/S3 (L2) → GPU", flush=True)
+            print("[HPU-BENCH] ========================================", flush=True)
         else:
             print("[HPU-BENCH] WARNING: Could not access storage_manager to clear cache", flush=True)
+    else:
+        print("[HPU-BENCH] ========================================", flush=True)
+        print("[HPU-BENCH] CPU MODE: Using LocalCPUBackend (L1) cache tier", flush=True)
+        print("[HPU-BENCH]   Data path: LocalCPUBackend (L1) → GPU", flush=True)
+        print("[HPU-BENCH] ========================================", flush=True)
 
     # Precompute masks
     if args.token_counts:
@@ -366,10 +397,10 @@ def main():
         # Warmup
         print(f"[HPU-BENCH] Warmup for fraction={frac:.3f} ({need_tokens} tokens)...", flush=True)
         for i in range(args.warmup):
-            print(f"[HPU-BENCH]   Warmup iter {i+1}/{args.warmup}: zeroing KV caches...", flush=True)
+            print(f"[HPU-BENCH]   Warmup iter {i+1}/{args.warmup}: zeroing GPU KV cache tensors (destination buffers)...", flush=True)
             for kv in kvcaches:
                 kv.zero_()
-            print(f"[HPU-BENCH]   Warmup iter {i+1}/{args.warmup}: calling retrieve...", flush=True)
+            print(f"[HPU-BENCH]   Warmup iter {i+1}/{args.warmup}: calling retrieve() - LMCache backend → GPU...", flush=True)
             engine.retrieve(
                 tokens=torch.arange(total_tokens, dtype=torch.long),
                 mask=mask,
@@ -382,6 +413,7 @@ def main():
         print(f"[HPU-BENCH] Running {args.iterations} timed iterations...", flush=True)
         times_ms: List[float] = []
         for i in range(args.iterations):
+            # Clear GPU destination buffers before each iteration
             for kv in kvcaches:
                 kv.zero_()
             t0 = time.perf_counter()
