@@ -691,6 +691,7 @@ class LMCacheConnectorV1Impl:
                 self.lmcache_engine.post_init(async_lookup_server=self.lookup_server)
 
         self.kv_caches: dict[str, torch.Tensor] = {}
+        self._slot_mapping_device: Optional[torch.device] = None
 
         self._block_size = vllm_config.cache_config.block_size
 
@@ -826,6 +827,19 @@ class LMCacheConnectorV1Impl:
                 self.kv_caches[layer_name] = attn_layer.kv_cache[
                     forward_context.virtual_engine
                 ]
+                if not self._slot_mapping_device:
+                    self._slot_mapping_device = self.kv_caches[layer_name].device
+
+    def _get_slot_mapping_device(self) -> Optional[torch.device]:
+        if self._slot_mapping_device is None and len(self.kv_caches) > 0:
+            self._slot_mapping_device = next(iter(self.kv_caches.values())).device
+        return self._slot_mapping_device
+
+    def _slot_mapping_to_kv_device(self, slot_mapping: torch.Tensor) -> torch.Tensor:
+        device = self._get_slot_mapping_device()
+        if device is None or slot_mapping.device == device:
+            return slot_mapping
+        return slot_mapping.to(device=device, non_blocking=True)
 
     ####################
     # Worker side APIs
@@ -877,7 +891,7 @@ class LMCacheConnectorV1Impl:
 
             tokens = request.token_ids
             # TODO: have a pre-allocated buffer to hold the slot_mappings
-            slot_mapping = request.slot_mapping.cuda()
+            slot_mapping = self._slot_mapping_to_kv_device(request.slot_mapping)
             assert len(tokens) == len(slot_mapping)
 
             token_mask = torch.ones(len(tokens), dtype=torch.bool)
@@ -1110,7 +1124,7 @@ class LMCacheConnectorV1Impl:
                 assert len(slot_mapping) == len(token_ids)
 
                 # TODO: have a pre-allocated buffer to hold the slot_mappings
-                slot_mapping = slot_mapping.cuda()
+                slot_mapping = self._slot_mapping_to_kv_device(slot_mapping)
 
                 if self.kv_role == "kv_producer":
                     skip_leading_tokens = 0
@@ -1199,7 +1213,7 @@ class LMCacheConnectorV1Impl:
             assert len(slot_mapping) == len(token_ids)
 
             # TODO: have a pre-allocated buffer to hold the slot_mappings
-            slot_mapping = slot_mapping.cuda()
+            slot_mapping = self._slot_mapping_to_kv_device(slot_mapping)
 
             skip_leading_tokens = save_spec.skip_leading_tokens
             if self.kv_role == "kv_producer":
