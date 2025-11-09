@@ -179,6 +179,8 @@ def source_dist_extension() -> tuple[list, dict]:
 if __name__ == "__main__":
     if BUILDING_SDIST:
         get_extension = source_dist_extension
+    elif BUILD_WITH_HPU:
+        get_extension = source_dist_extension
     elif BUILD_WITH_HIP:
         get_extension = rocm_extension
     else:
