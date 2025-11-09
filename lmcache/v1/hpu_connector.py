@@ -88,7 +88,8 @@ class VLLMPagedMemHPUConnectorV2(GPUConnectorInterface):
     def _initialize_pointers(self, kv_caches: List[torch.Tensor]) -> torch.Tensor:
         self.kv_cache_pointers.numpy()[:] = [t.data_ptr() for t in kv_caches]
         device = kv_caches[0].device
-        assert device.type == "cuda", "The device should be CUDA."
+        # Allow both CUDA and HPU devices
+        assert device.type in ("cuda", "hpu"), "The device should be CUDA or HPU."
         idx = device.index
         if idx not in self.kv_cache_pointers_on_gpu:
             self.kv_cache_pointers_on_gpu[idx] = torch.empty(
@@ -143,8 +144,7 @@ class VLLMPagedMemHPUConnectorV2(GPUConnectorInterface):
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
         if lmc_ops:
             kv_cache_pointers = self._initialize_pointers(self.kvcaches)
-
-            lmc_ops.multi_layer_kv_transfer(
+            lmc_ops.multi_layer_kv_transfer(  # type: ignore
                 memory_obj.tensor,
                 kv_cache_pointers,
                 slot_mapping[start:end],
@@ -154,6 +154,7 @@ class VLLMPagedMemHPUConnectorV2(GPUConnectorInterface):
                 self.use_mla,
             )
         else:
+            # Manual fallback path (no extension)
             if self.gpu_buffer is not None:
                 assert self.gpu_buffer.device == self.kvcaches[0][0].device
                 tmp_gpu_buffer = self.gpu_buffer[:, :, : end - start, :]
@@ -196,33 +197,32 @@ class VLLMPagedMemHPUConnectorV2(GPUConnectorInterface):
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
         if lmc_ops:
             kv_cache_pointers = self._initialize_pointers(self.kvcaches)
-
-            with torch.cuda.stream(self.store_stream):
-                if self.gpu_buffer is None or end - start != self.gpu_buffer.shape[2]:
-                    lmc_ops.multi_layer_kv_transfer(
-                        memory_obj.tensor,
-                        kv_cache_pointers,
-                        slot_mapping[start:end],
-                        self.kvcaches[0].device,
-                        self.page_buffer_size,
-                        True,
-                        self.use_mla,
-                    )
-                else:
-                    # kvcaches -> gpu_buffer -> memobj
-                    assert self.gpu_buffer.device == self.kvcaches[0].device
-                    tmp_gpu_buffer = self.gpu_buffer[:, :, : end - start, :]
-                    lmc_ops.multi_layer_kv_transfer(
-                        tmp_gpu_buffer,
-                        kv_cache_pointers,
-                        slot_mapping[start:end],
-                        self.kvcaches[0].device,
-                        self.page_buffer_size,
-                        True,
-                        self.use_mla,
-                    )
-                    memory_obj.tensor.copy_(tmp_gpu_buffer, non_blocking=True)
+            if self.gpu_buffer is None or end - start != self.gpu_buffer.shape[2]:
+                lmc_ops.multi_layer_kv_transfer(  # type: ignore
+                    memory_obj.tensor,
+                    kv_cache_pointers,
+                    slot_mapping[start:end],
+                    self.kvcaches[0].device,
+                    self.page_buffer_size,
+                    True,
+                    self.use_mla,
+                )
+            else:
+                # kvcaches -> gpu_buffer -> memobj
+                assert self.gpu_buffer.device == self.kvcaches[0].device
+                tmp_gpu_buffer = self.gpu_buffer[:, :, : end - start, :]
+                lmc_ops.multi_layer_kv_transfer(  # type: ignore
+                    tmp_gpu_buffer,
+                    kv_cache_pointers,
+                    slot_mapping[start:end],
+                    self.kvcaches[0].device,
+                    self.page_buffer_size,
+                    True,
+                    self.use_mla,
+                )
+                memory_obj.tensor.copy_(tmp_gpu_buffer, non_blocking=True)
         else:
+            # Manual fallback path (no extension)
             if self.gpu_buffer is not None:
                 assert self.gpu_buffer.device == self.kvcaches[0][0].device
                 tmp_gpu_buffer = self.gpu_buffer[:, :, : end - start, :]
@@ -247,7 +247,6 @@ class VLLMPagedMemHPUConnectorV2(GPUConnectorInterface):
                     ),
                     dim=0,
                 )
-
                 memory_obj.tensor.copy_(tmp_gpu_buffer, non_blocking=True)
 
         if self.use_mla:

@@ -193,4 +193,5 @@ if __name__ == "__main__":
         ext_modules=ext_modules,
         cmdclass=cmdclass,
         include_package_data=True,
+        install_requires=get_requirements(),
     )

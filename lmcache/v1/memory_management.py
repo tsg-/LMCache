@@ -20,12 +20,14 @@ from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.system_detection import NUMAMapping
 
-if torch.cuda.is_available():
+try:
     # First Party
-    import lmcache.c_ops as lmc_ops
-else:
-    # First Party
-    import lmcache.non_cuda_equivalents as lmc_ops
+    import lmcache.c_ops as lmc_ops  # type: ignore
+    LMC_EXTENSION_AVAILABLE = True
+except (ModuleNotFoundError, ImportError):
+    # Fallback to non CUDA equivalents (may provide subset of APIs)
+    import lmcache.non_cuda_equivalents as lmc_ops  # type: ignore
+    LMC_EXTENSION_AVAILABLE = False
 
 
 logger = init_logger(__name__)
@@ -303,25 +305,31 @@ def _allocate_cpu_memory(
 ) -> torch.Tensor:
     if size == 0:
         return torch.empty(0, dtype=torch.uint8)
-    if numa_mapping:
-        if torch.cuda.is_available():
-            current_device_id = torch.cuda.current_device()
+    """Allocate pinned host memory (optionally NUMA-bound) with graceful fallback.
+    If compiled extension isn't available, fall back to torch.empty(pin_memory=True)
+    which won't provide raw pointer management but keeps interface functional.
+    """
+    if LMC_EXTENSION_AVAILABLE:
+        if numa_mapping:
+            if torch.cuda.is_available():
+                current_device_id = torch.cuda.current_device()
+            else:
+                current_device_id = 0
+            gpu_to_numa_mapping = numa_mapping.gpu_to_numa_mapping
+            assert current_device_id in gpu_to_numa_mapping, (
+                f"Current device {current_device_id} is not in the GPU NUMA mapping."
+            )
+            numa_id = gpu_to_numa_mapping[current_device_id]
+            ptr = lmc_ops.alloc_pinned_numa_ptr(size, numa_id)  # type: ignore
         else:
-            current_device_id = 0
-        gpu_to_numa_mapping = numa_mapping.gpu_to_numa_mapping
-        assert current_device_id in gpu_to_numa_mapping, (
-            f"Current device {current_device_id} is not in the GPU NUMA mapping."
-        )
-        numa_id = gpu_to_numa_mapping[current_device_id]
-        ptr = lmc_ops.alloc_pinned_numa_ptr(size, numa_id)
-    else:
-        ptr = lmc_ops.alloc_pinned_ptr(size, 0)
+            ptr = lmc_ops.alloc_pinned_ptr(size, 0)  # type: ignore
 
-    array_type = ctypes.c_uint8 * size
-    buf = array_type.from_address(ptr)
-    buffer = torch.frombuffer(buf, dtype=torch.uint8)
-
-    return buffer
+        array_type = ctypes.c_uint8 * size
+        buf = array_type.from_address(ptr)
+        buffer = torch.frombuffer(buf, dtype=torch.uint8)
+        return buffer
+    # Fallback path (no compiled extension)
+    return torch.empty(size, dtype=torch.uint8, pin_memory=True)
 
 
 class TensorMemoryObj(MemoryObj):
@@ -1411,11 +1419,16 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
         if size == 0:
             self.buffer = torch.empty(0, dtype=torch.uint8)
         else:
-            ptr = lmc_ops.alloc_pinned_ptr(size, 0)
-            array_type = ctypes.c_uint8 * size
-            buf = array_type.from_address(ptr)
-            self.buffer = torch.frombuffer(buf, dtype=torch.uint8)
-        self._unregistered = False
+            if LMC_EXTENSION_AVAILABLE:
+                ptr = lmc_ops.alloc_pinned_ptr(size, 0)  # type: ignore
+                array_type = ctypes.c_uint8 * size
+                buf = array_type.from_address(ptr)
+                self.buffer = torch.frombuffer(buf, dtype=torch.uint8)
+                self._unregistered = False
+            else:
+                # Graceful fallback to regular pinned memory tensor
+                self.buffer = torch.empty(size, dtype=torch.uint8, pin_memory=True)
+                self._unregistered = True  # nothing to unregister
 
         self.allocator: MemoryAllocatorInterface
         if use_paging:
@@ -1482,7 +1495,7 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
             return self.allocator.memcheck()
 
     def close(self):
-        if not self._unregistered:
+        if LMC_EXTENSION_AVAILABLE and not self._unregistered:
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
             if self.buffer.numel() == 0:
@@ -1625,7 +1638,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             return self.pin_allocator.memcheck()
 
     def close(self):
-        if not self._unregistered:
+        if LMC_EXTENSION_AVAILABLE and not self._unregistered:
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
             if self.buffer.numel() == 0:
