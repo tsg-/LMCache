@@ -154,3 +154,11 @@ operator/Dockerfile.cross
 
 # Compiled gettext catalogs (built from .po at HTML build time)
 docs/source/locale/**/*.mo
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/
+.claude/CLAUDE.md
+.DS_Store

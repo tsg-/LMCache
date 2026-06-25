@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "LMCache",
+  "project_id": "b53f1c7e-4883-4bd9-9dac-405826050ac0"
+}
