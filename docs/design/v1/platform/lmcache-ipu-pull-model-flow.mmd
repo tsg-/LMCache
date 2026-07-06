@@ -1,0 +1,78 @@
+sequenceDiagram
+    participant vLLM as vLLM / Bench Tool<br/>(Initiator Node)
+    participant LMC_I as LMCache Engine<br/>(Initiator)
+    participant IPU_I as MMG-400<br/>(Initiator IPU)
+    participant WIRE as 400GbE
+    participant IPU_T as MMG-400<br/>(KV Cache Node IPU)
+    participant LMC_T as LMCache Server<br/>(KV Cache Node)
+    participant DRAM as Registered DRAM<br/>(L1)
+    participant SSD as NVMe Gen5<br/>(L2)
+
+    Note over vLLM,SSD: === RETRIEVE (Cache Lookup) ===
+
+    vLLM->>LMC_I: retrieve(tokens)
+    LMC_I->>LMC_I: hash tokens → chunk keys (BLAKE3)
+    LMC_I->>WIRE: lookup request (keys) [ZMQ control]
+    WIRE->>LMC_T: lookup request
+
+    LMC_T->>DRAM: hash table lookup
+
+    alt L1 HIT (page in DRAM)
+        DRAM-->>LMC_T: page found at addr Z
+        LMC_T->>IPU_T: post RDMA Write (src=Z, dst=initiator, 256KB)
+        IPU_T->>DRAM: DMA gather (256KB)
+        DRAM-->>IPU_T: page data
+        IPU_T->>WIRE: RDMA Write (256KB)
+        WIRE->>IPU_I: data arrives
+        IPU_I->>LMC_I: DMA scatter to registered DRAM
+        LMC_I-->>vLLM: KV ready → DMA to GPU HBM
+
+    else L1 MISS → fetch from L2
+        DRAM-->>LMC_T: page not found
+        LMC_T->>SSD: io_uring read (256KB)
+        SSD-->>DRAM: page staged at addr Z (~80µs)
+        LMC_T->>DRAM: index page (now hot)
+        LMC_T->>IPU_T: post RDMA Write (src=Z, dst=initiator, 256KB)
+        IPU_T->>DRAM: DMA gather (256KB)
+        DRAM-->>IPU_T: page data
+        IPU_T->>WIRE: RDMA Write (256KB)
+        WIRE->>IPU_I: data arrives
+        IPU_I->>LMC_I: DMA scatter to registered DRAM
+        LMC_I-->>vLLM: KV ready → DMA to GPU HBM
+
+    else TOTAL MISS (not cached)
+        DRAM-->>LMC_T: not found
+        LMC_T->>WIRE: miss response [ZMQ control]
+        WIRE->>LMC_I: miss
+        LMC_I-->>vLLM: miss → recompute KV
+    end
+
+    Note over vLLM,SSD: === STORE (Pull Model) ===
+
+    vLLM->>LMC_I: store(tokens, kv_tensor)
+    LMC_I->>LMC_I: DMA from GPU HBM → host DRAM, fence
+    LMC_I->>LMC_I: IPURdmaWrapper.wrap() → (rkey, addr, 256KB)
+    LMC_I->>WIRE: write intent (hash, rkey, addr, len) [ZMQ control, 128B]
+    WIRE->>LMC_T: write intent
+
+    Note over LMC_T: Target controls timing:<br/>1. Admission check (dedup?)<br/>2. DRAM full? → evict LRU to SSD<br/>3. Allocate page at addr Y
+
+    LMC_T->>SSD: async flush evicted page (io_uring, fire-and-forget)
+    LMC_T->>DRAM: allocate 256KB at addr Y
+
+    Note over LMC_T,IPU_T: Target pulls data at its own pace
+
+    LMC_T->>IPU_T: post RDMA Read (src=initiator:addr, dst=Y, 256KB)
+    IPU_T->>WIRE: RDMA Read Request (64B)
+    WIRE->>IPU_I: RDMA Read Request
+    IPU_I->>LMC_I: DMA gather from registered DRAM
+    LMC_I-->>IPU_I: page data
+    IPU_I->>WIRE: RDMA Read Response (256KB)
+    WIRE->>IPU_T: data arrives
+    IPU_T->>DRAM: DMA scatter to addr Y (256KB)
+
+    Note over LMC_T: Data landed → index
+
+    LMC_T->>DRAM: update hash table (key → addr Y)
+    LMC_T->>WIRE: store complete [ZMQ control]
+    WIRE->>LMC_I: ACK

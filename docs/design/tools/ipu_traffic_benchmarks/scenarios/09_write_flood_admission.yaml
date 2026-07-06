@@ -1,0 +1,115 @@
+# Scenario 9: Multi-Initiator Write Flood — Admission Control Validation
+#
+# THE FIREHOSE PROBLEM (and why pull model solves it):
+#
+# At scale, multiple GPU hosts (initiators) generate new KV pages simultaneously.
+# Each inference request produces KV for all layers → burst of write intents.
+# With 10 initiators each running 10 concurrent requests on a 70B model:
+#   = 10 × 10 × 80 layers = 8000 write intents queued in a short window
+#
+# In a PUSH model, that's 8000 × 256KB = 2 GB arriving in ~milliseconds.
+# Target would need 2 GB of pre-allocated receive buffers JUST for this burst.
+# With 32KB IPU cache → catastrophic overflow.
+#
+# In the PULL model, those 8000 intents are just 8000 × 128B control messages
+# = 1 MB. The target queues them and pulls at its own pace:
+#   - Available DRAM budget → how many pulls can be in-flight
+#   - Eviction speed → sustained drain rate
+#   - The backlog grows and shrinks; it NEVER causes data loss
+#
+# This scenario validates that the target stays in control even when write
+# intents arrive faster than they can be drained.
+
+scenario: write_flood_admission
+description: "Multi-initiator write flood: validates target admission control under burst."
+
+tool: transfer_channel_benchmark
+command: |
+  # Simulate multiple initiators by running N server processes:
+  for i in $(seq 1 ${num_initiators}); do
+    python -m lmcache.tools.transfer_channel_benchmark \
+      --role server \
+      --transfer-channel-type nixl \
+      --nixl-backend UCX \
+      --url 0.0.0.0:$((7600 + i)) \
+      --buffer-size ${per_initiator_buffer} \
+      --page-size ${page_size} \
+      --object-size ${object_size} \
+      --num-source-objects ${pages_per_initiator} &
+  done
+
+  # Target (single client pulling from all initiators round-robin):
+  # NOTE: Current transfer_channel_benchmark connects to one peer.
+  # For multi-peer, run multiple client instances with different --url targets,
+  # or extend the benchmark to accept multiple peer URLs.
+  for i in $(seq 1 ${num_initiators}); do
+    python -m lmcache.tools.transfer_channel_benchmark \
+      --role client \
+      --transfer-channel-type nixl \
+      --nixl-backend UCX \
+      --url <initiator_$i>:$((7600 + i)) \
+      --listen-url 0.0.0.0:$((7700 + i)) \
+      --page-size ${page_size} \
+      --object-size ${object_size} \
+      --num-objects ${pages_per_pull_batch} \
+      --iters ${iters_per_initiator} \
+      --warmup 5 &
+  done
+  wait
+
+parameters:
+  num_initiators: 4          # 4 GPU hosts writing simultaneously
+  page_size: 262144          # 256KB
+  object_size: 262144
+  per_initiator_buffer: "2GB"
+  pages_per_initiator: 800   # 10 requests × 80 layers
+  pages_per_pull_batch: 80   # one full request per pull batch
+  iters_per_initiator: 50    # 50 requests from each initiator
+
+# What happens during the flood:
+#
+# Write intents queued:  4 initiators × burst_of_80 = 320 intents in first burst
+# Control msg bytes:     320 × 128B = 40 KB (trivial)
+# Data if pulled:        320 × 256KB = 80 MB (one burst)
+# Available DRAM:        64 GB (can hold 262K pages)
+#
+# Target's drain rate:   limited by RDMA Read bandwidth + allocation speed
+# At 8 GB/s write budget: 32K pages/sec → 320 intents drained in ~10ms
+# Backlog: brief spike of ~320, drains in <10ms. No overflow.
+#
+# Contrast with push:    80 MB arriving in <1ms at 400Gb/s wire rate.
+#                        Target must have 80 MB of receive buffers pre-posted.
+#                        With 10+ concurrent bursts from different requests: 800 MB needed.
+
+traffic_profile:
+  initiators: "${num_initiators}"
+  requests_per_initiator_concurrent: 10
+  layers_per_request: 80
+  write_intents_per_burst: 320   # 4 × 80
+  intent_burst_interval_ms: 50   # new burst every 50ms
+  sustained_intent_rate: 6400    # intents/sec across all initiators
+
+metrics:
+  primary:
+    - aggregate_pull_gbps         # total RX across all initiators
+    - max_backlog_depth           # peak queued write intents not yet pulled
+    - drain_rate_per_sec          # intents processed/sec (must exceed arrival)
+    - pull_latency_p99_us         # worst-case: intent → data landed
+    - zero_drops                  # MUST be true — no intent ever lost
+  derived:
+    - backlog_drain_time_ms: "max_backlog_depth / drain_rate_per_sec * 1000"
+    - headroom_ratio: "drain_rate_per_sec / sustained_intent_rate"  # >1 = stable
+
+pass_criteria:
+  zero_drops: "true"                # pull model guarantees no data loss
+  headroom_ratio: ">= 1.5"         # drain 50% faster than intents arrive
+  max_backlog_depth: "<= 1000"      # bounded queue (not growing forever)
+  backlog_drain_time_ms: "<= 100"   # brief burst clears in <100ms
+  pull_latency_p99_us: "<= 500"     # even worst-case completes in <500us
+
+# IPU implications:
+# - IPU never sees unexpected data (all pulls are target-initiated)
+# - DMA descriptor table sized for concurrent_pulls, NOT for burst_size
+# - If concurrent pulls = 64: only 64 × 256KB = 16 MB in-flight at once
+#   (vs. 80+ MB in push model burst)
+# - IPU 32KB cache is irrelevant: data bypasses it entirely (DMA to DRAM)

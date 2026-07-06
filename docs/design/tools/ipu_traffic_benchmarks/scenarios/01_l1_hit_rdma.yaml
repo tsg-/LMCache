@@ -1,0 +1,68 @@
+# Scenario 1: L1 DRAM Hit — RDMA Serve
+#
+# Validates: IPU DMA read from registered DRAM → 400G wire at full bandwidth.
+# All pages are pre-loaded (100% hit rate). Measures pure TX throughput.
+#
+# Maps to: Initiator issues RDMA READ → IPU serves from registered DRAM
+# This is the hot path — no SSD, no eviction, no CPU data touch.
+
+scenario: l1_hit_rdma
+description: "Serve pre-loaded KV pages over RDMA (transfer channel). Pure TX bandwidth test."
+
+tool: transfer_channel_benchmark
+command: |
+  # Server (target Xeon — pages pre-loaded in registered DRAM):
+  python -m lmcache.tools.transfer_channel_benchmark \
+    --role server \
+    --transfer-channel-type nixl \
+    --nixl-backend UCX \
+    --url 0.0.0.0:7600 \
+    --buffer-size {buffer_size} \
+    --page-size {page_size} \
+    --object-size {object_size} \
+    --num-source-objects {num_source_objects} \
+    --verify
+
+  # Client (initiator — reads pages):
+  python -m lmcache.tools.transfer_channel_benchmark \
+    --role client \
+    --transfer-channel-type nixl \
+    --nixl-backend UCX \
+    --url <server_ip>:7600 \
+    --listen-url 0.0.0.0:7601 \
+    --page-size {page_size} \
+    --object-size {object_size} \
+    --num-objects {num_objects} \
+    --iters {iters} \
+    --warmup {warmup} \
+    --verify
+
+# Per-model parameter substitution (see models/*.yaml):
+#   object_size  = per-layer page size (e.g., 256KB for Llama-3 70B FP8)
+#   page_size    = same as object_size (one page = one object)
+#   num_objects  = layers per burst (e.g., 80 for 70B)
+#   buffer_size  = capacity in registered DRAM (e.g., 64GB)
+#   num_source_objects = total unique pages in pool (models working set)
+#   iters        = number of full-burst reads (simulates inference requests)
+
+parameters:
+  page_size: "${model.page_size_bytes}"
+  object_size: "${model.page_size_bytes}"
+  num_objects: "${model.num_layers}"
+  buffer_size: "64GB"
+  num_source_objects: 4000  # ~1000 requests worth of unique pages
+  iters: 100
+  warmup: 10
+
+metrics:
+  primary:
+    - throughput_gbps        # GB/s → must approach 400Gb/s (50 GB/s) line rate
+    - latency_median_us      # per-burst (N layer reads) completion time
+    - latency_p99_us         # tail latency under sustained load
+  derived:
+    - per_layer_latency_us:  "latency_median_us / num_objects"
+    - bandwidth_utilization:  "throughput_gbps / 50.0"  # fraction of 400Gb/s
+
+pass_criteria:
+  bandwidth_utilization: ">= 0.80"  # 80% line rate minimum
+  latency_p99_us: "<= 2x latency_median_us"  # no excessive tail

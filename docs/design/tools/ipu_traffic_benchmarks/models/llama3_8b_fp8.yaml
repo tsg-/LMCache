@@ -1,0 +1,52 @@
+# Model: Llama-3.1 8B — FP8 quantized KV cache
+#
+# Smallest model in test matrix. Useful for validating benchmark tooling
+# before scaling to larger models, and for high-concurrency scenarios
+# (more users fit in same DRAM budget).
+
+model:
+  name: "meta-llama/Llama-3.1-8B-Instruct"
+  family: llama3
+
+architecture:
+  num_layers: 32
+  num_kv_heads: 8       # GQA: 8 KV heads (32 query heads / 4 groups)
+  head_size: 128
+  kv_size: 2            # key + value
+
+quantization:
+  dtype: float8_e4m3fn
+  dtype_bytes: 1
+
+chunking:
+  tokens_per_chunk: 256
+
+# Derived page sizing
+page:
+  page_size_bytes: 524288   # 2 × 8 × 128 × 1 × 256 = 512 KB (per-layer, BF16-equivalent with 2B)
+  # Correction for FP8: 2 × 8 × 128 × 1 × 256 = 524,288 bytes
+  # Wait: kv_size(2) × num_kv_heads(8) × head_size(128) × dtype_bytes(1) × tokens(256)
+  #      = 2 × 8 × 128 × 1 × 256 = 524,288 = 512 KB
+  # NOTE: This is 512KB, not 256KB. For 256KB target, use tokens_per_chunk=128.
+  page_size_bytes_alt_128t: 262144  # with tokens_per_chunk=128 → 256 KB
+
+# Full-prefix retrieval
+burst:
+  layers_per_burst: 32
+  burst_bytes: 16777216       # 32 × 512KB = 16 MB (full model, 256 tokens)
+  burst_bytes_alt_128t: 8388608  # 32 × 256KB = 8 MB
+
+# Benchmark parameters for transfer_channel_benchmark
+benchmark_params:
+  object_size: 262144         # 256KB (use 128 tokens/chunk for IPU-optimal sizing)
+  page_size: 262144
+  num_objects: 32             # one burst = 32 layer reads
+  buffer_size: "16GB"         # ~64K pages in pool
+  num_source_objects: 2000    # working set
+
+# Working set analysis
+capacity:
+  pages_per_gib: 4096         # 1 GiB / 256KB = 4096 pages
+  pages_in_64gib: 262144      # 64 GiB budget
+  requests_in_64gib: 8192     # 262144 / 32 layers = 8192 full requests cached
+  tokens_cached_64gib: 2097152  # 8192 × 256 tokens = ~2M tokens
