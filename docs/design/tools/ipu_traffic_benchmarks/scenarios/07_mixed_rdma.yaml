@@ -1,0 +1,89 @@
+# Scenario 7: Mixed Read/Write — RDMA (Steady-State)
+#
+# Validates: Sustained bandwidth under realistic read:write mix (5:1 ratio).
+# Models steady-state behavior: serving cached pages while simultaneously
+# ingesting new pages from ongoing inference.
+#
+# This is the benchmark that most closely represents production traffic.
+# IPU must handle bidirectional DMA: TX (read responses) + RX (write pulls)
+# simultaneously without either path starving.
+
+scenario: mixed_rdma
+description: "Steady-state 5:1 read:write mix over RDMA. Production-representative."
+
+tool: transfer_channel_benchmark
+command: |
+  # Mixed workload requires running read + write benchmarks concurrently.
+  # Option A: Two client processes against same server (simulates mixed traffic)
+  # Option B: Interleaved reads/writes in benchmark iterations
+  #
+  # Using Option A (concurrent processes):
+
+  # Server (target — registered DRAM pool):
+  python -m lmcache.tools.transfer_channel_benchmark \
+    --role server \
+    --transfer-channel-type nixl \
+    --nixl-backend UCX \
+    --url 0.0.0.0:7600 \
+    --buffer-size {buffer_size} \
+    --page-size {page_size} \
+    --object-size {object_size} \
+    --num-source-objects {num_source_objects}
+
+  # Read client (5 concurrent read streams):
+  for i in $(seq 1 5); do
+    python -m lmcache.tools.transfer_channel_benchmark \
+      --role client \
+      --url <server_ip>:7600 \
+      --listen-url 0.0.0.0:$((7601 + i)) \
+      --page-size {page_size} \
+      --object-size {object_size} \
+      --num-objects {num_objects} \
+      --iters {iters} &
+  done
+
+  # Write client (1 write stream — pulls from initiator into target):
+  python -m lmcache.tools.transfer_channel_benchmark \
+    --role client \
+    --url <initiator_ip>:7700 \
+    --listen-url 0.0.0.0:7610 \
+    --page-size {page_size} \
+    --object-size {object_size} \
+    --num-objects {num_objects} \
+    --iters {write_iters} &
+
+  wait
+
+parameters:
+  page_size: "${model.page_size_bytes}"
+  object_size: "${model.page_size_bytes}"
+  num_objects: "${model.num_layers}"
+  buffer_size: "64GB"
+  num_source_objects: 4000
+  iters: 200       # per read stream
+  write_iters: 40  # 200/5 = 40 → achieves 5:1 ratio
+
+traffic_profile:
+  read_write_ratio: 5:1
+  concurrent_read_streams: 5
+  concurrent_write_streams: 1
+  # Expected aggregate:
+  #   TX (reads): 5 streams × ~40 GB/s each = limited by 400Gb/s link
+  #   RX (writes): 1 stream × ~40 GB/s = ~8 GB/s (within link budget)
+  #   Net TX:RX ≈ 5:1
+
+metrics:
+  primary:
+    - aggregate_tx_gbps     # total read serving bandwidth
+    - aggregate_rx_gbps     # total write ingestion bandwidth
+    - tx_rx_ratio           # should be ~5:1
+    - read_latency_p99_us   # read tail latency under write pressure
+    - write_latency_p99_us  # write tail latency under read pressure
+  derived:
+    - read_degradation_pct: "(solo_read_throughput - mixed_read_throughput) / solo_read_throughput * 100"
+    - write_degradation_pct: "(solo_write_throughput - mixed_write_throughput) / solo_write_throughput * 100"
+
+pass_criteria:
+  tx_rx_ratio: ">= 4.0"                # must maintain read dominance
+  read_degradation_pct: "<= 15"         # reads shouldn't degrade much under writes
+  aggregate_tx_gbps: ">= 35.0"         # 70% line rate under mixed load

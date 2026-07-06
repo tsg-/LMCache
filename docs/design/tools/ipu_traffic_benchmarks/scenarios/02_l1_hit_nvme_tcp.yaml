@@ -1,0 +1,62 @@
+# Scenario 2: L1 DRAM Hit — NVMe/TCP Serve
+#
+# Validates: Target serves pre-loaded KV pages over NVMe/TCP.
+# Measures TSO efficiency — can 256KB pages be segmented and transmitted
+# without CPU touching data (TSO offload at 64KB boundaries)?
+#
+# Maps to: Initiator sends NVMe Read command → target responds with C2HData PDU
+
+scenario: l1_hit_nvme_tcp
+description: "Serve pre-loaded KV pages over NVMe/TCP. Validates TSO segmentation at 256KB."
+
+tool: storage_backend_io
+command: |
+  python benchmarks/storage_backend_io/storage_backend_io_benchmark.py \
+    --backend local_disk \
+    --num-ops {num_ops} \
+    --concurrency {concurrency} \
+    --chunk-size {chunk_size} \
+    --shape {shape} \
+    --dtype {dtype} \
+    --read-after-write \
+    --verify
+
+# Note: storage_backend_io exercises the local backend path. For true NVMe/TCP
+# traffic characterization, this config documents the EXPECTED wire behavior:
+#
+#   NVMe Read command:  72B  (RX at target)
+#   C2HData response:   256KB segmented via TSO into 4x 64KB frames (TX at target)
+#   NVMe CQE:          16B  (TX at target)
+#
+# Total TX per read: 256KB + 16B
+# Total RX per read: 72B
+# TX:RX ratio per op: ~3640:1
+
+parameters:
+  chunk_size: 256  # tokens per chunk
+  shape: "[2, 8, 256, 128]"  # kv_size, num_heads, chunk_tokens, head_size
+  dtype: "float8_e4m3fn"  # FP8 → 1 byte per element
+  num_ops: 1000
+  concurrency: 32  # models NVMe queue depth (outstanding commands)
+
+wire_model:
+  transport: nvme_tcp
+  command_capsule_bytes: 72
+  c2h_data_bytes: "${model.page_size_bytes}"
+  tso_segment_size: 65536  # 64KB TSO boundary
+  segments_per_page: "${model.page_size_bytes / 65536}"
+  cqe_bytes: 16
+  r2t_bytes: 16  # Ready-To-Transfer (write path only)
+
+metrics:
+  primary:
+    - ops_per_sec          # read completions/sec
+    - throughput_gbps      # data throughput (excluding protocol overhead)
+    - cpu_utilization      # MUST be low if TSO is working (< 10%)
+  derived:
+    - protocol_overhead_pct: "(72 + 16) / (page_size + 72 + 16) * 100"
+    - effective_bandwidth:   "throughput_gbps * (1 - protocol_overhead_pct/100)"
+
+pass_criteria:
+  cpu_utilization: "<= 0.10"  # TSO must keep CPU out of data path
+  throughput_gbps: ">= 35.0"  # 70% of 50 GB/s (TSO overhead acceptable)

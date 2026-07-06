@@ -1,0 +1,65 @@
+sequenceDiagram
+    participant vLLM as vLLM Engine<br/>(GPU Node)
+    participant CE as LMCache Engine
+    participant SM as StorageManager
+    participant L1 as LocalCPUBackend<br/>(L1 DRAM)
+    participant RB as RawBlockL2Adapter<br/>(io_uring / O_DIRECT)
+    participant K as Kernel NVMe-oF<br/>(TCP or RDMA)
+    participant JBOF as NVMe JBOF<br/>(dumb storage)
+    participant GPU as GPU Connector<br/>(DMA to HBM)
+
+    Note over vLLM,JBOF: === RETRIEVE (Cache Lookup) ===
+
+    vLLM->>CE: retrieve(tokens)
+    CE->>CE: TokenDatabase: hash tokens → chunk keys (BLAKE3)
+    CE->>SM: batched_contains(keys)
+
+    SM->>L1: batched_contains(keys)
+
+    alt L1 HIT (page in DRAM)
+        L1-->>SM: hit_chunks = N
+        SM-->>CE: block_mapping: {LocalCPUBackend: keys}
+        CE->>L1: get(keys)
+        L1-->>CE: MemoryObj (pinned DRAM buffer)
+        CE->>GPU: load → DMA to GPU HBM
+        GPU-->>vLLM: KV in HBM, resume inference
+    else L1 MISS → check L2
+        L1-->>SM: hit_chunks = 0
+        SM->>RB: submit_lookup_and_lock_task(keys)
+        RB->>RB: metadata scan (header read from device)
+
+        alt L2 HIT (page on JBOF)
+            RB-->>SM: bitmap (hits found)
+            SM-->>CE: block_mapping: {RawBlock: keys}
+            CE->>RB: submit_load_task(keys, dst_buffers)
+            RB->>K: io_uring submit (O_DIRECT read, 256KB)
+            K->>JBOF: NVMe Read Command (over TCP/RDMA)
+            JBOF-->>K: NVMe Read Response (256KB)
+            K-->>RB: completion → data in registered DRAM
+            RB-->>CE: load complete (bitmap)
+            CE->>L1: promote to L1 (optional)
+            CE->>GPU: load → DMA to GPU HBM
+            GPU-->>vLLM: KV in HBM, resume inference
+        else L2 MISS (not cached anywhere)
+            RB-->>SM: bitmap (no hits)
+            SM-->>CE: total_hit_chunks = 0
+            CE-->>vLLM: miss mask (recompute these tokens)
+            Note over vLLM: vLLM recomputes KV via forward pass
+        end
+    end
+
+    Note over vLLM,JBOF: === STORE (After KV Computation) ===
+
+    vLLM->>CE: store(tokens, kv_tensors)
+    CE->>GPU: GPU HBM → DMA to host DRAM
+    CE->>CE: hash tokens → chunk keys
+    CE->>SM: put(keys, memory_objs)
+    SM->>L1: put(keys, data) → pinned in DRAM (L1)
+
+    Note over SM,RB: Async background flush to L2
+    SM->>RB: submit_store_task(keys, data)
+    RB->>K: io_uring submit (O_DIRECT write, 256KB)
+    K->>JBOF: NVMe Write Command (over TCP/RDMA)
+    JBOF-->>K: NVMe Write Completion
+    K-->>RB: completion
+    RB-->>SM: store complete

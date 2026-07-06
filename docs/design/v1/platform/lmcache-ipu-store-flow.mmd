@@ -1,0 +1,50 @@
+%% NOTE: This diagram is superseded by lmcache-ipu-pull-model-flow.mmd
+%% which covers both Store and Retrieve in one combined diagram.
+%% Kept for Falcon-level naming detail only.
+
+sequenceDiagram
+    participant vLLM as vLLM / Bench Tool<br/>(Initiator Xeon)
+    participant F_I as MMG-400 Falcon<br/>(Initiator)
+    participant WIRE as 400GbE
+    participant F_T as MMG-400 Falcon<br/>(KV Cache Node)
+    participant LMC as LMCache Server<br/>(KV Cache Node Xeon)
+    participant DRAM as Registered DRAM<br/>(L1)
+    participant SSD as NVMe Gen5<br/>(L2)
+
+    Note over vLLM,SSD: Pull Model: Target controls when and where data arrives
+
+    vLLM->>vLLM: DMA: GPU HBM → host DRAM, fence
+    vLLM->>vLLM: IPURdmaWrapper.wrap()<br/>→ (rkey, addr, len=256KB)
+    vLLM->>LMC: write intent [ZMQ ctrl, 128B]<br/>(hash, rkey, addr, len)
+
+    Note over vLLM: NO data crosses the wire yet.<br/>Only a 128B control message.
+
+    LMC->>LMC: Admission check: duplicate?
+
+    alt DRAM full
+        LMC->>SSD: async flush evicted page (io_uring)
+        Note over SSD: fire-and-forget
+        LMC->>DRAM: free evicted slot
+    end
+
+    LMC->>DRAM: allocate 256KB page at addr Y
+
+    Note over LMC: TARGET DECIDES WHEN TO PULL
+
+    LMC->>F_T: post RDMA Read descriptor<br/>(src=initiator:addr, dst=Y, 256KB)
+    F_T->>WIRE: RDMA Read Request (64B)
+    WIRE->>F_I: RDMA Read Request
+
+    Note over F_I: Falcon serves autonomously:<br/>DMA gather from host DRAM<br/>(Initiator Xeon NOT involved)
+
+    F_I->>WIRE: RDMA Read Response (256KB)
+    WIRE->>F_T: 256KB arrives
+    F_T->>DRAM: DMA scatter to addr Y (256KB)
+
+    Note over F_T: Falcon signals completion
+
+    F_T->>LMC: completion doorbell
+    LMC->>DRAM: update hash table (key → addr Y)
+    LMC->>vLLM: store complete ACK [ZMQ ctrl]
+
+    Note over F_I,F_T: Data path: Falcon-to-Falcon, zero CPU copy<br/>Initiator Xeon: wrap() + send intent (done before pull)<br/>KV Cache Xeon: admission + alloc + post descriptor + index

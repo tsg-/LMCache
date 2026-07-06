@@ -1,0 +1,33 @@
+graph LR
+    subgraph INIT ["Initiator Node"]
+        direction TB
+        subgraph GPU_STACK [" "]
+            direction TB
+            GPU["NVIDIA GPU"]
+            HBM["HBM (L0)"]
+        end
+        CPU_I["Xeon GNR-SP"]
+        NIC_I["E835 2x200GbE"]
+        IPU_I["MMG-400"]
+    end
+
+    subgraph KV ["KV Cache Node"]
+        direction TB
+        subgraph CPU_STACK [" "]
+            direction TB
+            CPU_K["Xeon GNR-SP"]
+            DRAM["DRAM (L1)"]
+        end
+        SSD["4x NVMe Gen5 (L2)"]
+        NIC_K["E835 2x200GbE"]
+        IPU_K["MMG-400"]
+    end
+
+    NIC_I ---|"2x200GbE"| NIC_K
+    IPU_I ===|"400GbE"| IPU_K
+
+    style HBM fill:#ffcdd2,stroke:#c62828
+    style DRAM fill:#fff9c4,stroke:#f9a825
+    style SSD fill:#c8e6c9,stroke:#2e7d32
+    style GPU_STACK fill:none,stroke:none
+    style CPU_STACK fill:none,stroke:none

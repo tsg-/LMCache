@@ -1,0 +1,70 @@
+# Scenario 3: L1 Miss → SSD Fetch → DRAM → RDMA Serve
+#
+# Validates: Miss penalty when page is cold (on SSD). Measures time from
+# RDMA READ request arriving to data on wire, including SSD→DRAM staging.
+#
+# Maps to: Initiator issues RDMA READ → target misses in DRAM → SPDK fetches
+# from NVMe SSD → data staged in DRAM → IPU DMA serves to wire
+#
+# Critical for: Understanding tail latency when cache is cold or working set
+# exceeds DRAM capacity.
+
+scenario: l1_miss_rdma
+description: "Cold-path: SSD fetch + RDMA serve. Measures miss penalty latency."
+
+tool: storage_backend_io
+command: |
+  # Phase 1: Write pages to disk (populate SSD tier)
+  python benchmarks/storage_backend_io/storage_backend_io_benchmark.py \
+    --backend {backend} \
+    --num-ops {num_ops} \
+    --concurrency {write_concurrency} \
+    --chunk-size {chunk_size} \
+    --shape {shape} \
+    --dtype {dtype} \
+    --write-only
+
+  # Phase 2: Read pages back (simulates SSD→DRAM fetch on miss)
+  python benchmarks/storage_backend_io/storage_backend_io_benchmark.py \
+    --backend {backend} \
+    --num-ops {num_ops} \
+    --concurrency {read_concurrency} \
+    --chunk-size {chunk_size} \
+    --shape {shape} \
+    --dtype {dtype} \
+    --read-after-write \
+    --verify
+
+parameters:
+  backend: "rust_raw_block"  # io_uring for async SSD access
+  chunk_size: 256
+  shape: "[2, 8, 256, 128]"
+  dtype: "float8_e4m3fn"
+  num_ops: 1000
+  write_concurrency: 8   # background flush concurrency
+  read_concurrency: 32   # concurrent miss-path fetches (queue depth)
+
+# For io_uring with NVMe passthrough:
+io_uring_options:
+  use_io_uring: true
+  use_io_uring_cmd: true  # NVMe passthrough (bypasses filesystem)
+  queue_depth: 64
+
+metrics:
+  primary:
+    - read_ops_per_sec     # SSD fetch rate
+    - read_latency_avg_us  # average miss penalty
+    - read_latency_p99_us  # tail miss penalty
+    - read_throughput_gbps # SSD→DRAM bandwidth
+  derived:
+    - miss_penalty_vs_hit: "read_latency_avg_us / scenario_01_latency_median_us"
+    - ssd_bandwidth_utilization: "read_throughput_gbps / ssd_max_bandwidth"
+
+pass_criteria:
+  read_latency_avg_us: "<= 100"  # NVMe SSD read at 256KB should be < 100us
+  read_throughput_gbps: ">= 5.0"  # 8 SSDs × ~7 GB/s each, some overhead
+
+# Expected SSD configuration:
+# 8x NVMe SSDs, each ~7 GB/s sequential read
+# Aggregate: ~56 GB/s from SSD tier
+# After staging, page served via RDMA (scenario 01 latency added)

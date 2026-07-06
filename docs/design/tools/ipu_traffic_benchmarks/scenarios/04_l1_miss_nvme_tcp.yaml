@@ -1,0 +1,56 @@
+# Scenario 4: L1 Miss → SSD Fetch → DRAM → NVMe/TCP Serve
+#
+# Validates: End-to-end miss path over NVMe/TCP transport.
+# Same SSD fetch as scenario 3, but served via NVMe/TCP instead of RDMA.
+#
+# Maps to: NVMe Read command arrives → miss → SPDK fetch → C2HData response
+# Additional latency vs RDMA: NVMe command parsing + TCP segmentation
+
+scenario: l1_miss_nvme_tcp
+description: "Cold-path over NVMe/TCP: SSD fetch + TCP serve. Full miss penalty."
+
+tool: storage_backend_io
+command: |
+  python benchmarks/storage_backend_io/storage_backend_io_benchmark.py \
+    --backend {backend} \
+    --num-ops {num_ops} \
+    --concurrency {concurrency} \
+    --chunk-size {chunk_size} \
+    --shape {shape} \
+    --dtype {dtype} \
+    --read-after-write \
+    --verify
+
+parameters:
+  backend: "rust_raw_block"
+  chunk_size: 256
+  shape: "[2, 8, 256, 128]"
+  dtype: "float8_e4m3fn"
+  num_ops: 1000
+  concurrency: 32  # NVMe queue depth
+
+wire_model:
+  transport: nvme_tcp
+  # Full round-trip for a miss:
+  #   1. NVMe Read command capsule:        72B (RX)
+  #   2. Target fetches from SSD:          ~50-100us
+  #   3. C2HData PDU(s):                   256KB (TX, TSO segmented)
+  #   4. CQE:                              16B (TX)
+  total_miss_phases:
+    - {phase: "cmd_receive", dir: "rx", bytes: 72, latency_us: 2}
+    - {phase: "ssd_fetch", dir: "internal", bytes: 262144, latency_us: 80}
+    - {phase: "c2h_data", dir: "tx", bytes: 262144, latency_us: 5}
+    - {phase: "cqe", dir: "tx", bytes: 16, latency_us: 1}
+
+metrics:
+  primary:
+    - end_to_end_latency_avg_us   # command → completion
+    - end_to_end_latency_p99_us
+    - sustained_throughput_gbps   # under continuous miss load
+  derived:
+    - miss_overhead_vs_rdma: "end_to_end_latency_avg_us - scenario_03_read_latency_avg_us"
+    - nvme_tcp_overhead_us: "miss_overhead_vs_rdma"  # NVMe/TCP framing cost
+
+pass_criteria:
+  nvme_tcp_overhead_us: "<= 20"  # NVMe/TCP should add < 20us vs raw RDMA
+  sustained_throughput_gbps: ">= 4.0"  # SSD-limited, not transport-limited

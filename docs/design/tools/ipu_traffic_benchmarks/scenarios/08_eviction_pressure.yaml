@@ -1,0 +1,177 @@
+# Scenario 8: Eviction-Allocate-Pull Pipeline Under Pressure
+#
+# THE CRITICAL SERIAL CHAIN:
+#
+# When DRAM is full, every write goes through this pipeline:
+#
+#   write_intent → evict_cold_page → free_slot → allocate_for_new → rdma_read_pull → index
+#   ├── LMCache ──────────────────────────────────────────────────┤   ├── RDMA ──┤ ├── LMCache ─┤
+#
+# This is a SERIAL chain per page. The eviction and allocation are the same
+# decision loop — LMCache IS the buffer allocator. If eviction is slow,
+# the RDMA Read cannot be posted, and IPU DMA slots sit idle waiting for
+# a destination address.
+#
+# Total pipeline latency = evict + alloc + rdma_read_rtt + index
+# Each of these must be fast enough that the drain rate exceeds the intent
+# arrival rate. Otherwise the backlog grows unbounded (scenario 09 tests
+# the backlog behavior; this scenario tests the per-page pipeline speed).
+#
+# Additional concern: SSD flush for evicted pages.
+# If eviction is synchronous (wait for SSD write to complete before freeing slot),
+# the pipeline stalls for ~50-100us. If async (mark slot as "flushing" and
+# immediately allocate a different free slot), the pipeline doesn't stall but
+# free pool shrinks. This scenario tests both modes.
+
+scenario: eviction_pipeline
+description: "Full write pipeline under full DRAM: evict → alloc → pull → index."
+
+# =============================================================================
+# PHASE 1: Fill DRAM completely (establish memory pressure)
+# =============================================================================
+
+phase_1:
+  description: "Fill registered DRAM to capacity. Every subsequent write requires eviction."
+  tool: storage_backend_io
+  command: |
+    python benchmarks/storage_backend_io/storage_backend_io_benchmark.py \
+      --backend local_disk \
+      --num-ops ${fill_ops} \
+      --concurrency 16 \
+      --chunk-size ${chunk_size} \
+      --shape ${shape} \
+      --dtype ${dtype} \
+      --write-only
+
+# =============================================================================
+# PHASE 2: Sustained writes under full pressure (measures pipeline speed)
+# =============================================================================
+
+phase_2:
+  description: "Continuous writes into full DRAM. Each write triggers eviction pipeline."
+  tool: controller_benchmark
+  command: |
+    # Operation distribution models the write pipeline:
+    #   admit (50%): represents "write intent arrived, need to allocate"
+    #   evict (50%): represents "pick a cold page, free its slot"
+    # In production, admit triggers evict — they're the same decision.
+    # Here we measure their combined throughput.
+
+    python -m lmcache.tools.controller_benchmark \
+      --operation-distribution "admit:50,evict:50" \
+      --num-instances 1 \
+      --num-workers ${num_workers} \
+      --num-storage-locations ${pool_size} \
+      --num-keys ${total_keys} \
+      --duration-seconds ${duration}
+
+# =============================================================================
+# PHASE 3: Concurrent read serving during write pressure (interference test)
+# =============================================================================
+
+phase_3:
+  description: "Reads and writes simultaneously under full DRAM. Eviction must not stall reads."
+  tool: transfer_channel_benchmark
+  command: |
+    # Run read benchmark WHILE controller handles admission/eviction
+    python -m lmcache.tools.transfer_channel_benchmark \
+      --role client \
+      --url <server_ip>:7600 \
+      --listen-url 0.0.0.0:7601 \
+      --page-size ${page_size} \
+      --object-size ${object_size} \
+      --num-objects ${layers_per_burst} \
+      --iters ${read_iters}
+
+parameters:
+  # Model config
+  chunk_size: 128
+  shape: "[2, 8, 128, 128]"
+  dtype: "float8_e4m3fn"
+  page_size: 262144          # 256KB
+  object_size: 262144
+  layers_per_burst: 80
+
+  # Pressure config
+  fill_ops: 262144           # fill 64GB at 256KB/page = 262144 pages
+  pool_size: 262144          # matches DRAM capacity
+  total_keys: 500000         # 2x capacity → every write evicts
+  num_workers: 4             # concurrent write pipelines
+  duration: 60               # seconds of sustained pressure
+  read_iters: 100            # concurrent reads during pressure
+
+# =============================================================================
+# PIPELINE TIMING BREAKDOWN
+# =============================================================================
+#
+# Target per-page pipeline budget:
+#
+#   Step                    | Target    | Bottleneck if exceeded
+#   ───────────────────────────────────────────────────────────────
+#   Receive write intent    | ~1 us     | Control plane throughput
+#   Eviction decision (LRU) | ~1 us     | Policy data structure O(1)
+#   SSD flush (if sync)     | ~80 us    | NVMe write latency
+#   SSD flush (if async)    | ~0 us     | Deferred, doesn't block
+#   Buffer deallocation     | ~1 us     | Free-list popleft
+#   Buffer allocation       | ~1 us     | Free-list popleft
+#   Post RDMA Read          | ~2 us     | RDMA verb posting
+#   RDMA Read completion    | ~5 us     | Wire time (256KB / 50GB/s)
+#   Index new page          | ~1 us     | Hash table insert
+#   ───────────────────────────────────────────────────────────────
+#   Total (async flush):    | ~12 us    | 83K pages/sec pipeline capacity
+#   Total (sync flush):     | ~92 us    | 10K pages/sec (TOO SLOW)
+#
+# Required write drain rate (from traffic model):
+#   At 5:1 read:write and 200K reads/sec → 40K writes/sec
+#   → Async flush is REQUIRED. Sync flush would bottleneck at 10K.
+#
+# Implication: evicted pages go to an async flush queue (io_uring).
+# The slot is freed BEFORE the SSD write completes.
+# Risk: if flush queue grows unbounded, eventual OOM. Need backpressure
+# from flush queue back to admission control.
+
+metrics:
+  primary:
+    - pipeline_throughput_per_sec   # evict+alloc cycles completed/sec
+    - pipeline_latency_avg_us      # per-page pipeline (evict→alloc→ready)
+    - pipeline_latency_p99_us      # tail (includes SSD flush if sync)
+    - read_serve_latency_p99_us    # read tail DURING write pressure (phase 3)
+    - eviction_rate_per_sec        # evictions/sec
+    - admission_rate_per_sec       # pages admitted/sec
+    - ssd_flush_queue_depth        # pending async SSD writes
+  derived:
+    - pipeline_headroom: "pipeline_throughput / required_write_rate"
+    - read_interference_pct: "(pressured_read_p99 - solo_read_p99) / solo_read_p99 * 100"
+    - flush_queue_stability: "ssd_flush_rate >= admission_rate"  # queue bounded
+
+pass_criteria:
+  pipeline_throughput_per_sec: ">= 50000"   # must exceed 40K writes/sec requirement
+  pipeline_latency_avg_us: "<= 20"          # async flush path
+  pipeline_latency_p99_us: "<= 50"          # even tail shouldn't stall DMA
+  read_interference_pct: "<= 20"            # reads barely impacted by write evictions
+  flush_queue_stability: "true"             # SSD drain >= page arrival (bounded queue)
+
+# =============================================================================
+# WHAT THIS TELLS THE IPU TEAM
+# =============================================================================
+#
+# 1. IPU DMA stall budget:
+#    How long does IPU wait for a buffer address after write intent arrives?
+#    = pipeline_latency (evict + alloc). If > 50us, DMA is underutilized.
+#
+# 2. Concurrent DMA descriptors needed:
+#    = pipeline_latency × drain_rate
+#    At 20us × 50K/sec = 1 descriptor (barely concurrent)
+#    At 50us × 50K/sec = 2.5 descriptors
+#    Reads add: 80 per burst = need 80+ descriptors for reads
+#    Total: ~100 DMA descriptors needed simultaneously
+#
+# 3. Memory pressure doesn't affect read path:
+#    Read serves are pure DMA from DRAM → wire. Eviction runs on a different
+#    CPU core/thread. If read_interference > 20%, there's lock contention
+#    between the eviction path and the read serve path.
+#
+# 4. SSD tier is essential (not optional):
+#    Without async SSD flush, eviction latency = NVMe write latency = ~80us.
+#    That cuts pipeline throughput to 12.5K/sec — below the 40K/sec requirement.
+#    SSD flush MUST be async (fire-and-forget to io_uring queue).
