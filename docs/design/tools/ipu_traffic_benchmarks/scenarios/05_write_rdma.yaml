@@ -1,0 +1,197 @@
+# Scenario 5: Write Path — RDMA Pull Model
+#
+# THE CORE ARCHITECTURAL PROPERTY BEING VALIDATED:
+#
+# The target (LMCache) is the memory management plane. It controls WHEN and
+# WHERE data arrives. The initiator never pushes data — it announces intent,
+# and the target pulls at its own pace.
+#
+# This is NOT just a transport choice. It's a flow control architecture:
+#
+#   Push (RDMA Write from initiator):
+#     - Target has no say in timing
+#     - At 400G with many initiators: 195K writes/sec arriving unpredictably
+#     - 32KB IPU cache cannot absorb bursts
+#     - Buffer exhaustion → fabric backpressure or drops
+#
+#   Pull (RDMA Read from target):
+#     - Target decides when to pull (flow control)
+#     - Target allocates buffer BEFORE data arrives (no surprise allocation)
+#     - Rate-limited only by own DRAM allocation speed + RDMA Read bandwidth
+#     - Can queue write intents and drain at its own pace
+#
+# LMCache's role in the write path:
+#   1. Receive "write intent" control message (tiny: chunk_hash + size + src_addr)
+#   2. Decide: evict a cold page, or allocate from free pool?
+#   3. Allocate target buffer in registered DRAM
+#   4. Tell RDMA: "pull 256K from initiator into this buffer"
+#   5. Data arrives → LMCache indexes the new page
+#   6. Optionally: flush to SSD asynchronously (tiering)
+#
+# The write path and the eviction policy are the SAME decision loop.
+# LMCache IS the buffer allocator. This benchmark validates that the
+# allocate→pull pipeline sustains throughput under concurrent write intents.
+
+scenario: write_rdma_pull
+description: "Pull model: target controls write admission. Validates flow control under load."
+
+# =============================================================================
+# SUB-SCENARIO A: Raw RDMA Pull (app-level control message → RDMA Read)
+# =============================================================================
+# No NVMe layer. Lightest overhead. This is the "clean" path where:
+#   - Initiator sends a ZMQ/lightweight control message: "page X at addr Y, 256KB"
+#   - LMCache receives it, decides to pull
+#   - LMCache posts RDMA Read to its QP
+#   - Data arrives directly into pre-allocated registered buffer
+#
+# This matches LMCache's existing P2P L2 adapter pattern:
+#   submit_lookup_task() → found at peer → submit_load_task() → transfer channel READ
+
+variant_a:
+  name: raw_rdma_pull
+  transport: rdma_raw
+  tool: transfer_channel_benchmark
+  command: |
+    # Server (simulates initiator — holds data, waits for pulls):
+    python -m lmcache.tools.transfer_channel_benchmark \
+      --role server \
+      --transfer-channel-type nixl \
+      --nixl-backend UCX \
+      --url 0.0.0.0:7600 \
+      --buffer-size {initiator_buffer} \
+      --page-size {page_size} \
+      --object-size {object_size} \
+      --num-source-objects {write_queue_depth}
+
+    # Client (simulates target — pulls at its own pace):
+    python -m lmcache.tools.transfer_channel_benchmark \
+      --role client \
+      --transfer-channel-type nixl \
+      --nixl-backend UCX \
+      --url <initiator_ip>:7600 \
+      --listen-url 0.0.0.0:7601 \
+      --page-size {page_size} \
+      --object-size {object_size} \
+      --num-objects {pages_per_pull_batch} \
+      --iters {iters} \
+      --warmup {warmup} \
+      --verify
+
+  wire_model:
+    per_page:
+      - {phase: "write_intent", dir: "rx", bytes: 128, note: "app control msg"}
+      - {phase: "rdma_read_cmd", dir: "tx", bytes: 64, note: "RDMA Read posted by target"}
+      - {phase: "rdma_read_data", dir: "rx", bytes: "${model.page_size_bytes}", note: "data pulled into pre-allocated buffer"}
+    # No NVMe framing. No R2T. Just control msg + RDMA Read.
+    # Overhead per page: 192 bytes control + 256KB data.
+
+# =============================================================================
+# SUB-SCENARIO B: NVMe-oF Pull (NVMe Write cmd → RDMA Read for data)
+# =============================================================================
+# NVMe-oF layer wraps the same pull semantics:
+#   - Initiator sends NVMe Write command capsule (72B, control only, NO inline data)
+#   - Target SPDK receives command, sees "incoming write, 256K"
+#   - Target decides WHEN and WHERE:
+#     a. Allocates buffer in registered DRAM
+#     b. Posts RDMA Read to pull data from initiator's registered memory
+#   - Data arrives → target owns it → sends NVMe completion
+#
+# This adds NVMe command parsing overhead but gives standard storage semantics.
+
+variant_b:
+  name: nvme_of_pull
+  transport: nvme_rdma
+  tool: storage_backend_io
+  command: |
+    python benchmarks/storage_backend_io/storage_backend_io_benchmark.py \
+      --backend rust_raw_block \
+      --num-ops {num_ops} \
+      --concurrency {nvme_queue_depth} \
+      --chunk-size {chunk_size} \
+      --shape {shape} \
+      --dtype {dtype} \
+      --write-only
+
+  wire_model:
+    per_page:
+      - {phase: "nvme_write_cmd", dir: "rx", bytes: 72, note: "command capsule (no inline data)"}
+      - {phase: "target_allocate", dir: "internal", bytes: 0, latency_us: "evict_or_alloc", note: "LMCache decision"}
+      - {phase: "rdma_read_pull", dir: "tx", bytes: 64, note: "RDMA Read WR posted by target"}
+      - {phase: "rdma_read_data", dir: "rx", bytes: "${model.page_size_bytes}", note: "data arrives"}
+      - {phase: "nvme_cqe", dir: "tx", bytes: 16, note: "completion to initiator"}
+    # Extra overhead vs raw RDMA: NVMe cmd parsing + CQE = ~72 + 16 = 88 bytes + processing time
+
+# =============================================================================
+# PARAMETERS (shared across variants)
+# =============================================================================
+
+parameters:
+  page_size: "${model.page_size_bytes}"
+  object_size: "${model.page_size_bytes}"
+  pages_per_pull_batch: "${model.num_layers}"  # pull all layers for one request
+  initiator_buffer: "4GB"
+  write_queue_depth: 400  # outstanding write intents queued (target drains these)
+  iters: 100
+  warmup: 10
+  # For NVMe variant:
+  chunk_size: 128
+  shape: "[2, 8, 128, 128]"
+  dtype: "float8_e4m3fn"
+  num_ops: 1000
+  nvme_queue_depth: 64  # NVMe SQ depth (concurrent commands)
+
+# =============================================================================
+# WHAT THIS VALIDATES FOR IPU
+# =============================================================================
+#
+# 1. Flow control works:
+#    - Target never receives data it didn't ask for
+#    - IPU 32KB cache is irrelevant (data goes directly to registered DRAM)
+#    - No buffer exhaustion under any initiator behavior
+#
+# 2. Pull bandwidth is sufficient:
+#    - Target's RDMA Read path can saturate its share of 400G
+#    - At 5:1 read:write, writes consume ~1/6 of bandwidth = ~8 GB/s
+#    - That's ~32K pages/sec at 256KB — well within RDMA Read capability
+#
+# 3. Allocation latency doesn't bottleneck pulls:
+#    - Time from "write intent received" to "RDMA Read posted" must be < 10us
+#    - If eviction is needed, add eviction latency to that budget
+#
+# 4. Multi-initiator scaling:
+#    - Run variant_a with MULTIPLE server processes (different IPs)
+#    - Target client pulls from each in round-robin
+#    - Validates queueing: write intents accumulate, target drains at own pace
+
+metrics:
+  primary:
+    - pull_throughput_gbps        # RX data rate (data arriving at target)
+    - pull_latency_avg_us         # intent-received → data-landed
+    - pull_latency_p99_us         # tail: includes eviction when pool is tight
+    - queue_drain_rate_per_sec    # write intents processed/sec
+  derived:
+    - allocation_time_us: "pull_latency_avg_us - rdma_read_rtt_us"  # just the alloc decision
+    - backlog_depth: "write_intent_arrival_rate / queue_drain_rate"  # steady-state queue
+    - variant_overhead_us: "variant_b_latency - variant_a_latency"  # NVMe-oF cost
+
+pass_criteria:
+  pull_throughput_gbps: ">= 8.0"    # writes are 1/6 of bandwidth at 5:1 ratio
+  allocation_time_us: "<= 10"       # buffer alloc must not bottleneck
+  backlog_depth: "<= 100"           # queue should not grow unbounded
+  variant_overhead_us: "<= 15"      # NVMe-oF adds acceptable overhead vs raw
+
+# =============================================================================
+# OPEN QUESTION FOR PAT'S TEAM
+# =============================================================================
+#
+# Is the pull implemented at the NVMe-oF layer (variant_b) or raw RDMA
+# (variant_a)? This determines:
+#   - Whether SPDK is in the write-admission path (adds latency, gains standard semantics)
+#   - Whether NVMe queue depth limits concurrent pulls (SQ depth = pull concurrency)
+#   - Whether the IPU needs NVMe command parsing or just RDMA Read posting
+#
+# If raw RDMA: LMCache directly posts RDMA Reads via NIXL/UCX. Simpler.
+# If NVMe-oF: SPDK handles command parsing, LMCache integrates with SPDK buffer pool.
+#
+# BENCHMARK BOTH. Compare variant_a vs variant_b. The overhead delta answers
+# whether NVMe-oF's operational benefits justify its latency cost.

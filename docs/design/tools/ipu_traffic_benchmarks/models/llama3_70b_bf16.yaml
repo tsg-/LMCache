@@ -1,0 +1,61 @@
+# Model: Llama-3.1 70B — BF16 KV cache (no quantization)
+#
+# Stress test: 512KB per-layer pages (2x the FP8 variant). Validates IPU DMA
+# behavior with larger-than-optimal transaction sizes. Also represents
+# deployments where KV cache quantization is not used.
+
+model:
+  name: "meta-llama/Llama-3.1-70B-Instruct"
+  family: llama3
+
+architecture:
+  num_layers: 80
+  num_kv_heads: 8
+  head_size: 128
+  kv_size: 2
+
+quantization:
+  dtype: bfloat16
+  dtype_bytes: 2
+
+chunking:
+  tokens_per_chunk: 128   # keep same token count; page size doubles
+
+# Derived page sizing
+page:
+  # kv_size(2) × num_kv_heads(8) × head_size(128) × dtype_bytes(2) × tokens(128)
+  # = 2 × 8 × 128 × 2 × 128 = 524,288 = 512 KB
+  page_size_bytes: 524288
+
+# Full-prefix retrieval
+burst:
+  layers_per_burst: 80
+  burst_bytes: 41943040     # 80 × 512KB = 40 MB per request
+
+# Benchmark parameters
+benchmark_params:
+  object_size: 524288       # 512KB per-layer chunk
+  page_size: 524288
+  num_objects: 80
+  buffer_size: "64GB"
+  num_source_objects: 2000  # fewer fit in same budget
+
+# Working set analysis
+capacity:
+  pages_per_gib: 2048       # 1 GiB / 512KB
+  pages_in_64gib: 131072
+  requests_in_64gib: 1638   # half the FP8 capacity
+  tokens_cached_64gib: 209664
+
+# Traffic characteristics
+traffic:
+  # At 400Gb/s serving 512KB pages:
+  max_pages_per_sec: 100000       # 50 GB/s ÷ 512KB
+  max_bursts_per_sec: 1250        # half the FP8 request rate
+  # Implication: BF16 halves the effective request serving rate
+
+# IPU considerations:
+# - 512KB exceeds the "ideal" 128-256KB DMA window
+# - TSO will segment into 8x 64KB frames (vs 4x for FP8)
+# - May stress IPU scatter-gather descriptor tables
+# - This is the "what if they don't quantize" scenario

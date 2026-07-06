@@ -1,0 +1,59 @@
+# Scenario 6: Write Path — NVMe/TCP (R2T Pull Model)
+#
+# Validates: NVMe Write command → target issues R2T → initiator sends H2CData.
+# Same pull semantics as RDMA write but expressed in NVMe/TCP protocol.
+#
+# Maps to:
+#   1. NVMe Write command capsule arrives (72B)
+#   2. Target allocates buffer (LMCache evict/alloc decision)
+#   3. Target sends R2T (Ready-To-Transfer): "send 256KB here"
+#   4. Initiator sends H2CData PDU (256KB)
+#   5. Target sends CQE (write complete)
+#
+# The R2T mechanism is NVMe/TCP's equivalent of RDMA READ — target stays
+# in control of its DRAM, just like the RDMA pull model.
+
+scenario: write_nvme_tcp
+description: "Write path over NVMe/TCP: R2T pull model. Validates pull latency."
+
+tool: storage_backend_io
+command: |
+  python benchmarks/storage_backend_io/storage_backend_io_benchmark.py \
+    --backend {backend} \
+    --num-ops {num_ops} \
+    --concurrency {concurrency} \
+    --chunk-size {chunk_size} \
+    --shape {shape} \
+    --dtype {dtype} \
+    --write-only
+
+parameters:
+  backend: "local_disk"  # write destination (simulates target DRAM→SSD flush)
+  chunk_size: 256
+  shape: "[2, 8, 256, 128]"
+  dtype: "float8_e4m3fn"
+  num_ops: 1000
+  concurrency: 32  # NVMe queue depth for writes
+
+wire_model:
+  transport: nvme_tcp
+  per_page_write:
+    - {phase: "nvme_write_cmd", dir: "rx", bytes: 72, latency_us: 2}
+    - {phase: "r2t", dir: "tx", bytes: 16, latency_us: 1}
+    - {phase: "h2c_data", dir: "rx", bytes: "${model.page_size_bytes}", latency_us: 5}
+    - {phase: "cqe", dir: "tx", bytes: 16, latency_us: 1}
+  # Extra half-RTT vs RDMA: R2T adds one network hop before data flows
+  r2t_overhead_us: 2.5  # half RTT at rack-local distances
+
+metrics:
+  primary:
+    - write_ops_per_sec
+    - write_latency_avg_us     # includes R2T round-trip
+    - write_throughput_gbps    # RX data rate
+  derived:
+    - r2t_overhead_vs_rdma: "write_latency_avg_us - scenario_05_pull_latency_avg_us"
+    - nvme_queue_utilization: "concurrency_actual / concurrency_max"
+
+pass_criteria:
+  r2t_overhead_vs_rdma: "<= 10"  # R2T should add < 10us vs direct RDMA
+  write_ops_per_sec: ">= 5000"   # must sustain write rate for 5:1 read:write

@@ -1,0 +1,49 @@
+%% NOTE: This diagram is superseded by lmcache-ipu-pull-model-flow.mmd
+%% which covers both Store and Retrieve in one combined diagram.
+%% Kept for Falcon-level naming detail only.
+
+sequenceDiagram
+    participant vLLM as vLLM / Bench Tool<br/>(Initiator Xeon)
+    participant F_I as MMG-400 Falcon<br/>(Initiator)
+    participant WIRE as 400GbE
+    participant F_T as MMG-400 Falcon<br/>(KV Cache Node)
+    participant LMC as LMCache Server<br/>(KV Cache Node Xeon)
+    participant DRAM as Registered DRAM<br/>(L1)
+    participant SSD as NVMe Gen5<br/>(L2)
+
+    vLLM->>LMC: lookup request (keys) [ZMQ ctrl]
+    Note over vLLM: Xeon: hash tokens → keys (BLAKE3)
+
+    LMC->>DRAM: hash table lookup
+
+    alt L1 HIT (page at addr Z)
+        DRAM-->>LMC: found at addr Z
+        LMC->>F_T: post RDMA Write descriptor<br/>(src=Z, dst=initiator, 256KB)
+        F_T->>DRAM: DMA gather (256KB)
+        DRAM-->>F_T: page data
+        F_T->>WIRE: 256KB on wire
+        WIRE->>F_I: 256KB arrives
+        F_I->>vLLM: DMA scatter to registered DRAM
+        Note over vLLM: DMA to GPU HBM → resume inference
+        Note over F_T,LMC: Xeon: post descriptor + poll completion only<br/>Falcon: DMA gather + transmit (zero CPU copy)
+
+    else L1 MISS (page on SSD)
+        DRAM-->>LMC: not in DRAM
+        LMC->>SSD: io_uring read (256KB)
+        Note over SSD: ~80µs
+        SSD-->>DRAM: page staged at addr Z
+        LMC->>DRAM: index page (now hot)
+        LMC->>F_T: post RDMA Write descriptor<br/>(src=Z, dst=initiator, 256KB)
+        F_T->>DRAM: DMA gather (256KB)
+        DRAM-->>F_T: page data
+        F_T->>WIRE: 256KB on wire
+        WIRE->>F_I: 256KB arrives
+        F_I->>vLLM: DMA scatter to registered DRAM
+        Note over vLLM: DMA to GPU HBM → resume inference
+        Note over LMC,SSD: Miss penalty: ~80µs SSD + ~5µs RDMA
+
+    else TOTAL MISS (not cached)
+        DRAM-->>LMC: not found
+        LMC->>vLLM: miss response [ZMQ ctrl]
+        Note over vLLM: Recompute KV via forward pass
+    end
