@@ -54,9 +54,16 @@ page_bytes = kv_size × num_heads × head_size × dtype_bytes × tokens_per_chun
 | Llama-3.1 70B | 80 | 8 | 128 | BF16 | 256 | 1024 KB |
 | Llama-3.1 405B | 126 | 8 | 128 | FP8 | 256 | 512 KB |
 | Mixtral 8x22B | 56 | 8 | 128 | FP8 | 256 | 512 KB |
+| DeepSeek-V3 | 61 | n/a (MLA) | n/a (MLA) | FP8 | 256 | 144 KB |
 
 Note: kv_size = 2 (key + value). Page sizes shown are per-layer transfers.
 A full-prefix retrieval for a 70B model is 80 × 512KB = 40 MB (80 layer-chunks).
+
+DeepSeek-V3 uses MLA (Multi-head Latent Attention), not GQA — it caches a
+576-element compressed latent per token (shared across heads), not a
+per-head KV pair, so "KV Heads"/"Head Size" don't apply and its page size
+(144 KB) doesn't follow the `kv_size × num_heads × head_size` formula above.
+See `models/deepseek_v3_fp8.yaml` for the derivation.
 
 **IPU-optimized alternative (128 tokens/chunk → 256KB pages):** The 256KB page
 size matches the IPU DMA sweet spot (128-256KB). Benchmarks should test both
@@ -138,7 +145,8 @@ docs/design/tools/ipu_traffic_benchmarks/
 │   ├── llama3_70b_fp8.yaml
 │   ├── llama3_70b_bf16.yaml
 │   ├── llama3_405b_fp8.yaml
-│   └── mixtral_8x22b_fp8.yaml
+│   ├── mixtral_8x22b_fp8.yaml
+│   └── deepseek_v3_fp8.yaml
 ├── metrics.md
 ├── monitoring.md
 └── analysis.md
