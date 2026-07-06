@@ -115,8 +115,8 @@ class VerbsRdmaTransport:
         cap = QPCap(max_send_wr=64, max_recv_wr=1, max_send_sge=1, max_recv_sge=1)
         init_attr = QPInitAttr(
             qp_type=IBV_QPT_RC,
-            send_cq=self._cq,
-            recv_cq=self._cq,
+            scq=self._cq,
+            rcq=self._cq,
             cap=cap,
             sq_sig_all=True,
         )
