@@ -210,6 +210,13 @@ class TestPostRead:
         buf = RegisteredBuffer(addr=0x1000, length=4096, mr=mr)
         future = transport.post_read(buf, remote_addr=0x2000, rkey=5, length=4096)
         assert isinstance(future, RdmaFuture)
+        # Release the lock post_read() left held, else __del__ -> close()
+        # deadlocks re-acquiring it when transport is garbage collected.
+        wc = MagicMock()
+        wc.wr_id = transport._inflight_wr_id
+        wc.status = 0  # IBV_WC_SUCCESS
+        transport._cq.poll.return_value = [wc]
+        transport.poll_completion(future, timeout_ms=100)
 
     def test_concurrent_blocks(self, mock_pyverbs):
         transport = _make_transport(mock_pyverbs, role="target")
