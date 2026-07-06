@@ -446,7 +446,7 @@ class TestRegisterMr:
 
         mr_info = transport.register_mr(0x5000, 4096)
         call_args = mock_pyverbs.MR.call_args
-        access = call_args[0][1] if len(call_args[0]) > 1 else call_args[1].get("access", call_args[0][1])
+        access = call_args[0][2]  # MR(pd, length, access, address=...)
         assert access == 1  # LOCAL_WRITE only
 
     def test_initiator_includes_remote_read(self, mock_pyverbs):
@@ -457,7 +457,7 @@ class TestRegisterMr:
 
         mr_info = transport.register_mr(0x5000, 4096)
         call_args = mock_pyverbs.MR.call_args
-        access = call_args[0][1] if len(call_args[0]) > 1 else call_args[1].get("access", call_args[0][1])
+        access = call_args[0][2]  # MR(pd, length, access, address=...)
         assert access == 3  # LOCAL_WRITE | REMOTE_READ
 
     def test_deregister_callback_set(self, mock_pyverbs):

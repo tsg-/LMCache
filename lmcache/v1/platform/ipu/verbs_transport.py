@@ -507,4 +507,8 @@ class VerbsRdmaTransport:
                 pass
 
     def __del__(self) -> None:
-        self.close()
+        # __init__ can raise before any attribute is set (missing pyverbs,
+        # invalid role) — the partially-constructed instance is still
+        # finalized, and close() assumes _qp_lock exists.
+        if hasattr(self, "_qp_lock"):
+            self.close()
