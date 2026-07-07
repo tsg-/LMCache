@@ -1,8 +1,8 @@
 graph BT
     L0("<div style='width:480px'><b>Protocol Foundation</b><br/>RdmaTransport protocol + VerbsRdmaTransport (libibverbs backend)<br/><br/>✓ done and hardware-validated &mdash; LMCache-2g3, LMCache-9gr</div>")
     L1("<div style='width:480px'><b>Retrieve-Push &amp; Initiator Client</b><br/>post_write() for RDMA-Write retrieve push &middot; initiator thin client (ZMQ + registered DRAM)<br/><br/>post_write() ✓ done (unit-tested, not yet hardware-validated) &mdash; LMCache-zbg<br/>initiator client ● ready to start &mdash; LMCache-eow</div>")
-    L2("<div style='width:480px'><b>Server-Side Wiring</b><br/>IPURdmaWrapper plugged into the serve path<br/><br/>● unblocked, ready to start &mdash; LMCache-9ad</div>")
-    L3("<div style='width:480px'><b>Bench Harness Integration</b><br/>extend lmcache bench server with --mode ipu<br/><br/>◐ blocked on L2 &mdash; LMCache-bnw</div>")
+    L2("<div style='width:480px'><b>Server-Side Wiring</b><br/>IPUTransferModule + RdmaTransferContext (zero-copy RDMA into MemoryObj)<br/><br/>✓ done (unit-tested, not yet hardware-validated) &mdash; LMCache-9ad</div>")
+    L3("<div style='width:480px'><b>Bench Harness Integration</b><br/>extend lmcache bench server with --mode ipu<br/><br/>● unblocked, ready to start &mdash; LMCache-bnw</div>")
     L4("<div style='width:480px'><b>LMCache L1/L2 Traffic Benchmarks</b><br/>synthetic scenarios (transfer_channel_benchmark, storage_backend_io), throughput / latency<br/><br/>○ not started, blocked on L3</div>")
     SIDE("<div style='width:480px'><b>Performance Optimizations (P3)</b><br/>dynamic reconnect &middot; multi-QP striping &middot; pre-registered MR pool &middot; event-driven CQ &middot; GID/rdma_cm resolution &middot; GPUDirect retrieve path<br/><br/>● ready to start, not blocked, deprioritized &mdash; 6 issues</div>")
 
@@ -16,7 +16,6 @@ graph BT
     classDef backlog fill:#fff9c4,stroke:#f9a825,stroke-width:1px,color:#1b1b1b
 
     class L0 done
-    class L1,L2 ready
-    class L3 blocked
+    class L1,L2,L3 ready
     class L4 notstarted
     class SIDE backlog
