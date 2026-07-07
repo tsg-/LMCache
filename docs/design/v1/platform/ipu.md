@@ -289,6 +289,11 @@ No code changes needed — `chunk_size` is a server config parameter (default
     +-- rdma_wrapper.py          IPURdmaWrapper (DeviceIPCWrapper subclass)
     +-- rdma_transport.py        RdmaTransport protocol + stub implementation
     +-- verbs_transport.py       VerbsRdmaTransport (libibverbs backend via pyverbs)
+
+    lmcache/v1/multiprocess/
+    +-- modules/ipu_transfer.py  IPUTransferModule — server-side STORE/RETRIEVE
+    +-- transfer_context/
+        worker_transfer.py       RdmaTransferContext + MPTransferMode.RDMA
 ```
 
 ### IPURdmaWrapper
@@ -309,7 +314,8 @@ The wrapper carries an RDMA memory region descriptor. On the initiator side,
         shape: tuple            # Original tensor shape
         stride: tuple           # Original tensor stride
         storage_offset: int     # Storage offset
-        device_uuid: str        # Always "ipu"
+        device_uuid: str        # Always "ipu" (identifier string, not a PyTorch device
+                                #   type — tensor.device.type is always "cpu" on this path)
 
         wrap(tensor) -> IPURdmaWrapper:
             - Verify tensor is contiguous, in registered DRAM
@@ -352,15 +358,24 @@ The real implementation wraps libibverbs (or the IPU SDK equivalent) — see
 ### Integration with Existing Code
 
 No changes to:
-- `LMCacheDrivenTransferContext` (reused as-is)
-- `create_transfer_context()` factory (already dispatches by device_type)
 - Platform auto-discovery (`_discover_wrappers_once` finds the new subclass)
 - Token hasher, session manager, cache engine
 
-The only new config surface:
-- `LMCACHE_MP_TRANSFER_MODE=lmcache_driven` (already the right mode)
+New code:
+- `RdmaTransferContext` (new, in `worker_transfer.py`) — replaces
+  `LMCacheDrivenTransferContext` on the IPU path. Sends pickled
+  `IPURdmaWrapper` as the RDMA descriptor; `block_ids` is always `[]`.
+  No CUDA events, no `.to_cuda_future()`.
+- `IPUTransferModule` (new, in `modules/ipu_transfer.py`) — server-side
+  STORE/RETRIEVE handler. Zero-copy: `post_read`/`post_write` target
+  `MemoryObj.data_ptr` directly. No `REGISTER_KV_CACHE` handler needed.
+- `create_transfer_context()` now dispatches by mode string, not device type.
+
+The new config surface:
+- `LMCACHE_MP_TRANSFER_MODE=rdma` (new mode; selects `RdmaTransferContext`)
+- `supported_transfer_mode=rdma` (server config; selects `IPUTransferModule`)
 - `chunk_size=128` (existing config key)
-- RDMA transport backend selection (new env var: `LMCACHE_RDMA_TRANSPORT`)
+- RDMA transport backend selection (env var: `LMCACHE_RDMA_TRANSPORT`)
 
 
 ### DMA Fence Requirement
@@ -426,7 +441,7 @@ lmcache server \
 
 # Terminal 2: run the server_bench tool in IPU stub mode
 LMCACHE_RDMA_TRANSPORT=stub \
-LMCACHE_MP_TRANSFER_MODE=lmcache_driven \
+LMCACHE_MP_TRANSFER_MODE=rdma \
 lmcache bench server \
     --rpc-url tcp://127.0.0.1:5555 \
     --url http://127.0.0.1:8080 \
@@ -448,6 +463,7 @@ from `docs/design/tools/ipu_traffic_benchmarks/`.
 ```bash
 # On the TARGET node (Xeon storage server):
 LMCACHE_RDMA_TRANSPORT=verbs \
+LMCACHE_SUPPORTED_TRANSFER_MODE=rdma \
 lmcache server \
     --port 5555 \
     --http-port 8080 \
@@ -458,7 +474,7 @@ lmcache server \
 # On the INITIATOR node (compute host):
 # Default 256 tokens/chunk -> 512KB pages (per requirement)
 LMCACHE_RDMA_TRANSPORT=verbs \
-LMCACHE_MP_TRANSFER_MODE=lmcache_driven \
+LMCACHE_MP_TRANSFER_MODE=rdma \
 lmcache bench server \
     --rpc-url tcp://<target-ip>:5555 \
     --url http://<target-ip>:8080 \
@@ -497,7 +513,7 @@ scenario matrix, expected metrics, and monitoring setup.
 | `LMCACHE_RDMA_DEVICE`      | IB device name      | first active | Device selection             |
 | `LMCACHE_RDMA_PORT`        | integer             | `1`     | IB port number                   |
 | `LMCACHE_RDMA_GID_INDEX`   | integer             | `0`     | GID table index (RoCE)           |
-| `LMCACHE_MP_TRANSFER_MODE` | `auto`, `lmcache_driven`, `engine_driven` | `auto` | Transfer context routing |
+| `LMCACHE_MP_TRANSFER_MODE` | `auto`, `lmcache_driven`, `engine_driven`, `rdma` | `auto` | Transfer context routing (`rdma` selects `RdmaTransferContext`) |
 | `chunk_size` (server config)| integer             | 256     | Tokens per hash chunk (use 128)  |
 
 For the full env var reference (PSN, nonce, remote params, rendezvous files),
