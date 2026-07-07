@@ -16,13 +16,13 @@ Implements `RdmaTransport` protocol backed by real libibverbs via `pyverbs`
 A single `VerbsRdmaTransport` class that:
 
 - Satisfies the `RdmaTransport` protocol (register_mr, deregister_mr,
-  post_read, poll_completion, allocate_buffer, free_buffer,
+  post_read, post_write, poll_completion, allocate_buffer, free_buffer,
   release_buffer_tracking, drain_on_timeout)
 - Operates as **initiator** (exposes registered DRAM) or **target** (posts
-  RDMA Reads) based on `LMCACHE_RDMA_ROLE` env var (required, no default)
+  RDMA Reads/Writes) based on `LMCACHE_RDMA_ROLE` env var (required, no default)
 - Connects a single RC QP to one remote peer at init time
 - Uses busy-poll CQ for completion with wr_id-based future dispatch
-- Serialized usage: caller must poll_completion before next post_read
+- Serialized usage: caller must poll_completion before the next posted operation
 - Falls back gracefully when pyverbs is not installed
 
 
@@ -33,7 +33,6 @@ A single `VerbsRdmaTransport` class that:
 - Event-driven CQ (LMCache-kyc)
 - GID resolution / rdma_cm (LMCache-ztb)
 - Pre-registered buffer pool (LMCache-br4)
-- RDMA Write / post_write (LMCache-zbg)
 
 
 ## Environment Variables
@@ -108,6 +107,38 @@ def post_read(
   `allocate_buffer()` directly.
 - Design doc `docs/design/v1/platform/ipu.md` "RdmaTransport Protocol" section:
   updated to show new signature.
+
+
+### post_write (LMCache-zbg)
+
+Adds RDMA Write for the retrieve push path: the target posts a Write into
+the initiator's registered DRAM instead of the initiator posting a Read
+against the target (see `ipu.md` "Data Flow — Retrieve Path"). Mirrors
+`post_read`'s lock/future/wr_id bookkeeping exactly; only the opcode and
+transfer direction differ:
+
+```python
+def post_write(
+    self,
+    local_buf: RegisteredBuffer,
+    remote_addr: int,
+    rkey: int,
+    length: int,
+) -> RdmaFuture:
+    if self._role != "target":
+        raise RuntimeError("post_write only valid for target role")
+    # same lock/future/wr_id setup as post_read, but:
+    wr = SendWR(wr_id=wr_id, opcode=IBV_WR_RDMA_WRITE, num_sge=1, sg=[sge])
+    wr.set_wr_rdma(rkey=rkey, addr=remote_addr)
+    self._qp.post_send(wr)
+```
+
+`poll_completion` and `drain_on_timeout` are reused unchanged — completion
+dispatch is by `wr_id` and is opcode-agnostic.
+
+Enabling target-initiated writes into the initiator's MR requires the
+initiator to register with `REMOTE_WRITE` in addition to `REMOTE_READ`
+(see "Access Flags by Role" below).
 
 
 ### Class Structure
@@ -221,8 +252,9 @@ RESET ─── ibv_modify_qp(INIT) ──► INIT
       qp_state        = IBV_QPS_INIT
       pkey_index       = 0
       port_num         = <LMCACHE_RDMA_PORT>
-      qp_access_flags  = IBV_ACCESS_REMOTE_READ | IBV_ACCESS_LOCAL_WRITE
-                         (initiator adds REMOTE_READ; target: LOCAL_WRITE only)
+      qp_access_flags  = IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE |
+                         IBV_ACCESS_LOCAL_WRITE
+                         (initiator adds REMOTE_READ | REMOTE_WRITE; target: LOCAL_WRITE only)
 
 INIT ──── ibv_modify_qp(RTR) ───► RTR
     attr_mask: QP_STATE | AV | PATH_MTU | DEST_QPN | RQ_PSN |
@@ -264,9 +296,10 @@ RTR ───── ibv_modify_qp(RTS) ───► RTS
 
 | Method | `target` | `initiator` |
 |--------|----------|-------------|
-| `register_mr` | ibv_reg_mr (LOCAL_WRITE) | ibv_reg_mr (REMOTE_READ \| LOCAL_WRITE) |
+| `register_mr` | ibv_reg_mr (LOCAL_WRITE) | ibv_reg_mr (REMOTE_READ \| REMOTE_WRITE \| LOCAL_WRITE) |
 | `deregister_mr` | ibv_dereg_mr | ibv_dereg_mr |
 | `post_read` | ibv_post_send(RDMA_READ) | raises RuntimeError |
+| `post_write` | ibv_post_send(RDMA_WRITE) | raises RuntimeError |
 | `poll_completion` | busy-poll ibv_poll_cq | raises RuntimeError |
 | `allocate_buffer` | mmap + register_mr | mmap + register_mr |
 | `free_buffer` | deregister + munmap | deregister + munmap |
@@ -274,10 +307,11 @@ RTR ───── ibv_modify_qp(RTS) ───► RTS
 
 ### Access Flags by Role
 
-- **Initiator** registers MRs with `REMOTE_READ | LOCAL_WRITE`. No
-  REMOTE_WRITE — RDMA Write is out of scope (issue 9).
+- **Initiator** registers MRs with `REMOTE_READ | REMOTE_WRITE | LOCAL_WRITE`
+  — REMOTE_WRITE grants the target permission to push data via
+  `post_write` (LMCache-zbg) into the initiator's registered DRAM.
 - **Target** registers local buffers with `LOCAL_WRITE` only (data lands
-  here via the posted Read).
+  here via the posted Read, or is sourced from here for the posted Write).
 
 
 ### Buffer Allocation and Ownership
@@ -624,8 +658,8 @@ try:
     from pyverbs.wr import SendWR, SGE
     from pyverbs.enums import (
         IBV_QPT_RC, IBV_QPS_INIT, IBV_QPS_RTR, IBV_QPS_RTS, IBV_QPS_ERR,
-        IBV_WR_RDMA_READ, IBV_WC_SUCCESS,
-        IBV_ACCESS_LOCAL_WRITE, IBV_ACCESS_REMOTE_READ,
+        IBV_WR_RDMA_READ, IBV_WR_RDMA_WRITE, IBV_WC_SUCCESS,
+        IBV_ACCESS_LOCAL_WRITE, IBV_ACCESS_REMOTE_READ, IBV_ACCESS_REMOTE_WRITE,
         IBV_MTU_4096,
     )
     from pyverbs.addr import AHAttr, GlobalRoute
@@ -717,7 +751,8 @@ Called by `__del__` as safety net. Tests should call `close()` explicitly.
 - `get_rdma_transport()` returns `VerbsRdmaTransport` when
   `LMCACHE_RDMA_TRANSPORT=verbs` and pyverbs is available
 - `LMCACHE_RDMA_ROLE` unset → immediate ValueError (fail fast)
-- Initiator role: `register_mr` succeeds with REMOTE_READ, `post_read` raises
+- Initiator role: `register_mr` succeeds with REMOTE_READ \| REMOTE_WRITE,
+  `post_read`/`post_write` raise
 - Target role: full `post_read` → `poll_completion` → data landed flow
 - Timeout path: QP transitions to ERROR, buffers safe to free after drain
 - MR deregistration: tensor GC triggers deregister_mr

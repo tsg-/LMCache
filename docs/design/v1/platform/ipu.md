@@ -335,6 +335,7 @@ separately:
         def register_mr(buffer_ptr, length) -> MrInfo
         def deregister_mr(mr: MrInfo) -> None
         def post_read(local_buf: RegisteredBuffer, remote_addr, rkey, length) -> RdmaFuture
+        def post_write(local_buf: RegisteredBuffer, remote_addr, rkey, length) -> RdmaFuture
         def poll_completion(future: RdmaFuture, timeout_ms) -> bool
         def allocate_buffer(length) -> RegisteredBuffer
         def free_buffer(buf: RegisteredBuffer) -> None
@@ -667,8 +668,9 @@ sequenceDiagram
 
 The `RdmaTransport` protocol abstraction already isolates the transport layer.
 An IPT backend would implement the same interface (`register_mr`, `post_read`,
-`poll_completion`) but backed by IPT program calls rather than libibverbs. The
-`IPURdmaWrapper` and `LMCacheDrivenTransferContext` layers remain unchanged.
+`post_write`, `poll_completion`) but backed by IPT program calls rather than
+libibverbs. The `IPURdmaWrapper` and `LMCacheDrivenTransferContext` layers
+remain unchanged.
 
 **Status:** Under patent by Anjali's team. Integration depends on IPT SDK
 availability and Falcon program toolchain access. Current implementation
@@ -678,10 +680,10 @@ proceeds with standard RDMA verbs; IPT is a drop-in replacement at the
 
 ## Open Questions
 
-1. **Retrieve path direction**: Should target push (RDMA Write to initiator)
-   or should initiator pull (RDMA Read from target)? Both work with symmetric
-   IPU. Push is simpler (target controls both directions); pull keeps the
-   "consumer controls timing" invariant.
+1. **Retrieve path direction** (resolved): target pushes via RDMA Write
+   (`post_write`, LMCache-zbg) rather than initiator pulling via RDMA Read.
+   Push keeps the target in control of both directions, matching the store
+   path's "target controls admission timing" invariant.
 
 2. **MR lifetime management**: Should we pre-register the entire KV pool as
    one large MR at startup, or register per-chunk on demand? Per-chunk adds

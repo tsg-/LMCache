@@ -87,6 +87,16 @@ class RdmaTransport(Protocol):
         """Post an RDMA Read work request."""
         ...
 
+    def post_write(
+        self,
+        local_buf: RegisteredBuffer,
+        remote_addr: int,
+        rkey: int,
+        length: int,
+    ) -> RdmaFuture:
+        """Post an RDMA Write work request."""
+        ...
+
     def poll_completion(self, future: RdmaFuture, timeout_ms: int = 5000) -> bool:
         """Wait for an RDMA operation to complete."""
         ...
@@ -121,9 +131,9 @@ class _CtypesBackingWrapper:
 class StubRdmaTransport:
     """Local-memory stub for testing without RDMA hardware.
 
-    Simulates RDMA Read by doing a direct memcpy from the source address
-    to the destination address within the same process (or across processes
-    sharing the same address space via mmap).
+    Simulates RDMA Read and Write by doing a direct memcpy between the
+    source and destination addresses within the same process (or across
+    processes sharing the same address space via mmap).
     """
 
     def __init__(self) -> None:
@@ -162,6 +172,22 @@ class StubRdmaTransport:
         logger.debug(
             "StubRDMA: read %d bytes from 0x%x (rkey=%d) to 0x%x",
             length, remote_addr, rkey, local_buf.addr,
+        )
+        return future
+
+    def post_write(
+        self,
+        local_buf: RegisteredBuffer,
+        remote_addr: int,
+        rkey: int,
+        length: int,
+    ) -> RdmaFuture:
+        future = RdmaFuture()
+        ctypes.memmove(remote_addr, local_buf.addr, length)
+        future.set_complete(success=True)
+        logger.debug(
+            "StubRDMA: write %d bytes from 0x%x to 0x%x (rkey=%d)",
+            length, local_buf.addr, remote_addr, rkey,
         )
         return future
 

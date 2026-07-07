@@ -39,9 +39,11 @@ try:
         IBV_QPS_RTS,
         IBV_QPS_ERR,
         IBV_WR_RDMA_READ,
+        IBV_WR_RDMA_WRITE,
         IBV_WC_SUCCESS,
         IBV_ACCESS_LOCAL_WRITE,
         IBV_ACCESS_REMOTE_READ,
+        IBV_ACCESS_REMOTE_WRITE,
         IBV_QP_STATE,
         IBV_QP_PKEY_INDEX,
         IBV_QP_PORT,
@@ -95,8 +97,9 @@ def _gid_to_hex(gid: str | bytes) -> str:
 class VerbsRdmaTransport:
     """RdmaTransport implementation backed by libibverbs via pyverbs.
 
-    Supports both initiator (exposes registered DRAM for remote reads) and
-    target (posts RDMA Reads to pull data) roles.
+    Supports both initiator (exposes registered DRAM for remote reads and
+    writes) and target (posts RDMA Reads to pull data, or RDMA Writes to
+    push data) roles.
     """
 
     def __init__(
@@ -281,7 +284,7 @@ class VerbsRdmaTransport:
     def _modify_to_init(self) -> None:
         access = IBV_ACCESS_LOCAL_WRITE
         if self._role == "initiator":
-            access |= IBV_ACCESS_REMOTE_READ
+            access |= IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE
 
         attr = QPAttr()
         attr.qp_state = IBV_QPS_INIT
@@ -343,7 +346,7 @@ class VerbsRdmaTransport:
         """Register a memory region for RDMA access."""
         access = IBV_ACCESS_LOCAL_WRITE
         if self._role == "initiator":
-            access |= IBV_ACCESS_REMOTE_READ
+            access |= IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE
         mr_obj = MR(self._pd, length, access, address=buffer_ptr)
         mr_info = MrInfo(
             rkey=mr_obj.rkey,
@@ -395,6 +398,62 @@ class VerbsRdmaTransport:
                 lkey=local_buf.mr.handle.lkey,
             )
             wr = SendWR(wr_id=wr_id, opcode=IBV_WR_RDMA_READ, num_sge=1, sg=[sge])
+            wr.set_wr_rdma(rkey=rkey, addr=remote_addr)
+            self._qp.post_send(wr)
+            return future
+        except BaseException:
+            self._inflight_future = None
+            self._qp_lock.release()
+            raise
+
+    def post_write(
+        self,
+        local_buf: RegisteredBuffer,
+        remote_addr: int,
+        rkey: int,
+        length: int,
+    ) -> RdmaFuture:
+        """Post an RDMA Write work request, pushing local data to the peer.
+
+        Valid for the target role only: the target pushes bytes from
+        ``local_buf`` into the initiator's registered DRAM at
+        ``remote_addr``. Acquires ``_qp_lock``, which is held until
+        ``poll_completion`` (or ``drain_on_timeout`` on a timeout) releases
+        it -- callers must not post another operation before that.
+
+        Args:
+            local_buf: Registered local buffer holding the source bytes.
+            remote_addr: Virtual address of the destination MR on the peer.
+            rkey: Remote key authorizing access to the destination MR.
+            length: Number of bytes to write.
+
+        Returns:
+            An `RdmaFuture` that completes once the Write is acknowledged.
+
+        Raises:
+            RuntimeError: If called on the initiator role, or if the
+                transport is closed or drained.
+        """
+        if self._role != "target":
+            raise RuntimeError("post_write only valid for target role")
+
+        self._qp_lock.acquire()
+        try:
+            if self._closed or self._drained:
+                raise RuntimeError("transport is closed or drained")
+
+            future = RdmaFuture()
+            wr_id = self._next_wr_id
+            self._next_wr_id += 1
+            self._inflight_wr_id = wr_id
+            self._inflight_future = future
+
+            sge = SGE(
+                addr=local_buf.addr,
+                length=length,
+                lkey=local_buf.mr.handle.lkey,
+            )
+            wr = SendWR(wr_id=wr_id, opcode=IBV_WR_RDMA_WRITE, num_sge=1, sg=[sge])
             wr.set_wr_rdma(rkey=rkey, addr=remote_addr)
             self._qp.post_send(wr)
             return future

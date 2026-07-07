@@ -33,9 +33,11 @@ def mock_pyverbs(monkeypatch):
     mock_enums.IBV_QPS_RTS = 3
     mock_enums.IBV_QPS_ERR = 5
     mock_enums.IBV_WR_RDMA_READ = 12
+    mock_enums.IBV_WR_RDMA_WRITE = 13
     mock_enums.IBV_WC_SUCCESS = 0
     mock_enums.IBV_ACCESS_LOCAL_WRITE = 1
     mock_enums.IBV_ACCESS_REMOTE_READ = 2
+    mock_enums.IBV_ACCESS_REMOTE_WRITE = 4
     mock_enums.IBV_QP_STATE = 1
     mock_enums.IBV_QP_PKEY_INDEX = 2
     mock_enums.IBV_QP_PORT = 4
@@ -88,9 +90,11 @@ def mock_pyverbs(monkeypatch):
     monkeypatch.setattr(vt_mod, "IBV_QPS_RTS", 3)
     monkeypatch.setattr(vt_mod, "IBV_QPS_ERR", 5)
     monkeypatch.setattr(vt_mod, "IBV_WR_RDMA_READ", 12)
+    monkeypatch.setattr(vt_mod, "IBV_WR_RDMA_WRITE", 13)
     monkeypatch.setattr(vt_mod, "IBV_WC_SUCCESS", 0)
     monkeypatch.setattr(vt_mod, "IBV_ACCESS_LOCAL_WRITE", 1)
     monkeypatch.setattr(vt_mod, "IBV_ACCESS_REMOTE_READ", 2)
+    monkeypatch.setattr(vt_mod, "IBV_ACCESS_REMOTE_WRITE", 4)
     monkeypatch.setattr(vt_mod, "IBV_QP_STATE", 1)
     monkeypatch.setattr(vt_mod, "IBV_QP_PKEY_INDEX", 2)
     monkeypatch.setattr(vt_mod, "IBV_QP_PORT", 4)
@@ -199,6 +203,14 @@ class TestRoleValidation:
         with pytest.raises(RuntimeError, match="target role"):
             transport.post_read(buf, remote_addr=0x2000, rkey=5, length=4096)
 
+    def test_initiator_post_write_raises(self, mock_pyverbs):
+        transport = _make_transport(mock_pyverbs, role="initiator")
+        from lmcache.v1.platform.ipu.rdma_transport import RegisteredBuffer, MrInfo
+        mr = MrInfo(rkey=1, addr=0x1000, length=4096, handle=MagicMock())
+        buf = RegisteredBuffer(addr=0x1000, length=4096, mr=mr)
+        with pytest.raises(RuntimeError, match="target role"):
+            transport.post_write(buf, remote_addr=0x2000, rkey=5, length=4096)
+
 
 class TestPostRead:
     def test_returns_future(self, mock_pyverbs):
@@ -223,6 +235,79 @@ class TestPostRead:
         buf = RegisteredBuffer(addr=0x1000, length=4096, mr=mr)
 
         future = transport.post_read(buf, remote_addr=0x2000, rkey=5, length=4096)
+
+        blocked = threading.Event()
+        acquired = threading.Event()
+
+        def try_acquire():
+            blocked.set()
+            transport._qp_lock.acquire()
+            acquired.set()
+            transport._qp_lock.release()
+
+        t = threading.Thread(target=try_acquire)
+        t.start()
+        blocked.wait(timeout=1.0)
+        time.sleep(0.05)
+        assert not acquired.is_set()
+
+        transport._inflight_future.set_complete(success=True)
+        transport._inflight_future = None
+        transport._qp_lock.release()
+
+        t.join(timeout=1.0)
+        assert acquired.is_set()
+
+
+class TestPostWrite:
+    def test_returns_future(self, mock_pyverbs):
+        transport = _make_transport(mock_pyverbs, role="target")
+        from lmcache.v1.platform.ipu.rdma_transport import RegisteredBuffer, MrInfo, RdmaFuture
+        mr = MrInfo(rkey=1, addr=0x1000, length=4096, handle=MagicMock())
+        buf = RegisteredBuffer(addr=0x1000, length=4096, mr=mr)
+        future = transport.post_write(buf, remote_addr=0x2000, rkey=5, length=4096)
+        assert isinstance(future, RdmaFuture)
+        # Release the lock post_write() left held, else __del__ -> close()
+        # deadlocks re-acquiring it when transport is garbage collected.
+        wc = MagicMock()
+        wc.wr_id = transport._inflight_wr_id
+        wc.status = 0  # IBV_WC_SUCCESS
+        transport._cq.poll.return_value = (1, [wc])
+        transport.poll_completion(future, timeout_ms=100)
+
+    def test_uses_rdma_write_opcode(self, mock_pyverbs):
+        transport = _make_transport(mock_pyverbs, role="target")
+        from lmcache.v1.platform.ipu.rdma_transport import RegisteredBuffer, MrInfo
+        lkey_mock = MagicMock()
+        lkey_mock.lkey = 77
+        mr = MrInfo(rkey=1, addr=0x1000, length=4096, handle=lkey_mock)
+        buf = RegisteredBuffer(addr=0x1000, length=4096, mr=mr)
+        future = transport.post_write(buf, remote_addr=0x2000, rkey=5, length=4096)
+
+        wr_call = mock_pyverbs.SendWR.call_args
+        assert wr_call.kwargs["opcode"] == 13  # IBV_WR_RDMA_WRITE
+
+        sge_call = mock_pyverbs.SGE.call_args
+        assert sge_call.kwargs["addr"] == 0x1000
+        assert sge_call.kwargs["length"] == 4096
+        assert sge_call.kwargs["lkey"] == 77
+
+        wr_mock = mock_pyverbs.SendWR.return_value
+        wr_mock.set_wr_rdma.assert_called_once_with(rkey=5, addr=0x2000)
+
+        wc = MagicMock()
+        wc.wr_id = transport._inflight_wr_id
+        wc.status = 0
+        transport._cq.poll.return_value = (1, [wc])
+        transport.poll_completion(future, timeout_ms=100)
+
+    def test_concurrent_blocks(self, mock_pyverbs):
+        transport = _make_transport(mock_pyverbs, role="target")
+        from lmcache.v1.platform.ipu.rdma_transport import RegisteredBuffer, MrInfo
+        mr = MrInfo(rkey=1, addr=0x1000, length=4096, handle=MagicMock())
+        buf = RegisteredBuffer(addr=0x1000, length=4096, mr=mr)
+
+        future = transport.post_write(buf, remote_addr=0x2000, rkey=5, length=4096)
 
         blocked = threading.Event()
         acquired = threading.Event()
@@ -447,7 +532,7 @@ class TestRegisterMr:
         access = call_args[0][2]  # MR(pd, length, access, address=...)
         assert access == 1  # LOCAL_WRITE only
 
-    def test_initiator_includes_remote_read(self, mock_pyverbs):
+    def test_initiator_includes_remote_read_and_write(self, mock_pyverbs):
         transport = _make_transport(mock_pyverbs, role="initiator")
         mr_mock = MagicMock()
         mr_mock.rkey = 100
@@ -456,7 +541,7 @@ class TestRegisterMr:
         mr_info = transport.register_mr(0x5000, 4096)
         call_args = mock_pyverbs.MR.call_args
         access = call_args[0][2]  # MR(pd, length, access, address=...)
-        assert access == 3  # LOCAL_WRITE | REMOTE_READ
+        assert access == 7  # LOCAL_WRITE | REMOTE_READ | REMOTE_WRITE
 
     def test_deregister_callback_set(self, mock_pyverbs):
         transport = _make_transport(mock_pyverbs, role="target")
@@ -598,6 +683,16 @@ class TestClose:
         buf = RegisteredBuffer(addr=0x1000, length=4096, mr=mr)
         with pytest.raises(RuntimeError, match="closed or drained"):
             transport.post_read(buf, remote_addr=0x2000, rkey=5, length=4096)
+
+    def test_post_write_after_close_raises(self, mock_pyverbs):
+        transport = _make_transport(mock_pyverbs, role="target")
+        transport.close()
+
+        from lmcache.v1.platform.ipu.rdma_transport import RegisteredBuffer, MrInfo
+        mr = MrInfo(rkey=1, addr=0x1000, length=4096, handle=MagicMock())
+        buf = RegisteredBuffer(addr=0x1000, length=4096, mr=mr)
+        with pytest.raises(RuntimeError, match="closed or drained"):
+            transport.post_write(buf, remote_addr=0x2000, rkey=5, length=4096)
 
     def test_close_idempotent(self, mock_pyverbs):
         transport = _make_transport(mock_pyverbs, role="target")

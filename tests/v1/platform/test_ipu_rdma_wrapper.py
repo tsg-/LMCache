@@ -212,3 +212,30 @@ class TestBufferLifetime:
         # May or may not get same data_ptr, but if it does, rkey must differ
         if w2.remote_addr == w1.remote_addr:
             assert w2.rkey != rkey1
+
+
+class TestPostWrite:
+    """StubRdmaTransport.post_write() pushes local -> remote via memcpy."""
+
+    def test_write_copies_local_to_remote(self, _isolate_transport):
+        transport = _isolate_transport
+        src = torch.randn(16, dtype=torch.float32)
+        dst = torch.zeros(16, dtype=torch.float32)
+
+        src_nbytes = src.numel() * src.element_size()
+        dst_nbytes = dst.numel() * dst.element_size()
+        local_mr = transport.register_mr(src.data_ptr(), src_nbytes)
+        remote_mr = transport.register_mr(dst.data_ptr(), dst_nbytes)
+
+        from lmcache.v1.platform.ipu.rdma_transport import RegisteredBuffer
+
+        future = transport.post_write(
+            local_buf=RegisteredBuffer(
+                addr=src.data_ptr(), length=src_nbytes, mr=local_mr
+            ),
+            remote_addr=dst.data_ptr(),
+            rkey=remote_mr.rkey,
+            length=src_nbytes,
+        )
+        assert transport.poll_completion(future, timeout_ms=100)
+        assert torch.equal(dst, src)
