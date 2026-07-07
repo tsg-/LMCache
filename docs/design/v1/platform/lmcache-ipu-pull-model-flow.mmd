@@ -12,19 +12,22 @@ sequenceDiagram
 
     vLLM->>LMC_I: retrieve(tokens)
     LMC_I->>LMC_I: hash tokens → chunk keys (BLAKE3)
-    LMC_I->>WIRE: lookup request (keys) [ZMQ control]
-    WIRE->>LMC_T: lookup request
+    LMC_I->>LMC_I: allocate dest buffer in host DRAM<br/>IPURdmaWrapper.wrap() → (dst_rkey, dst_addr, 256KB)
+    LMC_I->>WIRE: retrieve request (keys + dst descriptor) [ZMQ control]
+    WIRE->>LMC_T: retrieve request
 
     LMC_T->>DRAM: hash table lookup
 
     alt L1 HIT (page in DRAM)
         DRAM-->>LMC_T: page found at addr Z
-        LMC_T->>IPU_T: post RDMA Write (src=Z, dst=initiator, 256KB)
+        LMC_T->>IPU_T: post RDMA Write (src=Z, dst=dst_addr, rkey=dst_rkey, 256KB)
         IPU_T->>DRAM: DMA gather (256KB)
         DRAM-->>IPU_T: page data
         IPU_T->>WIRE: RDMA Write (256KB)
         WIRE->>IPU_I: data arrives
-        IPU_I->>LMC_I: DMA scatter to registered DRAM
+        IPU_I->>LMC_I: DMA scatter to dest buffer (addr dst_addr)
+        LMC_T->>WIRE: retrieve complete ACK [ZMQ control]
+        WIRE->>LMC_I: ACK
         LMC_I-->>vLLM: KV ready → DMA to GPU HBM
 
     else L1 MISS → fetch from L2
@@ -32,12 +35,14 @@ sequenceDiagram
         LMC_T->>SSD: io_uring read (256KB)
         SSD-->>DRAM: page staged at addr Z (~80µs)
         LMC_T->>DRAM: index page (now hot)
-        LMC_T->>IPU_T: post RDMA Write (src=Z, dst=initiator, 256KB)
+        LMC_T->>IPU_T: post RDMA Write (src=Z, dst=dst_addr, rkey=dst_rkey, 256KB)
         IPU_T->>DRAM: DMA gather (256KB)
         DRAM-->>IPU_T: page data
         IPU_T->>WIRE: RDMA Write (256KB)
         WIRE->>IPU_I: data arrives
-        IPU_I->>LMC_I: DMA scatter to registered DRAM
+        IPU_I->>LMC_I: DMA scatter to dest buffer (addr dst_addr)
+        LMC_T->>WIRE: retrieve complete ACK [ZMQ control]
+        WIRE->>LMC_I: ACK
         LMC_I-->>vLLM: KV ready → DMA to GPU HBM
 
     else TOTAL MISS (not cached)

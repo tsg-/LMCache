@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from typing import ClassVar
 import ctypes
+import itertools
+import os
 import threading
 import weakref
 
@@ -26,6 +28,7 @@ from lmcache.v1.platform.base_ipc_wrapper import DeviceIPCWrapper
 from lmcache.v1.platform.ipu.rdma_transport import (
     MrInfo,
     RegisteredBuffer,
+    StubRdmaTransport,
     get_rdma_transport,
 )
 
@@ -34,6 +37,13 @@ logger = init_logger(__name__)
 
 _REGISTERED_MRS: dict[int, tuple[weakref.ref, MrInfo]] = {}
 _MR_LOCK = threading.Lock()
+
+# SHM migration state for stub backend cross-process support.
+_SHM_COUNTER = itertools.count()
+_SHM_PREFIX = "/lmcache_rdma_"
+# Keyed by id(tensor) → (weakref to tensor, shm_name).
+_SHM_MIGRATED: dict[int, tuple[weakref.ref, str]] = {}
+_SHM_MIGRATED_LOCK = threading.Lock()
 
 
 def _deregister_on_gc(data_ptr: int, mr: MrInfo) -> None:
@@ -71,6 +81,12 @@ class IPURdmaWrapper(DeviceIPCWrapper):
     def wrap(cls, tensor: torch.Tensor) -> "IPURdmaWrapper":
         """Register the tensor's backing memory as an RDMA MR and wrap.
 
+        When the active transport is :class:`StubRdmaTransport`, the
+        tensor's storage is first migrated to a POSIX SHM segment so that
+        a remote process can map the same physical pages.  The SHM segment
+        name is stored in the wrapper and travels across ZMQ so the server
+        can call :meth:`StubRdmaTransport.map_remote_mr`.
+
         Args:
             tensor: A contiguous tensor in IPU-registered host DRAM.
 
@@ -80,11 +96,96 @@ class IPURdmaWrapper(DeviceIPCWrapper):
         if not tensor.is_contiguous():
             raise ValueError("IPURdmaWrapper requires a contiguous tensor")
 
+        transport = get_rdma_transport()
+        shm_name: str = ""
+
+        if isinstance(transport, StubRdmaTransport):
+            tensor, shm_name = cls._migrate_to_shm(tensor)
+
         data_ptr = tensor.data_ptr()
         nbytes = tensor.numel() * tensor.element_size()
 
         mr_info = cls._get_or_register_mr(tensor, data_ptr, nbytes)
-        return cls(tensor, mr_info)
+        wrapper = cls(tensor, mr_info)
+        wrapper.shm_name = shm_name
+        return wrapper
+
+    @classmethod
+    def _migrate_to_shm(cls, tensor: torch.Tensor) -> tuple[torch.Tensor, str]:
+        """Migrate tensor storage to a named POSIX SHM segment.
+
+        Idempotent: if the same tensor object has already been migrated,
+        returns the existing SHM name without re-creating the segment.
+
+        Returns the (now SHM-backed) tensor and the SHM segment name.
+        """
+        from lmcache.v1.multiprocess.posix_shm import (
+            shm_create_readwrite,
+            shm_munmap,
+            shm_unlink,
+        )
+
+        nbytes = tensor.numel() * tensor.element_size()
+        if nbytes == 0:
+            return tensor, ""
+
+        tid = id(tensor)
+        with _SHM_MIGRATED_LOCK:
+            cached = _SHM_MIGRATED.get(tid)
+            if cached is not None:
+                ref, cached_name = cached
+                if ref() is tensor:
+                    return tensor, cached_name
+                _SHM_MIGRATED.pop(tid, None)
+
+        shm_name = "%s%d_%d" % (_SHM_PREFIX, os.getpid(), next(_SHM_COUNTER))
+        addr = shm_create_readwrite(shm_name, nbytes)
+        try:
+            buf_type = ctypes.c_uint8 * nbytes
+            buf = buf_type.from_address(addr)
+            # Copy existing tensor data into the SHM segment before
+            # re-pointing the storage, so the migration is non-destructive.
+            ctypes.memmove(addr, tensor.data_ptr(), nbytes)
+            shm_storage = torch.frombuffer(buf, dtype=torch.uint8).untyped_storage()
+            tensor.set_(
+                shm_storage,
+                tensor.storage_offset(),
+                tensor.shape,
+                tensor.stride(),
+            )
+        except Exception:
+            shm_munmap(addr, nbytes)
+            shm_unlink(shm_name)
+            raise
+
+        with _SHM_MIGRATED_LOCK:
+            _SHM_MIGRATED[tid] = (weakref.ref(tensor), shm_name)
+
+        weakref.finalize(
+            tensor,
+            cls._cleanup_shm,
+            tid,
+            shm_name,
+            addr,
+            nbytes,
+        )
+        logger.debug(
+            "IPURdmaWrapper: migrated tensor (nbytes=%d) to SHM %s",
+            nbytes, shm_name,
+        )
+        return tensor, shm_name
+
+    @staticmethod
+    def _cleanup_shm(tid: int, shm_name: str, addr: int, nbytes: int) -> None:
+        """Release SHM segment when the migrated tensor is collected."""
+        from lmcache.v1.multiprocess.posix_shm import shm_munmap, shm_unlink
+
+        with _SHM_MIGRATED_LOCK:
+            cached = _SHM_MIGRATED.get(tid)
+            if cached is not None and cached[1] == shm_name:
+                _SHM_MIGRATED.pop(tid, None)
+        shm_munmap(addr, nbytes)
+        shm_unlink(shm_name)
 
     @classmethod
     def _get_or_register_mr(
@@ -120,6 +221,9 @@ class IPURdmaWrapper(DeviceIPCWrapper):
         self.stride = tuple(tensor.stride())
         self.storage_offset = int(tensor.storage_offset())
         self.device_uuid = "ipu"
+        # SHM segment name for stub cross-process support; empty string
+        # when using real verbs backend.
+        self.shm_name: str = ""
 
     def to_tensor(self) -> torch.Tensor:
         """Pull data from the remote MR via RDMA Read.

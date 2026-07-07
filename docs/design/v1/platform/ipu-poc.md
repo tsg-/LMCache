@@ -169,7 +169,6 @@ Hardware topology: [ipu-poc-test-setup.mmd](ipu-poc-test-setup.mmd)
 
 - [IPU RDMA Platform Backend](ipu.md) — full design doc (architecture, wrapper, transport protocol)
 - [VerbsRdmaTransport Spec](verbs-transport.md) — libibverbs implementation spec (QP state machine, lock protocol, buffer quarantine)
-- [VerbsRdmaTransport Plan](verbs-transport-plan.md) — 16-step implementation checklist
 - [Combined Store+Retrieve Flow](lmcache-ipu-pull-model-flow.mmd) — end-to-end sequence diagram
 - [Open Questions / Architecture Decisions](ipu-poc-opens.md) — stakeholder alignment deck (NVMe-oF vs RDMA, phasing)
 - [Hardware Test Topology](ipu-poc-test-setup.mmd) — two-node lab setup diagram
