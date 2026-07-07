@@ -131,15 +131,20 @@ class _CtypesBackingWrapper:
 class StubRdmaTransport:
     """Local-memory stub for testing without RDMA hardware.
 
-    Simulates RDMA Read and Write by doing a direct memcpy between the
-    source and destination addresses within the same process (or across
-    processes sharing the same address space via mmap).
+    Simulates RDMA Read and Write via shared memory.  When both sides run
+    in the same process, direct memcpy works.  For cross-process use (the
+    normal multiprocess server path), callers register remote MRs via
+    :meth:`map_remote_mr` so that ``post_read``/``post_write`` can resolve
+    the remote virtual address to a locally-mapped SHM offset.
     """
 
     def __init__(self) -> None:
         self._registered: dict[int, MrInfo] = {}
         self._next_rkey = 1
         self._lock = threading.Lock()
+        # Remote MR registry: rkey → (local_map_addr, remote_base_addr, length)
+        self._remote_mrs: dict[int, tuple[int, int, int]] = {}
+        self._remote_lock = threading.Lock()
 
     def register_mr(self, buffer_ptr: int, length: int) -> MrInfo:
         with self._lock:
@@ -159,6 +164,58 @@ class StubRdmaTransport:
         else:
             self._registered.pop(mr.rkey, None)
 
+    def map_remote_mr(
+        self, rkey: int, shm_name: str, remote_base_addr: int, length: int
+    ) -> None:
+        """Map a remote process's SHM-backed MR into this process.
+
+        After this call, ``post_read``/``post_write`` targeting this rkey
+        will resolve the remote virtual address to the local SHM mapping
+        rather than dereferencing it directly (which would segfault across
+        process boundaries).
+
+        Args:
+            rkey: The remote MR's rkey (from the deserialized wrapper).
+            shm_name: POSIX SHM segment name backing the remote buffer.
+            remote_base_addr: The mmap base address in the remote process.
+            length: Size of the SHM segment in bytes.
+        """
+        from lmcache.v1.multiprocess.posix_shm import shm_map_readwrite
+
+        local_addr = shm_map_readwrite(shm_name, length)
+        with self._remote_lock:
+            self._remote_mrs[rkey] = (local_addr, remote_base_addr, length)
+        logger.debug(
+            "StubRDMA: mapped remote MR rkey=%d shm=%s "
+            "remote_base=0x%x local=0x%x len=%d",
+            rkey, shm_name, remote_base_addr, local_addr, length,
+        )
+
+    def unmap_remote_mr(self, rkey: int) -> None:
+        """Unmap a previously mapped remote MR."""
+        from lmcache.v1.multiprocess.posix_shm import shm_munmap
+
+        with self._remote_lock:
+            entry = self._remote_mrs.pop(rkey, None)
+        if entry is not None:
+            local_addr, _, length = entry
+            shm_munmap(local_addr, length)
+
+    def _resolve_remote_addr(self, remote_addr: int, rkey: int) -> int:
+        """Translate a remote virtual address to a local address.
+
+        If the rkey has a mapped SHM segment, computes the offset from the
+        remote base and adds it to the local mapping.  Otherwise returns
+        the address unchanged (same-process fallback).
+        """
+        with self._remote_lock:
+            entry = self._remote_mrs.get(rkey)
+        if entry is None:
+            return remote_addr
+        local_map_addr, remote_base_addr, _ = entry
+        offset = remote_addr - remote_base_addr
+        return local_map_addr + offset
+
     def post_read(
         self,
         local_buf: RegisteredBuffer,
@@ -167,11 +224,12 @@ class StubRdmaTransport:
         length: int,
     ) -> RdmaFuture:
         future = RdmaFuture()
-        ctypes.memmove(local_buf.addr, remote_addr, length)
+        resolved = self._resolve_remote_addr(remote_addr, rkey)
+        ctypes.memmove(local_buf.addr, resolved, length)
         future.set_complete(success=True)
         logger.debug(
-            "StubRDMA: read %d bytes from 0x%x (rkey=%d) to 0x%x",
-            length, remote_addr, rkey, local_buf.addr,
+            "StubRDMA: read %d bytes from 0x%x (rkey=%d, resolved=0x%x) to 0x%x",
+            length, remote_addr, rkey, resolved, local_buf.addr,
         )
         return future
 
@@ -183,11 +241,12 @@ class StubRdmaTransport:
         length: int,
     ) -> RdmaFuture:
         future = RdmaFuture()
-        ctypes.memmove(remote_addr, local_buf.addr, length)
+        resolved = self._resolve_remote_addr(remote_addr, rkey)
+        ctypes.memmove(resolved, local_buf.addr, length)
         future.set_complete(success=True)
         logger.debug(
-            "StubRDMA: write %d bytes from 0x%x to 0x%x (rkey=%d)",
-            length, local_buf.addr, remote_addr, rkey,
+            "StubRDMA: write %d bytes from 0x%x to 0x%x (rkey=%d, resolved=0x%x)",
+            length, local_buf.addr, remote_addr, rkey, resolved,
         )
         return future
 

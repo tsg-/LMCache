@@ -22,6 +22,7 @@ from .worker_transfer import (
     EngineDrivenTransferContext,
     LMCacheDrivenTransferContext,
     MPTransferMode,
+    RdmaTransferContext,
     TransferContext,
     create_transfer_context,
 )
@@ -31,6 +32,7 @@ __all__ = [
     "EngineDrivenTransferContext",
     "LMCacheDrivenTransferContext",
     "MPTransferMode",
+    "RdmaTransferContext",
     "EngineDrivenContext",
     "EngineDrivenContextMetadata",
     "EngineDrivenContextPickle",

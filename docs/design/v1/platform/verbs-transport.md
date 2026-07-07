@@ -1,8 +1,7 @@
 # VerbsRdmaTransport — Design Spec
 
 > Part of: [IPU RDMA Platform Backend](ipu.md) |
-> POC scope: [ipu-poc.md](ipu-poc.md) |
-> Implementation plan: [verbs-transport-plan.md](verbs-transport-plan.md)
+> POC scope: [ipu-poc.md](ipu-poc.md)
 
 Implements `RdmaTransport` protocol backed by real libibverbs via `pyverbs`
 (rdma-core Python bindings). Activated by `LMCACHE_RDMA_TRANSPORT=verbs`.
