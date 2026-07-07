@@ -23,7 +23,11 @@ from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.engine_module import EngineModule, HandlerSpec, ThreadPoolType
 from lmcache.v1.platform.base_ipc_wrapper import DeviceIPCWrapper
-from lmcache.v1.platform.ipu.rdma_transport import RegisteredBuffer, get_rdma_transport
+from lmcache.v1.platform.ipu.rdma_transport import (
+    RegisteredBuffer,
+    StubRdmaTransport,
+    get_rdma_transport,
+)
 from lmcache.v1.platform.ipu.rdma_wrapper import IPURdmaWrapper
 from lmcache.v1.multiprocess.protocols.base import RequestType
 
@@ -130,6 +134,31 @@ class IPUTransferModule:
         pass
 
     # ------------------------------------------------------------------
+    # SHM mapping helpers (stub backend only)
+    # ------------------------------------------------------------------
+
+    def _map_remote_if_stub(self, wrapper: IPURdmaWrapper) -> None:
+        """Map the remote wrapper's SHM segment if using stub transport."""
+        if (
+            isinstance(self._transport, StubRdmaTransport)
+            and wrapper.shm_name
+        ):
+            self._transport.map_remote_mr(
+                wrapper.rkey,
+                wrapper.shm_name,
+                wrapper.remote_addr,
+                wrapper.length,
+            )
+
+    def _unmap_remote_if_stub(self, wrapper: IPURdmaWrapper) -> None:
+        """Unmap a previously mapped remote SHM segment."""
+        if (
+            isinstance(self._transport, StubRdmaTransport)
+            and wrapper.shm_name
+        ):
+            self._transport.unmap_remote_mr(wrapper.rkey)
+
+    # ------------------------------------------------------------------
     # Request handlers
     # ------------------------------------------------------------------
 
@@ -173,6 +202,9 @@ class IPUTransferModule:
                 f"store: expected IPURdmaWrapper, got {type(wrapper).__name__}"
             )
 
+        # Map the remote SHM segment locally so post_read can access it.
+        self._map_remote_if_stub(wrapper)
+
         obj_key_groups: list[list[ObjectKey]] = self._ctx.resolve_obj_keys(key, [0])
         obj_keys: list[ObjectKey] = obj_key_groups[0]
         num_chunks = len(obj_keys)
@@ -183,6 +215,7 @@ class IPUTransferModule:
                 instance_id,
                 key,
             )
+            self._unmap_remote_if_stub(wrapper)
             return (b"", True)
 
         chunk_length = wrapper.length // num_chunks
@@ -267,6 +300,7 @@ class IPUTransferModule:
                         success,
                     )
 
+        self._unmap_remote_if_stub(wrapper)
         return (b"", all_succeeded)
 
     def retrieve(
@@ -317,6 +351,9 @@ class IPUTransferModule:
                 f"retrieve: expected IPURdmaWrapper, got {type(wrapper).__name__}"
             )
 
+        # Map the remote SHM segment locally so post_write can write into it.
+        self._map_remote_if_stub(wrapper)
+
         obj_key_groups: list[list[ObjectKey]] = self._ctx.resolve_obj_keys(key, [0])
         obj_keys: list[ObjectKey] = obj_key_groups[0]
         num_chunks = len(obj_keys)
@@ -327,6 +364,7 @@ class IPUTransferModule:
                 instance_id,
                 key,
             )
+            self._unmap_remote_if_stub(wrapper)
             return (b"", False)
 
         chunk_length = wrapper.length // num_chunks
@@ -345,6 +383,7 @@ class IPUTransferModule:
                     key,
                     instance_id,
                 )
+                self._unmap_remote_if_stub(wrapper)
                 return (b"", False)
 
             for i, mem_obj in enumerate(mem_objs):
@@ -400,4 +439,5 @@ class IPUTransferModule:
             # response is sent, so poll_completion() must return True first.
             self._ctx.storage_manager.finish_read_prefetched(obj_keys)
 
+        self._unmap_remote_if_stub(wrapper)
         return (b"", all_succeeded)
