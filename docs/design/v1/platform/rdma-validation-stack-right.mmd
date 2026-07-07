@@ -1,0 +1,16 @@
+graph BT
+    L2("<div style='width:520px'><b>VerbsRdmaTransport (isolated)</b><br/>construct -&gt; connect() -&gt; post_read() -&gt; raw CQE poll<br/><br/>✓ tested &amp; working on CX7 / RoCEv2</div>")
+    L2b("<div style='width:520px'><b>post_write() (RDMA Write)</b><br/>unit-tested with mocked pyverbs + StubRdmaTransport<br/><br/>● unit-tested only, not yet hardware-validated &mdash; LMCache-zbg</div>")
+    L3("<div style='width:560px'><b>LMCache RDMA Transport, End-to-End</b><br/>get_rdma_transport() -&gt; post_read() -&gt; poll_completion() + data-content verification<br/><br/>✓ tested &amp; working on CX7 / RoCEv2<br/><i>(single point-to-point RoCEv2 link; no IPU/Falcon hardware, no switched fabric yet)</i></div>")
+    L3b("<div style='width:520px'><b>IPURdmaWrapper</b><br/>to_tensor / wrap, MR lifecycle, GC finalizers<br/><br/>○ not yet exercised on hardware</div>")
+    L4("<div style='width:520px'><b>LMCache L1/L2 Traffic Benchmarks</b><br/>synthetic scenarios (transfer_channel_benchmark, storage_backend_io), throughput / latency<br/><br/>○ not yet exercised on hardware</div>")
+
+    L2 --> L2b --> L3 --> L3b --> L4
+
+    classDef tested fill:#c8e6c9,stroke:#2e7d32,stroke-width:1px,color:#1b1b1b
+    classDef unittested fill:#bbdefb,stroke:#1565c0,stroke-width:1px,color:#1b1b1b
+    classDef pending fill:#f5f5f5,stroke:#757575,stroke-width:1px,stroke-dasharray:4 3,color:#1b1b1b
+
+    class L2,L3 tested
+    class L2b unittested
+    class L3b,L4 pending
