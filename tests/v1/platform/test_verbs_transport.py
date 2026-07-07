@@ -215,7 +215,7 @@ class TestPostRead:
         wc = MagicMock()
         wc.wr_id = transport._inflight_wr_id
         wc.status = 0  # IBV_WC_SUCCESS
-        transport._cq.poll.return_value = [wc]
+        transport._cq.poll.return_value = (1, [wc])
         transport.poll_completion(future, timeout_ms=100)
 
     def test_concurrent_blocks(self, mock_pyverbs):
@@ -261,7 +261,7 @@ class TestPollCompletion:
         wc = MagicMock()
         wc.wr_id = transport._inflight_wr_id
         wc.status = 0  # IBV_WC_SUCCESS
-        transport._cq.poll.return_value = [wc]
+        transport._cq.poll.return_value = (1, [wc])
 
         result = transport.poll_completion(future, timeout_ms=100)
         assert result is True
@@ -273,14 +273,14 @@ class TestPollCompletion:
         buf = RegisteredBuffer(addr=0x1000, length=4096, mr=mr)
 
         future = transport.post_read(buf, remote_addr=0x2000, rkey=5, length=4096)
-        transport._cq.poll.return_value = []
+        transport._cq.poll.return_value = (0, [])
 
         result = transport.poll_completion(future, timeout_ms=50)
         assert result is False
         # Clean up: release the lock held after timeout
         flush_wc = MagicMock()
         flush_wc.wr_id = transport._inflight_wr_id
-        transport._cq.poll.return_value = [flush_wc]
+        transport._cq.poll.return_value = (1, [flush_wc])
         transport.drain_on_timeout()
 
     def test_releases_lock_on_success(self, mock_pyverbs):
@@ -293,7 +293,7 @@ class TestPollCompletion:
         wc = MagicMock()
         wc.wr_id = transport._inflight_wr_id
         wc.status = 0
-        transport._cq.poll.return_value = [wc]
+        transport._cq.poll.return_value = (1, [wc])
 
         transport.poll_completion(future, timeout_ms=100)
         assert transport._qp_lock.acquire(blocking=False)
@@ -315,7 +315,7 @@ class TestPollCompletion:
         good_wc.wr_id = transport._inflight_wr_id
         good_wc.status = 0
 
-        transport._cq.poll.side_effect = [[stale_wc], [good_wc]]
+        transport._cq.poll.side_effect = [(1, [stale_wc]), (1, [good_wc])]
         result = transport.poll_completion(future, timeout_ms=1000)
         assert result is True
 
@@ -343,7 +343,7 @@ class TestPollCompletion:
         wc = MagicMock()
         wc.wr_id = transport._inflight_wr_id
         wc.status = 5  # not SUCCESS
-        transport._cq.poll.return_value = [wc]
+        transport._cq.poll.return_value = (1, [wc])
 
         result = transport.poll_completion(future, timeout_ms=100)
         assert result is False
@@ -373,12 +373,12 @@ class TestDrainOnTimeout:
         buf = RegisteredBuffer(addr=0x1000, length=4096, mr=mr)
 
         future = transport.post_read(buf, remote_addr=0x2000, rkey=5, length=4096)
-        transport._cq.poll.return_value = []
+        transport._cq.poll.return_value = (0, [])
         transport.poll_completion(future, timeout_ms=10)
 
         flush_wc = MagicMock()
         flush_wc.wr_id = transport._inflight_wr_id
-        transport._cq.poll.return_value = [flush_wc]
+        transport._cq.poll.return_value = (1, [flush_wc])
 
         result = transport.drain_on_timeout()
         assert result is True
@@ -391,10 +391,10 @@ class TestDrainOnTimeout:
         buf = RegisteredBuffer(addr=0x1000, length=4096, mr=mr)
 
         future = transport.post_read(buf, remote_addr=0x2000, rkey=5, length=4096)
-        transport._cq.poll.return_value = []
+        transport._cq.poll.return_value = (0, [])
         transport.poll_completion(future, timeout_ms=10)
 
-        transport._cq.poll.return_value = []
+        transport._cq.poll.return_value = (0, [])
 
         with patch("time.sleep"):
             with patch("time.monotonic", side_effect=[0.0, 0.0, 3.0]):
@@ -408,12 +408,12 @@ class TestDrainOnTimeout:
         buf = RegisteredBuffer(addr=0x1000, length=4096, mr=mr)
 
         future = transport.post_read(buf, remote_addr=0x2000, rkey=5, length=4096)
-        transport._cq.poll.return_value = []
+        transport._cq.poll.return_value = (0, [])
         transport.poll_completion(future, timeout_ms=10)
 
         flush_wc = MagicMock()
         flush_wc.wr_id = transport._inflight_wr_id
-        transport._cq.poll.return_value = [flush_wc]
+        transport._cq.poll.return_value = (1, [flush_wc])
         transport.drain_on_timeout()
 
         assert transport._qp_lock.acquire(blocking=False)
@@ -426,12 +426,12 @@ class TestDrainOnTimeout:
         buf = RegisteredBuffer(addr=0x1000, length=4096, mr=mr)
 
         future = transport.post_read(buf, remote_addr=0x2000, rkey=5, length=4096)
-        transport._cq.poll.return_value = []
+        transport._cq.poll.return_value = (0, [])
         transport.poll_completion(future, timeout_ms=10)
 
         flush_wc = MagicMock()
         flush_wc.wr_id = transport._inflight_wr_id
-        transport._cq.poll.return_value = [flush_wc]
+        transport._cq.poll.return_value = (1, [flush_wc])
         transport.drain_on_timeout()
 
         transport._qp.modify.assert_called()

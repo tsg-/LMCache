@@ -419,8 +419,8 @@ class VerbsRdmaTransport:
         try:
             deadline = time.monotonic() + timeout_ms / 1000.0
             while time.monotonic() < deadline:
-                wcs = self._cq.poll(num_entries=1)
-                for wc in wcs:
+                npolled, wcs = self._cq.poll(num_entries=1)
+                for wc in wcs[:npolled]:
                     if wc.wr_id != self._inflight_wr_id:
                         logger.warning(
                             "CQE wr_id=%d != expected %d (skipped)",
@@ -450,8 +450,8 @@ class VerbsRdmaTransport:
             deadline = time.monotonic() + 2.0
             flushed = False
             while time.monotonic() < deadline:
-                wcs = self._cq.poll(num_entries=16)
-                for wc in wcs:
+                npolled, wcs = self._cq.poll(num_entries=16)
+                for wc in wcs[:npolled]:
                     if wc.wr_id == self._inflight_wr_id:
                         flushed = True
                         if self._inflight_future is not None:
@@ -459,7 +459,7 @@ class VerbsRdmaTransport:
                             self._inflight_future = None
                 if flushed:
                     break
-                if not wcs:
+                if not npolled:
                     time.sleep(0.001)
 
             self._drained = True
