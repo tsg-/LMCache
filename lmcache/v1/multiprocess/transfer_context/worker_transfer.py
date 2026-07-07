@@ -672,14 +672,16 @@ class RdmaTransferContext(TransferContext):
         event: IPCEvent,
         _blocks_in_chunk: int,
     ) -> MessagingFuture:
-        """Submit an RDMA store request and return a pre-resolved future.
+        """Submit an RDMA store request and return the MQ future.
 
         ``event.ipc_handle()`` must return the pickled :class:`IPURdmaWrapper`
         source descriptor. The server's ``poll_completion()`` blocks until the
-        RDMA Read completes before sending a response; the initiator's MR must
-        remain alive until that response arrives. The returned future resolves
-        immediately — callers that need synchronous confirmation must call
-        ``future.result(timeout=...)`` after this method returns.
+        RDMA Read completes before sending a response, so the returned future
+        only resolves once the target has finished reading from the source
+        buffer. The initiator's MR (and the tensor backing it) must remain
+        alive until the future resolves — do not free or reuse it earlier.
+        Do not call ``.to_cuda_future()`` on the returned future — the
+        response payload is not a CUDA event handle.
 
         Args:
             _request_id: External request identifier (unused).
@@ -694,8 +696,8 @@ class RdmaTransferContext(TransferContext):
                 (unused).
 
         Returns:
-            A :class:`MessagingFuture` already resolved to ``True``.
-            The MQ request is sent fire-and-forget from this side.
+            A :class:`MessagingFuture` backed by the MQ STORE request. It
+            resolves only after the server confirms the RDMA Read completed.
 
         Raises:
             RuntimeError: If :meth:`register` was not called first.
@@ -706,14 +708,11 @@ class RdmaTransferContext(TransferContext):
                 "Call register() before submit_store()."
             )
         rdma_descriptor_bytes = event.ipc_handle()
-        self._send_request(
+        return self._send_request(
             self._mq_client,
             RequestType.STORE,
             [key, instance_id, [], rdma_descriptor_bytes],
         )
-        result: MessagingFuture[bool] = MessagingFuture()
-        result.set_result(True)
-        return result
 
     def submit_retrieve(
         self,
