@@ -115,11 +115,14 @@ class MPTransferMode(str, Enum):
     * ``LMCACHE_DRIVEN``: force :class:`LMCacheDrivenTransferContext`
       (IPC / SHM zero-copy path). Requires a registered KV-wrapper factory
       for the device.
+    * ``RDMA``: force :class:`RdmaTransferContext` (IPU RoCEv2 RDMA path).
+      KV tensors are CPU tensors in host DRAM; no CUDA context required.
     """
 
     AUTO = "auto"
     ENGINE_DRIVEN = "engine_driven"
     LMCACHE_DRIVEN = "lmcache_driven"
+    RDMA = "rdma"
 
 
 def _resolve_mode(mode: "str | MPTransferMode | None") -> MPTransferMode:
@@ -603,6 +606,172 @@ class EngineDrivenTransferContext(TransferContext):
         pass
 
 
+class RdmaTransferContext(TransferContext):
+    """RDMA-based transfer context for IPU nodes.
+
+    Used when ``LMCACHE_MP_TRANSFER_MODE=rdma``. Both initiator and target
+    have an IPU (Intel Infrastructure Processing Unit) acting as a RoCEv2
+    NIC. KV data moves via RDMA Read (store: target pulls from initiator)
+    and RDMA Write (retrieve: target pushes to initiator). The IPU is a dumb
+    NIC — no processing or staging on the NIC itself; all CPU processing
+    happens on the Xeon host.
+
+    ``event.ipc_handle()`` returns pickled :class:`IPURdmaWrapper` bytes
+    that encode the RDMA memory descriptor for the operation. ``block_ids``
+    is unused on this path — the RDMA descriptor carries all addressing.
+    """
+
+    def __init__(self) -> None:
+        self._mq_client: MessageQueueClient | None = None
+        self._send_request: SendRequest | None = None
+
+    def register(
+        self,
+        instance_id: int,
+        kv_caches: dict[str, torch.Tensor],
+        model_name: str,
+        world_size: int,
+        blocks_in_chunk: int,
+        mq_client: MessageQueueClient,
+        mq_timeout: float,
+        send_request: SendRequest,
+        layout_hints: LayoutHints | None = None,
+        engine_group_infos: Sequence[EngineGroupInfo] = (),
+    ) -> None:
+        """Store MQ client and sender; skip server KV-cache registration.
+
+        No ``REGISTER_KV_CACHE`` message is sent because the RDMA Queue
+        Pair is established at transport init (``get_rdma_transport()``),
+        not at registration time.
+
+        Args:
+            instance_id: Worker process instance identifier (unused).
+            kv_caches: Worker KV cache tensors keyed by layer name (unused).
+            model_name: Model name used by cache keys (unused).
+            world_size: KV world size (unused).
+            blocks_in_chunk: Number of vLLM blocks per LMCache chunk (unused).
+            mq_client: Message queue client used to communicate with server.
+            mq_timeout: Timeout in seconds for synchronous request wait
+                (unused; no synchronous registration round-trip is performed).
+            send_request: Request sender callable used to issue MQ requests.
+            layout_hints: Optional inference-engine-provided layout hints
+                (unused).
+            engine_group_infos: LMCache-owned engine KV cache group metadata
+                (unused).
+        """
+        self._mq_client = mq_client
+        self._send_request = send_request
+
+    def submit_store(
+        self,
+        _request_id: str,
+        key: Any,
+        instance_id: int,
+        _kv_caches: dict[str, torch.Tensor],
+        _block_ids: list[list[int]],
+        event: IPCEvent,
+        _blocks_in_chunk: int,
+    ) -> MessagingFuture:
+        """Submit an RDMA store request and return a pre-resolved future.
+
+        ``event.ipc_handle()`` must return the pickled :class:`IPURdmaWrapper`
+        source descriptor. The server's ``poll_completion()`` blocks until the
+        RDMA Read completes before sending a response; the initiator's MR must
+        remain alive until that response arrives. The returned future resolves
+        immediately — callers that need synchronous confirmation must call
+        ``future.result(timeout=...)`` after this method returns.
+
+        Args:
+            _request_id: External request identifier (unused).
+            key: LMCache key object for the store range.
+            instance_id: Worker process instance identifier.
+            _kv_caches: Worker KV cache tensors (unused; RDMA path uses
+                RDMA descriptors, not GPU block IDs).
+            _block_ids: vLLM block IDs (unused on the RDMA path).
+            event: IPC event whose ``ipc_handle()`` returns the pickled
+                RDMA source descriptor bytes.
+            _blocks_in_chunk: Number of vLLM blocks per LMCache chunk
+                (unused).
+
+        Returns:
+            A :class:`MessagingFuture` already resolved to ``True``.
+            The MQ request is sent fire-and-forget from this side.
+
+        Raises:
+            RuntimeError: If :meth:`register` was not called first.
+        """
+        if self._mq_client is None or self._send_request is None:
+            raise RuntimeError(
+                "RDMA transfer context is not registered. "
+                "Call register() before submit_store()."
+            )
+        rdma_descriptor_bytes = event.ipc_handle()
+        self._send_request(
+            self._mq_client,
+            RequestType.STORE,
+            [key, instance_id, [], rdma_descriptor_bytes],
+        )
+        result: MessagingFuture[bool] = MessagingFuture()
+        result.set_result(True)
+        return result
+
+    def submit_retrieve(
+        self,
+        _request_id: str,
+        key: Any,
+        instance_id: int,
+        _kv_caches: dict[str, torch.Tensor],
+        _block_ids: list[list[int]],
+        event: IPCEvent,
+        _blocks_in_chunk: int,
+        skip_first_n_tokens: int = 0,
+    ) -> MessagingFuture:
+        """Submit an RDMA retrieve request and return the MQ future.
+
+        ``event.ipc_handle()`` must return the pickled :class:`IPURdmaWrapper`
+        destination descriptor. The server will perform a RDMA Write into the
+        initiator's MR and respond when complete. Do not call
+        ``.to_cuda_future()`` on the returned future — the response payload is
+        not a CUDA event handle.
+
+        Args:
+            _request_id: External request identifier (unused).
+            key: LMCache key object for the retrieve range.
+            instance_id: Worker process instance identifier.
+            _kv_caches: Worker KV cache tensors (unused; RDMA path uses
+                RDMA descriptors, not GPU block IDs).
+            _block_ids: vLLM block IDs (unused on the RDMA path).
+            event: IPC event whose ``ipc_handle()`` returns the pickled
+                RDMA destination descriptor bytes.
+            _blocks_in_chunk: Number of vLLM blocks per LMCache chunk
+                (unused).
+            skip_first_n_tokens: Number of initial tokens to skip when
+                writing.
+
+        Returns:
+            A :class:`MessagingFuture` backed by the MQ RETRIEVE request.
+
+        Raises:
+            RuntimeError: If :meth:`register` was not called first.
+        """
+        if self._mq_client is None or self._send_request is None:
+            raise RuntimeError(
+                "RDMA transfer context is not registered. "
+                "Call register() before submit_retrieve()."
+            )
+        rdma_descriptor_bytes = event.ipc_handle()
+        return self._send_request(
+            self._mq_client,
+            RequestType.RETRIEVE,
+            [key, instance_id, [], rdma_descriptor_bytes, skip_first_n_tokens],
+        )
+
+    def close(self) -> None:
+        """Release MQ client and sender references."""
+        self._mq_client = None
+        self._send_request = None
+
+
 def create_transfer_context(
     kv_caches: dict[str, torch.Tensor],
     mode: "str | MPTransferMode | None" = None,
@@ -643,6 +812,8 @@ def create_transfer_context(
         device_type,
         resolved_mode.value,
     )
+    if resolved_mode is MPTransferMode.RDMA:
+        return RdmaTransferContext()
     if resolved_mode is MPTransferMode.LMCACHE_DRIVEN:
         return _build_lmcache_driven_context(device_type)
     if resolved_mode is MPTransferMode.ENGINE_DRIVEN:
