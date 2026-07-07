@@ -372,10 +372,10 @@ New code:
 - `create_transfer_context()` now dispatches by mode string, not device type.
 
 The new config surface:
-- `LMCACHE_MP_TRANSFER_MODE=rdma` (new mode; selects `RdmaTransferContext`)
-- `supported_transfer_mode=rdma` (server config; selects `IPUTransferModule`)
+- `LMCACHE_MP_TRANSFER_MODE=rdma` (env var on initiator; selects `RdmaTransferContext`)
+- `--supported-transfer-mode rdma` (server CLI flag; selects `IPUTransferModule`)
 - `chunk_size=128` (existing config key)
-- RDMA transport backend selection (env var: `LMCACHE_RDMA_TRANSPORT`)
+- `LMCACHE_RDMA_TRANSPORT` (env var: `stub` or `verbs`; selects transport backend)
 
 
 ### DMA Fence Requirement
@@ -463,13 +463,13 @@ from `docs/design/tools/ipu_traffic_benchmarks/`.
 ```bash
 # On the TARGET node (Xeon storage server):
 LMCACHE_RDMA_TRANSPORT=verbs \
-LMCACHE_SUPPORTED_TRANSFER_MODE=rdma \
 lmcache server \
     --port 5555 \
     --http-port 8080 \
     --l1-size-gb 64 \
     --chunk-size 256 \
-    --eviction-policy LRU
+    --eviction-policy LRU \
+    --supported-transfer-mode rdma
 
 # On the INITIATOR node (compute host):
 # Default 256 tokens/chunk -> 512KB pages (per requirement)
