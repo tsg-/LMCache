@@ -72,6 +72,16 @@ def _parse_gid(hex_str: str) -> bytes:
     return bytes.fromhex(hex_str)
 
 
+def _gid_to_hex(gid: str | bytes) -> str:
+    """Convert a pyverbs GID.gid value to the 32-char hex format used by
+    ``_parse_gid``. Some pyverbs versions return the colon-delimited IPv6
+    string form (e.g. ``"fe80:...:abcd"``); others return raw 16 bytes.
+    """
+    if isinstance(gid, bytes):
+        return gid.hex()
+    return gid.replace(":", "")
+
+
 class VerbsRdmaTransport:
     """RdmaTransport implementation backed by libibverbs via pyverbs.
 
@@ -127,7 +137,7 @@ class VerbsRdmaTransport:
         port_attr = self._ctx.query_port(port)
         self._local_lid = port_attr.lid
         gid = self._ctx.query_gid(port, gid_index)
-        self._local_gid = gid.gid.hex() if hasattr(gid, 'gid') else gid.hex()
+        self._local_gid = _gid_to_hex(gid.gid)
         self._local_qpn = self._qp.qp_num
 
     @classmethod
