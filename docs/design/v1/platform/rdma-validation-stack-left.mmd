@@ -1,0 +1,12 @@
+graph BT
+    HW("<div style='width:520px'><b>Physical Fabric</b><br/>2x Mellanox/NVIDIA ConnectX-7, 200GbE, direct-attach cable (no switch)<br/>bmg0 &lt;-&gt; bmg1, RoCEv2<br/><br/>✓ tested &amp; working<br/><i>(correct pairing: bmg0:f0&lt;-&gt;bmg1:f1)</i></div>")
+    L0("<div style='width:520px'><b>Link &amp; IP Layer</b><br/>ibv_devices, ethtool, ping, ARP tables<br/><br/>✓ tested &amp; working</div>")
+    L1("<div style='width:520px'><b>Bare RDMA Verbs</b><br/>ib_send_bw / ib_read_bw &mdash; vendor perftest, no LMCache code<br/><br/>✓ tested &amp; working on CX7 / RoCEv2</div>")
+
+    HW --> L0 --> L1
+
+    classDef tested fill:#c8e6c9,stroke:#2e7d32,stroke-width:1px,color:#1b1b1b
+    classDef fabric fill:#fff9c4,stroke:#f9a825,stroke-width:1px,color:#1b1b1b
+
+    class HW fabric
+    class L0,L1 tested
