@@ -36,7 +36,6 @@ def mock_pyverbs(monkeypatch):
     mock_enums.IBV_WC_SUCCESS = 0
     mock_enums.IBV_ACCESS_LOCAL_WRITE = 1
     mock_enums.IBV_ACCESS_REMOTE_READ = 2
-    mock_enums.IBV_MTU_4096 = 5
     mock_enums.IBV_QP_STATE = 1
     mock_enums.IBV_QP_PKEY_INDEX = 2
     mock_enums.IBV_QP_PORT = 4
@@ -92,7 +91,6 @@ def mock_pyverbs(monkeypatch):
     monkeypatch.setattr(vt_mod, "IBV_WC_SUCCESS", 0)
     monkeypatch.setattr(vt_mod, "IBV_ACCESS_LOCAL_WRITE", 1)
     monkeypatch.setattr(vt_mod, "IBV_ACCESS_REMOTE_READ", 2)
-    monkeypatch.setattr(vt_mod, "IBV_MTU_4096", 5)
     monkeypatch.setattr(vt_mod, "IBV_QP_STATE", 1)
     monkeypatch.setattr(vt_mod, "IBV_QP_PKEY_INDEX", 2)
     monkeypatch.setattr(vt_mod, "IBV_QP_PORT", 4)

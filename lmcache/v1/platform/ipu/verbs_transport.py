@@ -42,7 +42,6 @@ try:
         IBV_WC_SUCCESS,
         IBV_ACCESS_LOCAL_WRITE,
         IBV_ACCESS_REMOTE_READ,
-        IBV_MTU_4096,
         IBV_QP_STATE,
         IBV_QP_PKEY_INDEX,
         IBV_QP_PORT,
@@ -147,6 +146,7 @@ class VerbsRdmaTransport:
 
         port_attr = self._ctx.query_port(port)
         self._local_lid = port_attr.lid
+        self._path_mtu = port_attr.active_mtu
         gid = self._ctx.query_gid(port, gid_index)
         self._local_gid = _gid_to_hex(gid.gid)
         self._local_qpn = self._qp.qp_num
@@ -311,7 +311,7 @@ class VerbsRdmaTransport:
 
         attr = QPAttr()
         attr.qp_state = IBV_QPS_RTR
-        attr.path_mtu = IBV_MTU_4096
+        attr.path_mtu = self._path_mtu
         attr.dest_qp_num = remote_qpn
         attr.rq_psn = remote_psn
         attr.max_dest_rd_atomic = 4
