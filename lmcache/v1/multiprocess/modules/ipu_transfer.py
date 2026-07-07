@@ -33,6 +33,35 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def _per_chunk_shape(full_shape: tuple[int, ...], num_chunks: int) -> torch.Size:
+    """Divide a wrapper's leading dimension by ``num_chunks``.
+
+    :class:`IPURdmaWrapper` describes the *entire* registered buffer, which
+    may span multiple LMCache chunks. ``reserve_write`` must be given the
+    shape of a single chunk, not the whole range, or the storage manager
+    allocates an oversized :class:`MemoryObj` per chunk.
+
+    Args:
+        full_shape: The wrapper's full tensor shape (dimension 0 is the
+            flat byte/element count spanning all chunks).
+        num_chunks: Number of equal-sized chunks the range is split into.
+
+    Returns:
+        A :class:`torch.Size` with dimension 0 divided by ``num_chunks``.
+
+    Raises:
+        ValueError: If dimension 0 is not evenly divisible by ``num_chunks``.
+    """
+    total = full_shape[0]
+    per_chunk, remainder = divmod(total, num_chunks)
+    if remainder != 0:
+        raise ValueError(
+            f"_per_chunk_shape: leading dim {total} is not evenly "
+            f"divisible by num_chunks={num_chunks}"
+        )
+    return torch.Size((per_chunk,) + tuple(full_shape[1:]))
+
+
 class IPUTransferModule:
     """Handles STORE and RETRIEVE KV cache transfers over RDMA.
 
@@ -164,7 +193,7 @@ class IPUTransferModule:
             )
 
         layout_desc = MemoryLayoutDesc(
-            shapes=[torch.Size(wrapper.shape)],
+            shapes=[_per_chunk_shape(wrapper.shape, num_chunks)],
             dtypes=[wrapper.dtype],
         )
 

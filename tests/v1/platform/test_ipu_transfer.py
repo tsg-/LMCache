@@ -362,6 +362,51 @@ class TestIPUTransferModuleStore:
         assert captured[0]["length"] == chunk_bytes
         assert captured[1]["length"] == chunk_bytes
 
+    def test_store_multi_chunk_reserve_write_uses_per_chunk_shape(
+        self,
+        module: IPUTransferModule,
+        mock_ctx: MagicMock,
+        transport: StubRdmaTransport,
+    ) -> None:
+        """reserve_write's layout_desc must describe ONE chunk, not the
+        full multi-chunk range wrapper.shape carries.
+
+        Regression test for LMCache-9ew: layout_desc was built from the
+        wrapper's full shape and reused unchanged for every chunk, so each
+        reserve_write() call allocated a MemoryObj sized for the entire
+        range instead of 1/num_chunks of it.
+        """
+        numel_per_chunk = 8
+        num_chunks = 3
+        src = torch.ones(numel_per_chunk * num_chunks, dtype=torch.float32)
+
+        obj_keys = [_make_obj_key(i) for i in range(num_chunks)]
+        dsts = [
+            torch.zeros(numel_per_chunk, dtype=torch.float32) for _ in range(num_chunks)
+        ]
+        mem_objs = [_make_mem_obj(d) for d in dsts]
+
+        mock_ctx.resolve_obj_keys.return_value = [obj_keys]
+        mock_ctx.storage_manager.reserve_write.side_effect = [
+            {k: mo} for k, mo in zip(obj_keys, mem_objs, strict=True)
+        ]
+
+        wrapper = _make_wrapper(src)
+        descriptor = DeviceIPCWrapper.Serialize(wrapper)
+
+        module.store(
+            key=_make_ipc_key(),
+            instance_id=1,
+            block_ids=[],
+            rdma_descriptor_bytes=descriptor,
+        )
+
+        assert mock_ctx.storage_manager.reserve_write.call_count == num_chunks
+        for call_args in mock_ctx.storage_manager.reserve_write.call_args_list:
+            _, layout_desc, _mode = call_args.args
+            assert layout_desc.shapes == [torch.Size((numel_per_chunk,))]
+            assert layout_desc.dtypes == [torch.float32]
+
     def test_store_validates_descriptor_is_ipu_rdma_wrapper(
         self,
         module: IPUTransferModule,
