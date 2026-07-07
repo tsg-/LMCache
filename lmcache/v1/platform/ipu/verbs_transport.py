@@ -59,7 +59,7 @@ try:
         IBV_QP_RNR_RETRY,
         IBV_QP_TIMEOUT,
     )
-    from pyverbs.addr import AHAttr, GlobalRoute
+    from pyverbs.addr import AHAttr, GID, GlobalRoute
     HAS_PYVERBS = True
 except ImportError:
     HAS_PYVERBS = False
@@ -70,6 +70,17 @@ def _parse_gid(hex_str: str) -> bytes:
     if len(hex_str) != 32:
         raise ValueError(f"GID must be 32 hex chars, got {len(hex_str)}: {hex_str!r}")
     return bytes.fromhex(hex_str)
+
+
+def _hex_to_pyverbs_gid(hex_str: str) -> "GID":
+    """Convert a 32-char hex GID string to a pyverbs.addr.GID.
+
+    GlobalRoute.dgid requires a GID object on this pyverbs version, and
+    GID() itself only accepts the colon-delimited IPv6 string form (the
+    same form query_gid().gid returns) -- not raw bytes.
+    """
+    raw = _parse_gid(hex_str)
+    return GID(":".join(f"{raw[i]:02x}{raw[i + 1]:02x}" for i in range(0, 16, 2)))
 
 
 def _gid_to_hex(gid: str | bytes) -> str:
@@ -285,7 +296,7 @@ class VerbsRdmaTransport:
         self, remote_qpn: int, remote_psn: int, remote_gid: str, remote_lid: int
     ) -> None:
         gr = GlobalRoute(
-            dgid=_parse_gid(remote_gid) if remote_gid else b'\x00' * 16,
+            dgid=_hex_to_pyverbs_gid(remote_gid or "0" * 32),
             sgid_index=self._gid_index,
             hop_limit=64,
         )
