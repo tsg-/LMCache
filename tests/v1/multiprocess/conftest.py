@@ -13,3 +13,7 @@ import os
 
 # Force UCX TCP loopback on both server and worker sides.
 os.environ.setdefault("UCX_TLS", "tcp,self")
+
+# Disable UCX shmem transport explicitly.
+os.environ.setdefault("UCX_SHM_DEVICES", "")
+os.environ.setdefault("UCX_POSIX_USE_PROC_LINK", "n")

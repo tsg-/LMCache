@@ -204,14 +204,6 @@ class NixlWrapper(DeviceIPCWrapper):
         if not tensor.is_contiguous():
             raise ValueError("NixlWrapper requires a contiguous tensor")
 
-        # Force GC so that any pending _deregister_on_gc finalizers run
-        # before we register the new tensor.  Without this, a prior tensor
-        # at the same address may still be registered in the NIXL agent when
-        # we call register_memory below, causing a UCX registration conflict
-        # that stalls the next NIXL transfer.
-        import gc
-        gc.collect()
-
         _ensure_registered(tensor)
         agent = get_nixl_agent()
 
