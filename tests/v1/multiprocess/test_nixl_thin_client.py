@@ -34,7 +34,6 @@ from typing import Generator
 
 import pytest
 import torch
-import zmq
 
 # Try each cuXX variant in order; skip if none are importable.
 for _nixl_modname in ("nixl._api", "nixl_cu12._api", "nixl_cu13._api"):
@@ -104,21 +103,7 @@ def nixl_server_process() -> Generator[mp.Process, None, None]:
         daemon=True,
     )
     proc.start()
-
-    # Wait until the server's ZMQ socket is ready.
-    ctx = zmq.Context.instance()
-    sock = ctx.socket(zmq.REQ)
-    sock.setsockopt(zmq.RCVTIMEO, 1000)
-    sock.connect(SERVER_URL)
-    deadline = time.monotonic() + DEFAULT_TIMEOUT
-    while time.monotonic() < deadline:
-        try:
-            sock.send(b"ping")
-            sock.recv()
-            break
-        except zmq.Again:
-            time.sleep(0.2)
-    sock.close(linger=0)
+    time.sleep(2)  # Give the server time to bind its ZMQ socket.
 
     yield proc
 
