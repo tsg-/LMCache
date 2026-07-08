@@ -2,11 +2,11 @@
 """NIXL-backed IPC wrapper for LMCache multiprocess transfers.
 
 Each :meth:`NixlWrapper.wrap` call registers the tensor with the
-process-level :class:`nixl_agent` singleton, builds a transfer descriptor
-list (xfer dlist) covering the tensor, and serializes it.  The server
-receives ``agent_metadata`` (for the first ``add_remote_agent`` call),
-``serialized_xfer_descs`` (the per-tensor dlist, freshly built on every
-wrap), and ``agent_name`` (to route ``prep_xfer_dlist`` calls).
+process-level :class:`nixl_agent` singleton and sends the raw buffer
+descriptor (``base_addr``, ``length``, ``device_id``, ``mem_type``) and
+``agent_metadata`` to the server.  The server calls ``add_remote_agent``
+then uses ``initialize_xfer`` with per-chunk xfer dlists built from the
+raw addresses.
 
 This mirrors the pattern in
 :mod:`lmcache.v1.distributed.transfer_channel.impl.nixl_impl`: the
@@ -155,23 +155,23 @@ class NixlWrapper(DeviceIPCWrapper):
 
     The server:
     1. Calls ``add_remote_agent(agent_metadata)`` to learn how to reach the
-       worker's UCX endpoint (idempotent after the first call).
-    2. Calls ``deserialize_descs(serialized_xfer_descs)`` to get the
-       per-tensor xfer dlist.
-    3. Calls ``prep_xfer_dlist(agent_name, xfer_dlist)`` — this succeeds
-       even on subsequent calls because the dlist carries the exact buffer
-       addresses; NIXL does not re-examine the remote agent's registered
-       memory list.
+       worker's UCX endpoint (idempotent after first call).
+    2. Builds a per-chunk remote xfer dlist from ``base_addr + chunk_offset``.
+    3. Calls ``initialize_xfer(operation, local_dlist, remote_dlist, agent_name)``
+       — the combined one-shot API that avoids UCX endpoint state issues from
+       the prep-based path across sequential cross-process requests.
     4. Posts a NIXL READ (STORE) or NIXL WRITE (RETRIEVE) per chunk.
 
     Attributes:
         agent_name: Name of the initiator's nixl_agent.
         agent_metadata: Full metadata bytes from
             ``agent.get_agent_metadata()``.
-        serialized_xfer_descs: Pickled nixlXferDList covering the tensor.
+        base_addr: Data pointer of the initiator's KV buffer.
+        length: Total byte count of the described buffer.
+        device_id: NIXL device ID (0 for DRAM, GPU id for VRAM).
+        mem_type: NIXL memory type string (``"DRAM"`` or ``"VRAM"``).
         shape: Tensor shape for layout reconstruction on the server.
         dtype: Tensor dtype.
-        length: Total byte count of the described buffer.
         stride: Tensor strides.
         storage_offset: Tensor storage offset.
     """
@@ -180,11 +180,10 @@ class NixlWrapper(DeviceIPCWrapper):
 
     @classmethod
     def wrap(cls, tensor: torch.Tensor) -> "NixlWrapper":
-        """Register the tensor with NIXL and create a per-tensor wrapper.
+        """Register the tensor's backing memory with NIXL and create a wrapper.
 
-        Builds a fresh xfer dlist on every call so the server can call
-        ``prep_xfer_dlist(agent_name, dlist)`` without needing updated
-        remote-agent metadata.
+        The server uses ``base_addr`` and ``device_id`` to build per-chunk
+        remote xfer dlists and calls ``initialize_xfer`` to post transfers.
 
         Args:
             tensor: A contiguous tensor in CPU DRAM or GPU VRAM.
@@ -203,20 +202,15 @@ class NixlWrapper(DeviceIPCWrapper):
         device_id = max(tensor.get_device(), 0)
         mem_type = "DRAM" if tensor.get_device() == -1 else "VRAM"
 
-        # Build a fresh xfer dlist for this tensor — one descriptor covering
-        # the whole buffer.  The server slices it by index per chunk.
-        xfer_dlist = agent.get_xfer_descs(
-            [(data_ptr, nbytes, device_id)], mem_type
-        )
-        serialized_xfer_descs = agent.get_serialized_descs(xfer_dlist)
-
         return cls(
             agent_name=agent.name,
             agent_metadata=agent.get_agent_metadata(),
-            serialized_xfer_descs=serialized_xfer_descs,
+            base_addr=data_ptr,
+            length=nbytes,
+            device_id=device_id,
+            mem_type=mem_type,
             shape=tuple(tensor.shape),
             dtype=tensor.dtype,
-            length=nbytes,
             stride=tuple(tensor.stride()),
             storage_offset=int(tensor.storage_offset()),
         )
@@ -225,24 +219,28 @@ class NixlWrapper(DeviceIPCWrapper):
         self,
         agent_name: str,
         agent_metadata: bytes,
-        serialized_xfer_descs: bytes,
+        base_addr: int,
+        length: int,
+        device_id: int,
+        mem_type: str,
         shape: tuple[int, ...],
         dtype: torch.dtype,
-        length: int,
         stride: tuple[int, ...],
         storage_offset: int,
     ) -> None:
         self.agent_name = agent_name
         self.agent_metadata = agent_metadata
-        self.serialized_xfer_descs = serialized_xfer_descs
+        self.base_addr = base_addr
+        self.length = length
+        self.device_id = device_id
+        self.mem_type = mem_type
         self.shape = shape
         self.dtype = dtype
-        self.length = length
         self.stride = stride
         self.storage_offset = storage_offset
 
         # DeviceIPCWrapper expects a .handle attribute.
-        self.handle = (agent_name, len(serialized_xfer_descs), length)
+        self.handle = (agent_name, base_addr, length)
 
     def to_tensor(self) -> torch.Tensor:
         """Not supported for NixlWrapper.

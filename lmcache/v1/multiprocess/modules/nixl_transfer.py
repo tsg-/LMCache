@@ -11,14 +11,12 @@ STORE/RETRIEVE call:
   1. Deserializes the :class:`NixlWrapper` from the client.
   2. Calls ``add_remote_agent(wrapper.agent_metadata)`` (idempotent after
      first call — this registers the worker's UCX endpoint).
-  3. Calls ``deserialize_descs(wrapper.serialized_xfer_descs)`` to get the
-     per-tensor xfer dlist sent by the worker.
-  4. Calls ``prep_xfer_dlist(agent_name, remote_dlist)`` using the
-     deserialized dlist — this succeeds every call because the dlist carries
-     the exact buffer addresses (unlike full-metadata lookup which may be
-     stale after the first call).
-  5. Allocates local storage, registers local memory, preps local dlist.
-  6. Calls ``make_prepped_xfer(READ/WRITE)`` + ``transfer()`` + polls.
+  3. Builds per-chunk local and remote xfer dlists from raw addresses.
+  4. Calls ``initialize_xfer(operation, local_dlist, remote_dlist, agent_name)``
+     — the combined one-shot API that avoids UCX endpoint state issues that
+     the ``prep_xfer_dlist`` + ``make_prepped_xfer`` path can encounter on
+     the second request when the remote UCX endpoint state has changed.
+  5. Calls ``transfer()`` + polls.
   7. Releases handles and commits / finishes the write/read.
 
 No CUDA events, no GPU block IDs, and no GPU synchronisation occur here.
@@ -216,23 +214,27 @@ class NixlTransferModule:
         local_ptr: int,
         chunk_length: int,
         mem_type: str,
-        remote_dlist,
-        remote_index: int,
+        remote_ptr: int,
+        device_id: int,
         agent_name: str,
         chunk_idx: int,
         num_chunks: int,
         instance_id: int,
         key: IPCCacheServerKey,
     ) -> bool:
-        """Register local memory, prep both sides, post and poll a transfer.
+        """Register local memory, build both dlists, post and poll a transfer.
+
+        Uses ``initialize_xfer`` (combined one-shot API) rather than
+        ``prep_xfer_dlist`` + ``make_prepped_xfer`` to avoid stale UCX
+        endpoint state across sequential cross-process requests.
 
         Args:
             operation: ``"READ"`` (STORE path) or ``"WRITE"`` (RETRIEVE path).
             local_ptr: Data pointer for the local (server) buffer.
             chunk_length: Byte count of this chunk.
             mem_type: NIXL memory type string (``"DRAM"`` or ``"VRAM"``).
-            remote_dlist: Deserialized remote xfer dlist (from wrapper).
-            remote_index: Index into ``remote_dlist`` for this chunk.
+            remote_ptr: Data pointer for the remote (worker) chunk buffer.
+            device_id: NIXL device ID for the remote buffer.
             agent_name: Name of the remote nixl_agent.
             chunk_idx: Chunk index (for logging).
             num_chunks: Total chunks (for logging).
@@ -243,11 +245,9 @@ class NixlTransferModule:
             True on success, False on timeout, error, or exception.
         """
         local_reg = None
-        local_handle = None
-        remote_handle = None
         xfer_handle = None
         try:
-            # Register local memory per-chunk (deregister in finally).
+            # Register local memory per-chunk.
             local_reg = self._agent.register_memory(
                 self._agent.get_reg_descs(
                     [(local_ptr, chunk_length, 0, "")], mem_type
@@ -256,13 +256,20 @@ class NixlTransferModule:
             local_dlist = self._agent.get_xfer_descs(
                 [(local_ptr, chunk_length, 0)], mem_type
             )
-            local_handle = self._agent.prep_xfer_dlist("", local_dlist)
-            remote_handle = self._agent.prep_xfer_dlist(agent_name, remote_dlist)
+            remote_dlist = self._agent.get_xfer_descs(
+                [(remote_ptr, chunk_length, device_id)], mem_type
+            )
 
-            xfer_handle = self._agent.make_prepped_xfer(
+            # Use initialize_xfer (combined one-shot API) rather than
+            # prep_xfer_dlist + make_prepped_xfer.  The prep-based path
+            # caches a prepared dlist handle and can stall on the second
+            # cross-process request when UCX endpoint state has changed
+            # between requests.
+            xfer_handle = self._agent.initialize_xfer(
                 operation,
-                local_handle, [0],
-                remote_handle, [remote_index],
+                local_dlist,
+                remote_dlist,
+                agent_name,
             )
             status = self._agent.transfer(xfer_handle)
             if status == "ERR":
@@ -294,16 +301,6 @@ class NixlTransferModule:
                     self._agent.release_xfer_handle(xfer_handle)
                 except Exception:
                     pass
-            if local_handle is not None:
-                try:
-                    self._agent.release_dlist_handle(local_handle)
-                except Exception:
-                    pass
-            if remote_handle is not None:
-                try:
-                    self._agent.release_dlist_handle(remote_handle)
-                except Exception:
-                    pass
             if local_reg is not None:
                 try:
                     self._agent.deregister_memory(local_reg)
@@ -323,14 +320,12 @@ class NixlTransferModule:
     ) -> tuple[bytes, bool]:
         """Pull KV data from the initiator via NIXL READ and store it locally.
 
-        The initiator built a per-tensor xfer dlist with :meth:`NixlWrapper.wrap`
-        and serialized it into ``nixl_descriptor_bytes``.  This handler:
-
-        1. Deserializes the wrapper and loads the client's agent metadata.
-        2. Deserializes the xfer dlist from the wrapper.
-        3. For each chunk: reserves a storage slot, preps both sides of a
-           NIXL READ using the i-th entry of the remote dlist, polls to
-           completion, and commits.
+        The initiator has registered its KV buffer with its local nixl_agent
+        and sent the :class:`NixlWrapper` descriptor over the ZMQ control
+        channel.  This handler loads the client agent, allocates local storage
+        for each chunk, builds per-chunk remote xfer dlists from the wrapper's
+        raw buffer address, and performs a NIXL READ per chunk via
+        ``initialize_xfer``.
 
         Args:
             key: The IPC cache key identifying the token range to store.
@@ -354,9 +349,6 @@ class NixlTransferModule:
 
         # Register the client agent (idempotent after first call).
         self._agent.add_remote_agent(wrapper.agent_metadata)
-
-        # Deserialize the per-tensor xfer dlist once for all chunks.
-        remote_dlist = self._agent.deserialize_descs(wrapper.serialized_xfer_descs)
 
         obj_key_groups: list[list[ObjectKey]] = self._ctx.resolve_obj_keys(key, [0])
         obj_keys: list[ObjectKey] = obj_key_groups[0]
@@ -397,9 +389,9 @@ class NixlTransferModule:
                     "READ",
                     local_ptr=mem_obj.data_ptr,
                     chunk_length=chunk_length,
-                    mem_type="DRAM",
-                    remote_dlist=remote_dlist,
-                    remote_index=i,
+                    mem_type=wrapper.mem_type,
+                    remote_ptr=wrapper.base_addr + i * chunk_length,
+                    device_id=wrapper.device_id,
                     agent_name=wrapper.agent_name,
                     chunk_idx=i,
                     num_chunks=num_chunks,
@@ -470,9 +462,6 @@ class NixlTransferModule:
         # Register the client agent (idempotent after first call).
         self._agent.add_remote_agent(wrapper.agent_metadata)
 
-        # Deserialize the per-tensor xfer dlist once for all chunks.
-        remote_dlist = self._agent.deserialize_descs(wrapper.serialized_xfer_descs)
-
         obj_key_groups: list[list[ObjectKey]] = self._ctx.resolve_obj_keys(key, [0])
         obj_keys: list[ObjectKey] = obj_key_groups[0]
         num_chunks = len(obj_keys)
@@ -527,9 +516,9 @@ class NixlTransferModule:
                     "WRITE",
                     local_ptr=mem_obj.data_ptr,
                     chunk_length=chunk_length,
-                    mem_type="DRAM",
-                    remote_dlist=remote_dlist,
-                    remote_index=i,
+                    mem_type=wrapper.mem_type,
+                    remote_ptr=wrapper.base_addr + i * chunk_length,
+                    device_id=wrapper.device_id,
                     agent_name=wrapper.agent_name,
                     chunk_idx=i,
                     num_chunks=num_chunks,

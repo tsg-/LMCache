@@ -20,8 +20,6 @@ from lmcache.v1.platform.base_ipc_wrapper import DeviceIPCWrapper
 # Helpers
 # ---------------------------------------------------------------------------
 
-_FAKE_XFER_DESCS = b"fake_xfer_descs_bytes"
-
 
 def _make_nixl_mock():
     """Return a minimal nixl._api module mock with the key classes."""
@@ -30,8 +28,6 @@ def _make_nixl_mock():
     agent_instance = MagicMock()
     agent_instance.name = "test_agent"
     agent_instance.get_agent_metadata.return_value = b"agent_meta"
-    agent_instance.get_xfer_descs.return_value = MagicMock()
-    agent_instance.get_serialized_descs.return_value = _FAKE_XFER_DESCS
     agent_instance.register_memory.return_value = MagicMock()
     agent_instance.deregister_memory.return_value = None
     agent_instance.get_reg_descs.return_value = MagicMock()
@@ -75,10 +71,12 @@ def _make_wrapper(**kwargs):
     defaults = dict(
         agent_name="test_agent",
         agent_metadata=b"meta",
-        serialized_xfer_descs=_FAKE_XFER_DESCS,
+        base_addr=0x1000,
+        length=64,
+        device_id=0,
+        mem_type="DRAM",
         shape=(16,),
         dtype=torch.float32,
-        length=64,
         stride=(1,),
         storage_offset=0,
     )
@@ -102,27 +100,25 @@ class TestNixlWrapperAttributes:
         w = _make_wrapper(
             agent_name="a",
             agent_metadata=b"meta",
-            serialized_xfer_descs=b"descs",
+            base_addr=0x1000,
+            length=128,
+            device_id=0,
+            mem_type="DRAM",
             shape=(32,),
             dtype=torch.float16,
-            length=128,
-            stride=(1,),
-            storage_offset=0,
         )
         assert w.agent_name == "a"
         assert w.agent_metadata == b"meta"
-        assert w.serialized_xfer_descs == b"descs"
+        assert w.base_addr == 0x1000
+        assert w.length == 128
+        assert w.device_id == 0
+        assert w.mem_type == "DRAM"
         assert w.shape == (32,)
         assert w.dtype == torch.float16
-        assert w.length == 128
 
-    def test_handle_is_tuple_of_name_len_length(self) -> None:
-        w = _make_wrapper(
-            agent_name="agt",
-            serialized_xfer_descs=b"x" * 10,
-            length=64,
-        )
-        assert w.handle == ("agt", 10, 64)
+    def test_handle_is_tuple_of_name_addr_len(self) -> None:
+        w = _make_wrapper(agent_name="agt", base_addr=0xDEAD, length=64)
+        assert w.handle == ("agt", 0xDEAD, 64)
 
 
 class TestNixlWrapperSerialization:
@@ -132,10 +128,12 @@ class TestNixlWrapperSerialization:
         original = _make_wrapper(
             agent_name="worker_42",
             agent_metadata=b"agent_bytes",
-            serialized_xfer_descs=b"descs_bytes",
+            base_addr=0xC0FFEE,
+            length=256,
+            device_id=0,
+            mem_type="DRAM",
             shape=(64,),
             dtype=torch.float32,
-            length=256,
         )
         data = DeviceIPCWrapper.Serialize(original)
         recovered = DeviceIPCWrapper.Deserialize(data)
@@ -143,10 +141,12 @@ class TestNixlWrapperSerialization:
         assert isinstance(recovered, type(original))
         assert recovered.agent_name == "worker_42"
         assert recovered.agent_metadata == b"agent_bytes"
-        assert recovered.serialized_xfer_descs == b"descs_bytes"
+        assert recovered.base_addr == 0xC0FFEE
         assert recovered.length == 256
         assert recovered.shape == (64,)
         assert recovered.dtype == torch.float32
+        assert recovered.device_id == 0
+        assert recovered.mem_type == "DRAM"
 
     def test_to_tensor_raises(self) -> None:
         w = _make_wrapper()
@@ -155,7 +155,7 @@ class TestNixlWrapperSerialization:
 
 
 class TestNixlWrapperWrap:
-    """NixlWrapper.wrap() registers memory and builds xfer dlist."""
+    """NixlWrapper.wrap() registers memory with the process-level agent."""
 
     def test_wrap_returns_nixl_wrapper(self, patched_nixl) -> None:
         from lmcache.v1.platform.rdma.nixl_wrapper import NixlWrapper
@@ -167,7 +167,9 @@ class TestNixlWrapperWrap:
         assert wrapper.length == tensor.numel() * tensor.element_size()
         assert wrapper.dtype == tensor.dtype
         assert wrapper.shape == tuple(tensor.shape)
-        assert wrapper.serialized_xfer_descs == _FAKE_XFER_DESCS
+        assert wrapper.base_addr == tensor.data_ptr()
+        assert wrapper.mem_type == "DRAM"
+        assert wrapper.device_id == 0
 
     def test_wrap_calls_register_memory(self, patched_nixl) -> None:
         from lmcache.v1.platform.rdma.nixl_wrapper import NixlWrapper
@@ -176,15 +178,6 @@ class TestNixlWrapperWrap:
         NixlWrapper.wrap(tensor)
 
         patched_nixl._agent_instance.register_memory.assert_called_once()
-
-    def test_wrap_calls_get_xfer_descs(self, patched_nixl) -> None:
-        from lmcache.v1.platform.rdma.nixl_wrapper import NixlWrapper
-
-        tensor = torch.zeros(16, dtype=torch.float32)
-        NixlWrapper.wrap(tensor)
-
-        patched_nixl._agent_instance.get_xfer_descs.assert_called_once()
-        patched_nixl._agent_instance.get_serialized_descs.assert_called_once()
 
     def test_wrap_non_contiguous_raises(self, patched_nixl) -> None:
         from lmcache.v1.platform.rdma.nixl_wrapper import NixlWrapper
@@ -204,19 +197,7 @@ class TestNixlWrapperWrap:
         call_count_after_first = patched_nixl._agent_instance.register_memory.call_count
 
         NixlWrapper.wrap(tensor)
-        # register_memory must NOT be called again for the same tensor.
         assert patched_nixl._agent_instance.register_memory.call_count == call_count_after_first
-
-    def test_wrap_always_builds_fresh_xfer_dlist(self, patched_nixl) -> None:
-        """get_xfer_descs is called on every wrap() for a fresh dlist."""
-        from lmcache.v1.platform.rdma.nixl_wrapper import NixlWrapper
-
-        tensor = torch.zeros(32, dtype=torch.float32)
-        NixlWrapper.wrap(tensor)
-        NixlWrapper.wrap(tensor)
-
-        # xfer dlist is built fresh on every wrap.
-        assert patched_nixl._agent_instance.get_xfer_descs.call_count == 2
 
     def test_wrap_sets_agent_name_from_agent(self, patched_nixl) -> None:
         from lmcache.v1.platform.rdma.nixl_wrapper import NixlWrapper

@@ -37,8 +37,7 @@ def _make_nixl_agent_mock(name: str = "server_agent") -> MagicMock:
     agent.check_xfer_state.return_value = "DONE"
 
     # Return opaque handles.
-    agent.prep_xfer_dlist.return_value = MagicMock()
-    agent.make_prepped_xfer.return_value = MagicMock()
+    agent.initialize_xfer.return_value = MagicMock()
     agent.get_xfer_descs.return_value = MagicMock()
     agent.get_reg_descs.return_value = MagicMock()
     agent.register_memory.return_value = MagicMock()
@@ -90,10 +89,12 @@ def _make_nixl_wrapper_bytes(length: int = 64) -> bytes:
     w = NixlWrapper(
         agent_name="worker_agent",
         agent_metadata=b"agent_meta",
-        serialized_xfer_descs=b"fake_descs",
+        base_addr=0x1000,
+        length=length,
+        device_id=0,
+        mem_type="DRAM",
         shape=(length // 4,),
         dtype=torch.float32,
-        length=length,
         stride=(1,),
         storage_offset=0,
     )
@@ -229,10 +230,12 @@ class TestNixlTransferModuleStore:
         w = NixlWrapper(
             agent_name="x",
             agent_metadata=b"",
-            serialized_xfer_descs=b"d",
+            base_addr=0x1000,
+            length=65,  # 65 / 3 is not exact
+            device_id=0,
+            mem_type="DRAM",
             shape=(65,),
             dtype=torch.uint8,
-            length=65,  # 65 / 3 is not exact
             stride=(1,),
             storage_offset=0,
         )
@@ -291,10 +294,12 @@ class TestNixlTransferModuleStore:
         w = NixlWrapper(
             agent_name="w",
             agent_metadata=b"m",
-            serialized_xfer_descs=b"d",
+            base_addr=0x2000,
+            length=nbytes,
+            device_id=0,
+            mem_type="DRAM",
             shape=(nbytes // 4,),
             dtype=torch.float32,
-            length=nbytes,
             stride=(1,),
             storage_offset=0,
         )
