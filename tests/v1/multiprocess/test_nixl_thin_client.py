@@ -190,16 +190,23 @@ class TestNixlThinClientE2E:
     ) -> None:
         assert nixl_server_process.is_alive(), "Server subprocess died before retrieve test"
         src = torch.arange(CHUNK_SIZE, dtype=torch.float32) + 10.0
+        print(f"\n[DEBUG] src.data_ptr={src.data_ptr():#x} alive={nixl_server_process.is_alive()}")
 
         store_wrapper = NixlWrapper.wrap(src)
         store_descriptor = DeviceIPCWrapper.Serialize(store_wrapper)
+        print(f"[DEBUG] wrapper.base_addr={store_wrapper.base_addr:#x} agent={store_wrapper.agent_name}")
 
         key = _make_key("nixl-store-retrieve-0", tok_start=100)
         store_future = client.submit_request(
             RequestType.STORE,
             [key, os.getpid(), [], store_descriptor],
         )
-        _, store_ok = store_future.result(timeout=DEFAULT_TIMEOUT)
+        print("[DEBUG] STORE request submitted, waiting...")
+        try:
+            _, store_ok = store_future.result(timeout=DEFAULT_TIMEOUT)
+        except Exception as e:
+            print(f"[DEBUG] STORE result error: {e} server alive={nixl_server_process.is_alive()}")
+            raise
         assert nixl_server_process.is_alive(), "Server died after STORE in retrieve test"
         assert store_ok is True, f"Store failed (server alive={nixl_server_process.is_alive()})"
 
