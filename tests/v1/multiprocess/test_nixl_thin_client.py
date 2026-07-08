@@ -34,6 +34,7 @@ from typing import Generator
 
 import pytest
 import torch
+import zmq
 
 # Try each cuXX variant in order; skip if none are importable.
 for _nixl_modname in ("nixl._api", "nixl_cu12._api", "nixl_cu13._api"):
@@ -45,8 +46,6 @@ for _nixl_modname in ("nixl._api", "nixl_cu12._api", "nixl_cu13._api"):
         pass
 else:
     pytest.skip("nixl not installed; skipping NIXL integration tests", allow_module_level=True)
-
-import zmq  # noqa: E402 — after the skip guard
 
 from lmcache.v1.distributed.config import (
     EvictionConfig,
@@ -64,7 +63,7 @@ from lmcache.v1.platform.base_ipc_wrapper import DeviceIPCWrapper
 from lmcache.v1.platform.rdma.nixl_wrapper import NixlWrapper
 
 SERVER_HOST = "localhost"
-SERVER_PORT = 5605  # Different port from RDMA test (5601) to avoid conflicts.
+SERVER_PORT = 5605
 SERVER_URL = f"tcp://{SERVER_HOST}:{SERVER_PORT}"
 CHUNK_SIZE = 4
 DEFAULT_TIMEOUT = 30.0
@@ -105,7 +104,7 @@ def nixl_server_process() -> Generator[mp.Process, None, None]:
         daemon=True,
     )
     proc.start()
-    time.sleep(2)  # Give the server time to bind its ZMQ socket.
+    time.sleep(2)
     yield proc
     if proc.is_alive():
         proc.terminate()
@@ -121,10 +120,12 @@ def zmq_context() -> Generator[zmq.Context, None, None]:
     yield context
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def client(
     nixl_server_process: mp.Process, zmq_context: zmq.Context
 ) -> Generator[MessageQueueClient, None, None]:
+    """Single module-scoped client — reused across tests to keep the ZMQ
+    connection alive and avoid UCX endpoint churn between test functions."""
     c = MessageQueueClient(server_url=SERVER_URL, context=zmq_context)
     yield c
     c.close()
@@ -135,14 +136,14 @@ def client(
 # ---------------------------------------------------------------------------
 
 
-def _make_key(request_id: str, num_tokens: int = CHUNK_SIZE) -> IPCCacheServerKey:
+def _make_key(request_id: str, tok_start: int = 0) -> IPCCacheServerKey:
     return IPCCacheServerKey(
         model_name="nixl-thin-client-test",
         world_size=1,
         worker_id=0,
-        token_ids=tuple(range(num_tokens)),
+        token_ids=tuple(range(tok_start, tok_start + CHUNK_SIZE)),
         start=0,
-        end=num_tokens,
+        end=CHUNK_SIZE,
         request_id=request_id,
     )
 
@@ -160,7 +161,7 @@ class TestNixlThinClientStore:
         wrapper = NixlWrapper.wrap(src)
         descriptor = DeviceIPCWrapper.Serialize(wrapper)
 
-        key = _make_key("nixl-store-0")
+        key = _make_key("nixl-store-0", tok_start=0)
         future = client.submit_request(
             RequestType.STORE,
             [key, os.getpid(), [], descriptor],
@@ -180,15 +181,7 @@ class TestNixlThinClientRetrieve:
         store_wrapper = NixlWrapper.wrap(src)
         store_descriptor = DeviceIPCWrapper.Serialize(store_wrapper)
 
-        key = IPCCacheServerKey(
-            model_name="nixl-thin-client-test",
-            world_size=1,
-            worker_id=0,
-            token_ids=tuple(range(100, 100 + CHUNK_SIZE)),
-            start=0,
-            end=CHUNK_SIZE,
-            request_id="nixl-store-retrieve-0",
-        )
+        key = _make_key("nixl-store-retrieve-0", tok_start=100)
         store_future = client.submit_request(
             RequestType.STORE,
             [key, os.getpid(), [], store_descriptor],
@@ -209,15 +202,7 @@ class TestNixlThinClientRetrieve:
         assert torch.allclose(dst, src), f"Mismatch: {dst} != {src}"
 
     def test_retrieve_miss_returns_false(self, client: MessageQueueClient) -> None:
-        key = IPCCacheServerKey(
-            model_name="nixl-thin-client-test",
-            world_size=1,
-            worker_id=0,
-            token_ids=tuple(range(9000, 9000 + CHUNK_SIZE)),
-            start=0,
-            end=CHUNK_SIZE,
-            request_id="nixl-miss-0",
-        )
+        key = _make_key("nixl-miss-0", tok_start=9000)
         dst = torch.zeros(CHUNK_SIZE, dtype=torch.float32)
         wrapper = NixlWrapper.wrap(dst)
         descriptor = DeviceIPCWrapper.Serialize(wrapper)
