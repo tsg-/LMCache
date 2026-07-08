@@ -67,7 +67,7 @@ SERVER_HOST = "localhost"
 SERVER_PORT = 5605  # Different port from RDMA test (5601) to avoid conflicts.
 SERVER_URL = f"tcp://{SERVER_HOST}:{SERVER_PORT}"
 CHUNK_SIZE = 4
-DEFAULT_TIMEOUT = 20.0
+DEFAULT_TIMEOUT = 30.0
 
 
 def _server_process_runner(host: str, port: int, chunk_size: int) -> None:

@@ -46,7 +46,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _POLL_INTERVAL_S: float = 0.0001  # 100 µs between check_xfer_state polls
-_XFER_TIMEOUT_S: float = 5.0
+_XFER_TIMEOUT_S: float = 15.0
 
 
 def _load_nixl():
