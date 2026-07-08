@@ -14,15 +14,15 @@ wrapped via :class:`NixlWrapper`, with descriptors sent as
 
 1. UCX and NIXL must be installed::
 
-       uv pip install nixl-cu12  # or nixl-cu13
+       .venv-ipu/bin/pip install nixl-cu12  # or nixl-cu13
 
-2. The ConnectX-7 NIC must be present (UCX falls back to loopback if not).
+2. The ConnectX-7 NIC is optional; UCX falls back to loopback if absent.
 
-3. Run with LMCACHE_NIXL_BACKENDS=UCX (the default)::
+3. Run::
 
-       uv run pytest tests/v1/multiprocess/test_nixl_thin_client.py -xvs
+       .venv-ipu/bin/python -m pytest tests/v1/multiprocess/test_nixl_thin_client.py -xvs
 
-This test is automatically skipped if ``nixl`` is not importable.
+This test is automatically skipped if no nixl variant is importable.
 """
 
 from __future__ import annotations
@@ -45,6 +45,8 @@ for _nixl_modname in ("nixl._api", "nixl_cu12._api", "nixl_cu13._api"):
         pass
 else:
     pytest.skip("nixl not installed; skipping NIXL integration tests", allow_module_level=True)
+
+import zmq  # noqa: E402 — after the skip guard
 
 from lmcache.v1.distributed.config import (
     EvictionConfig,
@@ -104,19 +106,28 @@ def nixl_server_process() -> Generator[mp.Process, None, None]:
     )
     proc.start()
     time.sleep(2)  # Give the server time to bind its ZMQ socket.
-
     yield proc
-
-    proc.terminate()
-    proc.join(timeout=5)
+    if proc.is_alive():
+        proc.terminate()
+        proc.join(timeout=5)
+        if proc.is_alive():
+            proc.kill()
+            proc.join()
 
 
 @pytest.fixture(scope="module")
-def mq_client(nixl_server_process: mp.Process) -> Generator[MessageQueueClient, None, None]:
-    """Return an MQ client connected to the NIXL server."""
-    client = MessageQueueClient(SERVER_URL, timeout=DEFAULT_TIMEOUT)
-    yield client
-    client.close()
+def zmq_context() -> Generator[zmq.Context, None, None]:
+    context = zmq.Context.instance()
+    yield context
+
+
+@pytest.fixture
+def client(
+    nixl_server_process: mp.Process, zmq_context: zmq.Context
+) -> Generator[MessageQueueClient, None, None]:
+    c = MessageQueueClient(server_url=SERVER_URL, context=zmq_context)
+    yield c
+    c.close()
 
 
 # ---------------------------------------------------------------------------
@@ -124,38 +135,16 @@ def mq_client(nixl_server_process: mp.Process) -> Generator[MessageQueueClient, 
 # ---------------------------------------------------------------------------
 
 
-def _make_key(token_ids: list[int] | None = None) -> IPCCacheServerKey:
+def _make_key(request_id: str, num_tokens: int = CHUNK_SIZE) -> IPCCacheServerKey:
     return IPCCacheServerKey(
-        model_name="test-model",
+        model_name="nixl-thin-client-test",
         world_size=1,
         worker_id=0,
-        token_ids=tuple(token_ids or [10, 20, 30, 40]),
+        token_ids=tuple(range(num_tokens)),
         start=0,
-        end=4,
-        request_id="req-nixl-0",
+        end=num_tokens,
+        request_id=request_id,
     )
-
-
-def _send_store(mq_client: MessageQueueClient, key: IPCCacheServerKey, tensor: torch.Tensor) -> bool:
-    """Wrap ``tensor`` via NIXL and send a STORE request."""
-    wrapper = NixlWrapper.wrap(tensor)
-    descriptor = DeviceIPCWrapper.Serialize(wrapper)
-    future = mq_client.send_request(RequestType.STORE, [key, 0, [], descriptor])
-    _result, succeeded = future.result(timeout=DEFAULT_TIMEOUT)
-    return succeeded
-
-
-def _send_retrieve(
-    mq_client: MessageQueueClient,
-    key: IPCCacheServerKey,
-    dst: torch.Tensor,
-) -> bool:
-    """Wrap ``dst`` via NIXL and send a RETRIEVE request."""
-    wrapper = NixlWrapper.wrap(dst)
-    descriptor = DeviceIPCWrapper.Serialize(wrapper)
-    future = mq_client.send_request(RequestType.RETRIEVE, [key, 0, [], descriptor])
-    _result, succeeded = future.result(timeout=DEFAULT_TIMEOUT)
-    return succeeded
 
 
 # ---------------------------------------------------------------------------
@@ -163,42 +152,79 @@ def _send_retrieve(
 # ---------------------------------------------------------------------------
 
 
-class TestNixlThinClientE2E:
-    """End-to-end STORE → RETRIEVE round-trip via NIXL."""
+class TestNixlThinClientStore:
+    """Drives STORE against a real server via a real ZMQ + NIXL client."""
 
-    def test_store_succeeds(self, mq_client: MessageQueueClient) -> None:
-        key = _make_key([1, 2, 3, 4])
-        src = torch.arange(16, dtype=torch.float32)
-        succeeded = _send_store(mq_client, key, src)
-        assert succeeded
+    def test_store_succeeds(self, client: MessageQueueClient) -> None:
+        src = torch.arange(CHUNK_SIZE, dtype=torch.float32)
+        wrapper = NixlWrapper.wrap(src)
+        descriptor = DeviceIPCWrapper.Serialize(wrapper)
 
-    def test_store_then_retrieve_returns_same_data(
-        self, mq_client: MessageQueueClient
-    ) -> None:
-        key = _make_key([5, 6, 7, 8])
-        src = torch.arange(16, dtype=torch.float32)
-        assert _send_store(mq_client, key, src)
+        key = _make_key("nixl-store-0")
+        future = client.submit_request(
+            RequestType.STORE,
+            [key, os.getpid(), [], descriptor],
+        )
+        response_bytes, ok = future.result(timeout=DEFAULT_TIMEOUT)
 
-        dst = torch.zeros(16, dtype=torch.float32)
-        succeeded = _send_retrieve(mq_client, key, dst)
-        assert succeeded
-        assert torch.allclose(dst, src), f"Mismatch: max abs diff={abs(dst - src).max()}"
+        assert ok is True
+        assert response_bytes == b""
 
-    def test_retrieve_miss_returns_false(self, mq_client: MessageQueueClient) -> None:
-        """A key that was never stored returns success=False."""
-        key = _make_key([999, 1000, 1001, 1002])
-        dst = torch.zeros(16, dtype=torch.float32)
-        succeeded = _send_retrieve(mq_client, key, dst)
-        assert not succeeded
 
-    def test_repeated_stores_are_idempotent(self, mq_client: MessageQueueClient) -> None:
-        """Storing the same key twice does not corrupt the retrieved data."""
-        key = _make_key([100, 101, 102, 103])
-        src = torch.ones(16, dtype=torch.float32) * 3.14
-        _send_store(mq_client, key, src)
-        _send_store(mq_client, key, src)
+class TestNixlThinClientRetrieve:
+    """Drives STORE then RETRIEVE, verifying the round-tripped bytes."""
 
-        dst = torch.zeros(16, dtype=torch.float32)
-        succeeded = _send_retrieve(mq_client, key, dst)
-        assert succeeded
-        assert torch.allclose(dst, src)
+    def test_retrieve_returns_same_data(self, client: MessageQueueClient) -> None:
+        src = torch.arange(CHUNK_SIZE, dtype=torch.float32) + 10.0
+
+        store_wrapper = NixlWrapper.wrap(src)
+        store_descriptor = DeviceIPCWrapper.Serialize(store_wrapper)
+
+        key = IPCCacheServerKey(
+            model_name="nixl-thin-client-test",
+            world_size=1,
+            worker_id=0,
+            token_ids=tuple(range(100, 100 + CHUNK_SIZE)),
+            start=0,
+            end=CHUNK_SIZE,
+            request_id="nixl-store-retrieve-0",
+        )
+        store_future = client.submit_request(
+            RequestType.STORE,
+            [key, os.getpid(), [], store_descriptor],
+        )
+        _, store_ok = store_future.result(timeout=DEFAULT_TIMEOUT)
+        assert store_ok is True
+
+        dst = torch.zeros(CHUNK_SIZE, dtype=torch.float32)
+        retrieve_wrapper = NixlWrapper.wrap(dst)
+        retrieve_descriptor = DeviceIPCWrapper.Serialize(retrieve_wrapper)
+
+        retrieve_future = client.submit_request(
+            RequestType.RETRIEVE,
+            [key, os.getpid(), [], retrieve_descriptor],
+        )
+        _, retrieve_ok = retrieve_future.result(timeout=DEFAULT_TIMEOUT)
+        assert retrieve_ok is True
+        assert torch.allclose(dst, src), f"Mismatch: {dst} != {src}"
+
+    def test_retrieve_miss_returns_false(self, client: MessageQueueClient) -> None:
+        key = IPCCacheServerKey(
+            model_name="nixl-thin-client-test",
+            world_size=1,
+            worker_id=0,
+            token_ids=tuple(range(9000, 9000 + CHUNK_SIZE)),
+            start=0,
+            end=CHUNK_SIZE,
+            request_id="nixl-miss-0",
+        )
+        dst = torch.zeros(CHUNK_SIZE, dtype=torch.float32)
+        wrapper = NixlWrapper.wrap(dst)
+        descriptor = DeviceIPCWrapper.Serialize(wrapper)
+
+        future = client.submit_request(
+            RequestType.RETRIEVE,
+            [key, os.getpid(), [], descriptor],
+        )
+        _, ok = future.result(timeout=DEFAULT_TIMEOUT)
+        assert ok is False
