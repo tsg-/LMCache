@@ -71,6 +71,11 @@ DEFAULT_TIMEOUT = 30.0
 
 def _server_process_runner(host: str, port: int, chunk_size: int) -> None:
     """Entry point for the NIXL-mode server subprocess."""
+    import os as _os
+    # Set UCX_TLS before any nixl/ucx initialization to force TCP loopback.
+    # UCX shmem transport causes the second cross-process transfer to stall
+    # when the first transfer's MR has been deregistered/re-registered.
+    _os.environ["UCX_TLS"] = "tcp,self"
     mp_config = MPServerConfig(
         host=host,
         port=port,

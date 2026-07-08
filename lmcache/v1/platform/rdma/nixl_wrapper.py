@@ -66,10 +66,13 @@ def get_nixl_agent():
         return _AGENT
     with _AGENT_LOCK:
         if _AGENT is None:
-            nixl_agent_cls, nixl_agent_config_cls = _load_nixl()
+            # Set UCX_TLS before first NIXL/UCX init so UCX uses TCP loopback.
+            # UCX shmem stalls on the second cross-process transfer when MRs
+            # are deregistered/re-registered between requests.  This must be
+            # set before _load_nixl() triggers UCX initialization.
             import os
-            # Match server: disable shmem to avoid cross-process stall issues.
             os.environ.setdefault("UCX_TLS", "tcp,self")
+            nixl_agent_cls, nixl_agent_config_cls = _load_nixl()
             _AGENT = nixl_agent_cls(
                 f"lmcache_worker_{os.getpid()}",
                 nixl_agent_config_cls(backends=["UCX"]),

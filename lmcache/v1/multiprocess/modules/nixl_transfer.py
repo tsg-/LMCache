@@ -132,9 +132,17 @@ class NixlTransferModule:
         backends: Optional[list[str]] = None,
     ) -> None:
         self._ctx = ctx
-        nixl_agent_cls, nixl_agent_config_cls = _load_nixl()
-        _backends = backends if backends is not None else ["UCX"]
         import os
+        _backends = backends if backends is not None else ["UCX"]
+
+        # Set UCX_TLS before first NIXL/UCX initialization so UCX uses TCP
+        # loopback.  UCX shmem transport can stall on the second cross-process
+        # NIXL READ when local MRs are deregistered/re-registered between
+        # requests.  Must be set before _load_nixl() triggers UCX init.
+        os.environ.setdefault("UCX_TLS", "tcp,self")
+
+        nixl_agent_cls, nixl_agent_config_cls = _load_nixl()
+
         # Use STRICT sync mode so concurrent AFFINITY-pool threads don't race
         # on shared nixl_agent internal state.
         nixl_thread_sync_t = None
@@ -150,13 +158,6 @@ class NixlTransferModule:
         agent_kwargs: dict = {"backends": _backends}
         if nixl_thread_sync_t is not None:
             agent_kwargs["sync_mode"] = nixl_thread_sync_t.NIXL_THREAD_SYNC_STRICT
-
-        # Disable UCX shared-memory transport: shmem transfers between the
-        # server subprocess (spawned) and the parent test process can stall
-        # on the second request when UCX shmem segment tracking gets
-        # inconsistent after the first transfer's deregister/re-register cycle.
-        # TCP loopback is reliable for all inter-process transfers.
-        os.environ.setdefault("UCX_TLS", "tcp,self")
 
         self._agent = nixl_agent_cls(
             f"lmcache_server_{os.getpid()}_{id(self)}",
