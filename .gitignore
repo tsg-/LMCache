@@ -159,3 +159,4 @@ docs/source/locale/**/*.mo
 .beads/proxieddb/
 .claude/CLAUDE.md
 .DS_Store
+.worktrees/
