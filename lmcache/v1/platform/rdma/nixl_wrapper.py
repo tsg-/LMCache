@@ -85,17 +85,27 @@ def get_nixl_agent():
 
 
 def _deregister_on_gc(data_ptr: int, reg_desc: object) -> None:
-    """Finalizer: remove the stale cache entry when tensor is collected.
+    """Finalizer: deregister the MR and remove the stale cache entry.
 
-    We do NOT call ``agent.deregister_memory`` here because deregistering
-    a UCX memory region while a NIXL transfer from the server subprocess
-    may still be reading that region (or the UCX endpoint still has state
-    referencing it) can cause the subsequent NIXL READ to stall permanently.
-    Memory regions remain registered for the lifetime of the process-level
-    agent; UCX releases them when the agent is destroyed.
+    The GC finalizer may run while a NIXL transfer is in flight only if
+    the tensor was collected before :meth:`NixlWrapper.wrap` retains a
+    reference to it.  Since :meth:`wrap` is called in the same scope as
+    the tensor and the future is not resolved until the server completes
+    the NIXL READ, the tensor must remain alive until the future resolves.
+    Callers are responsible for keeping the tensor alive long enough.
+
+    We deregister here so that if the allocator reuses the same address
+    for a new tensor, the new registration does not conflict with the stale
+    one in the worker's UCX context.
     """
     with _REG_LOCK:
         _REG_PTRS.pop(data_ptr, None)
+    agent = _AGENT
+    if agent is not None:
+        try:
+            agent.deregister_memory(reg_desc)
+        except Exception:
+            pass
 
 
 def _ensure_registered(tensor: torch.Tensor) -> object:
@@ -193,6 +203,14 @@ class NixlWrapper(DeviceIPCWrapper):
         """
         if not tensor.is_contiguous():
             raise ValueError("NixlWrapper requires a contiguous tensor")
+
+        # Force GC so that any pending _deregister_on_gc finalizers run
+        # before we register the new tensor.  Without this, a prior tensor
+        # at the same address may still be registered in the NIXL agent when
+        # we call register_memory below, causing a UCX registration conflict
+        # that stalls the next NIXL transfer.
+        import gc
+        gc.collect()
 
         _ensure_registered(tensor)
         agent = get_nixl_agent()
