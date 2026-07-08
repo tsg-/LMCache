@@ -27,7 +27,7 @@ A single `VerbsRdmaTransport` class that:
 
 ## Out of Scope (Filed as P3)
 
-- Multi-peer / multi-QP striping (LMCache-9he)
+- ~~Multi-peer / multi-QP striping (LMCache-9he)~~ — **Implemented**
 - Dynamic reconnection (LMCache-6c9)
 - Event-driven CQ (LMCache-kyc)
 - GID resolution / rdma_cm (LMCache-ztb)
@@ -51,6 +51,7 @@ A single `VerbsRdmaTransport` class that:
 | `LMCACHE_RDMA_ENDPOINT_FILE` | path | no | `/tmp/lmcache_rdma_{role}_{nonce}.json` | Write local endpoint |
 | `LMCACHE_RDMA_PEER_ENDPOINT_FILE` | path | no | `/tmp/lmcache_rdma_{peer_role}_{nonce}.json` | Poll for peer endpoint |
 | `LMCACHE_RDMA_NONCE` | string | rendezvous mode | — | Session nonce (shared by both sides) |
+| `LMCACHE_RDMA_QP_COUNT` | integer ≥ 1 | no | `1` | Number of RC QPs for round-robin striping |
 
 **Connection modes:**
 - **Preconfigured:** All three `REMOTE_*` vars set → connect immediately,
@@ -742,6 +743,60 @@ Called by `__del__` as safety net. Tests should call `close()` explicitly.
 3. **Hardware validation:** On IPU nodes, run with
    `LMCACHE_RDMA_TRANSPORT=verbs` using the benchmark scenarios from
    `docs/design/tools/ipu_traffic_benchmarks/`.
+
+
+### Multi-QP Striping (LMCache-9he)
+
+A single RC QP saturates ~100 Gb/s due to per-QP HCA scheduling.  To
+reach 400 Gb/s, `LMCACHE_RDMA_QP_COUNT` (default 1, backward-compat)
+creates multiple independent QP/CQ/lock slots and dispatches operations
+round-robin across them.
+
+**Internal structure** (per-QP lists, index 0 is the backward-compat
+single-QP slot):
+
+```python
+self._qps:             list[QP]
+self._cqs:             list[CQ]
+self._qp_locks:        list[threading.Lock]
+self._inflight_futures: list[RdmaFuture | None]
+self._inflight_wr_ids: list[int]
+self._next_wr_ids:     list[int]
+
+# Striping state
+self._qp_count: int        # from LMCACHE_RDMA_QP_COUNT
+self._next_qp:  int = 0    # round-robin counter
+self._stripe_lock: threading.Lock  # protects _next_qp only
+```
+
+**Round-robin dispatch:** `post_read` / `post_write` atomically
+read-and-increment `_next_qp` under `_stripe_lock`, then proceed with
+the selected slot's lock (held from post until `poll_completion`).
+
+**`connect_all(remote_qpns, remote_psn, remote_gid, remote_lid)`:**
+Connects QP[i] to `remote_qpns[i]`.  Length must match `_qp_count`;
+raises `ValueError` otherwise.
+
+**Rendezvous extension:** The endpoint JSON gains a `"qpns"` list
+(all local QP numbers).  The legacy `"qpn"` field (first QP) is
+retained for backward-compat single-QP peers.  After reading the peer
+file, if `len(peer_qpns) != qp_count` a `ValueError` is raised
+immediately.
+
+**`poll_completion`:** Scans `_inflight_futures` to locate the slot
+owning the given future (O(N), N ≤ 16 QPs), then polls only that
+slot's CQ.
+
+**`drain_on_timeout`:** Locates the slot with a non-`None` inflight
+future and drains only that QP/CQ.
+
+**`close`:** Acquires all per-QP locks before teardown to prevent
+races with concurrent posts.
+
+**Backward compat:** With `LMCACHE_RDMA_QP_COUNT=1` (the default) all
+lists have exactly one element.  Property aliases `_qp`, `_cq`,
+`_qp_lock`, `_inflight_future`, `_inflight_wr_id` redirect to slot 0
+so existing tests and callers need no changes.
 
 
 ## Success Criteria

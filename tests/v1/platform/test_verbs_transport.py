@@ -709,3 +709,201 @@ class TestClose:
         assert buf in transport._allocated_buffers
         transport.close()
         assert len(transport._allocated_buffers) == 0
+
+
+# ---------------------------------------------------------------------------
+# Multi-QP striping tests (LMCache-9he)
+# ---------------------------------------------------------------------------
+
+def _make_multi_qp_transport(mock_pyverbs, qp_count: int, role: str = "target"):
+    """Create a VerbsRdmaTransport with ``qp_count`` QPs, mocked verbs."""
+    vt_mod = mock_pyverbs
+
+    ctx_mock = MagicMock()
+    port_attr = MagicMock()
+    port_attr.lid = 1
+    ctx_mock.query_port.return_value = port_attr
+    gid_mock = MagicMock()
+    gid_mock.gid = b"\xfe\x80" + b"\x00" * 14
+    ctx_mock.query_gid.return_value = gid_mock
+    vt_mod.VerbsContext.return_value = ctx_mock
+
+    # Each QP() call returns a distinct mock with a unique qp_num
+    qp_mocks = [MagicMock() for _ in range(qp_count)]
+    for i, qm in enumerate(qp_mocks):
+        qm.qp_num = 100 + i
+    vt_mod.QP.side_effect = qp_mocks
+
+    transport = vt_mod.VerbsRdmaTransport(
+        role=role, device="mlx5_0", port=1, gid_index=0,
+        local_psn=100, qp_count=qp_count,
+    )
+    # Reset side_effect so later QP() calls elsewhere don't consume our list
+    vt_mod.QP.side_effect = None
+
+    return transport, qp_mocks
+
+
+class TestMultiQpStriping:
+    def test_single_qp_default(self, mock_pyverbs):
+        """No env var / no explicit count → qp_count == 1, single-element lists."""
+        transport = _make_transport(mock_pyverbs, role="target")
+        assert transport._qp_count == 1
+        assert len(transport._qps) == 1
+        assert len(transport._cqs) == 1
+        assert len(transport._qp_locks) == 1
+        assert len(transport._inflight_futures) == 1
+        assert len(transport._next_wr_ids) == 1
+
+    def test_multi_qp_count_from_env(self, mock_pyverbs, monkeypatch):
+        """LMCACHE_RDMA_QP_COUNT=4 → qp_count 4, four independent resource lists."""
+        monkeypatch.setenv("LMCACHE_RDMA_ROLE", "target")
+        monkeypatch.setenv("LMCACHE_RDMA_DEVICE", "mlx5_0")
+        monkeypatch.setenv("LMCACHE_RDMA_LOCAL_PSN", "100")
+        monkeypatch.setenv("LMCACHE_RDMA_QP_COUNT", "4")
+        monkeypatch.setenv("LMCACHE_RDMA_REMOTE_QPN", "99")
+        monkeypatch.setenv("LMCACHE_RDMA_REMOTE_PSN", "200")
+        monkeypatch.setenv("LMCACHE_RDMA_REMOTE_GID", "fe80" + "0" * 28)
+
+        ctx_mock = MagicMock()
+        port_attr = MagicMock()
+        port_attr.lid = 1
+        ctx_mock.query_port.return_value = port_attr
+        gid_mock = MagicMock()
+        gid_mock.gid = b"\xfe\x80" + b"\x00" * 14
+        ctx_mock.query_gid.return_value = gid_mock
+        mock_pyverbs.VerbsContext.return_value = ctx_mock
+
+        qp_mocks = [MagicMock() for _ in range(4)]
+        for i, qm in enumerate(qp_mocks):
+            qm.qp_num = 200 + i
+        mock_pyverbs.QP.side_effect = qp_mocks
+
+        transport = mock_pyverbs.VerbsRdmaTransport.from_env()
+        mock_pyverbs.QP.side_effect = None
+
+        assert transport._qp_count == 4
+        assert len(transport._qps) == 4
+        assert len(transport._cqs) == 4
+        assert len(transport._qp_locks) == 4
+
+    def test_invalid_qp_count_raises(self, mock_pyverbs):
+        """qp_count=0 must raise ValueError at construction."""
+        ctx_mock = MagicMock()
+        port_attr = MagicMock()
+        port_attr.lid = 1
+        ctx_mock.query_port.return_value = port_attr
+        gid_mock = MagicMock()
+        gid_mock.gid = b"\xfe\x80" + b"\x00" * 14
+        ctx_mock.query_gid.return_value = gid_mock
+        mock_pyverbs.VerbsContext.return_value = ctx_mock
+
+        with pytest.raises(ValueError, match="qp_count"):
+            mock_pyverbs.VerbsRdmaTransport(
+                role="target", device="mlx5_0", port=1,
+                gid_index=0, local_psn=100, qp_count=0,
+            )
+
+    def test_post_read_round_robins(self, mock_pyverbs):
+        """4 QPs: post_read dispatches slot 0,1,2,3 in order, one per call."""
+        from lmcache.v1.platform.rdma.rdma_transport import (
+            RegisteredBuffer, MrInfo, RdmaFuture,
+        )
+        transport, qp_mocks = _make_multi_qp_transport(mock_pyverbs, qp_count=4)
+
+        # Connect all four QPs with dummy peer QPNs
+        transport.connect_all(
+            remote_qpns=[10, 11, 12, 13],
+            remote_psn=200,
+            remote_gid="fe80" + "0" * 28,
+            remote_lid=0,
+        )
+
+        mr = MrInfo(rkey=1, addr=0x1000, length=4096, handle=MagicMock())
+        buf = RegisteredBuffer(addr=0x1000, length=4096, mr=mr)
+
+        cq_mocks = transport._cqs  # list of CQ mocks created by CQ()
+
+        for expected_slot in range(4):
+            # Post the read — lands on slot expected_slot
+            future = transport.post_read(buf, remote_addr=0x2000, rkey=5, length=4096)
+
+            # The QP mock for this slot must have received a post_send call
+            qp_mocks[expected_slot].post_send.assert_called()
+
+            # Synthesize a success CQE and drive poll_completion to release the lock
+            wc = MagicMock()
+            wc.wr_id = transport._inflight_wr_ids[expected_slot]
+            wc.status = 0  # IBV_WC_SUCCESS
+            cq_mocks[expected_slot].poll.return_value = (1, [wc])
+            result = transport.poll_completion(future, timeout_ms=100)
+            assert result is True
+
+    def test_connect_all_connects_each_qp(self, mock_pyverbs):
+        """connect_all with 4 QPs calls modify twice (RTR+RTS) on each."""
+        transport, qp_mocks = _make_multi_qp_transport(mock_pyverbs, qp_count=4)
+
+        transport.connect_all(
+            remote_qpns=[10, 11, 12, 13],
+            remote_psn=200,
+            remote_gid="fe80" + "0" * 28,
+            remote_lid=0,
+        )
+
+        for i, qm in enumerate(qp_mocks):
+            # Each QP gets exactly 2 modify calls: _modify_to_init (in __init__)
+            # + _modify_to_rtr + _modify_to_rts from connect_all.
+            # We care that RTR+RTS happened, so assert >= 2 (init was 1, +2 = 3).
+            assert qm.modify.call_count >= 2, (
+                f"QP[{i}] modify call count {qm.modify.call_count} < 2"
+            )
+
+    def test_connect_all_wrong_length_raises(self, mock_pyverbs):
+        """connect_all with wrong-length remote_qpns list raises ValueError."""
+        transport, _ = _make_multi_qp_transport(mock_pyverbs, qp_count=4)
+
+        with pytest.raises(ValueError, match="qp_count"):
+            transport.connect_all(
+                remote_qpns=[10, 11],  # only 2, need 4
+                remote_psn=200,
+                remote_gid="fe80" + "0" * 28,
+            )
+
+    def test_rendezvous_qp_count_mismatch_raises(self, mock_pyverbs, monkeypatch, tmp_path):
+        """Peer endpoint with 2 qpns but local qp_count=4 must raise ValueError."""
+        monkeypatch.setenv("LMCACHE_RDMA_ROLE", "target")
+        monkeypatch.setenv("LMCACHE_RDMA_DEVICE", "mlx5_0")
+        monkeypatch.setenv("LMCACHE_RDMA_LOCAL_PSN", "100")
+        monkeypatch.setenv("LMCACHE_RDMA_NONCE", "test456")
+
+        endpoint_file = tmp_path / "target.json"
+        peer_file = tmp_path / "initiator.json"
+        monkeypatch.setenv("LMCACHE_RDMA_ENDPOINT_FILE", str(endpoint_file))
+        monkeypatch.setenv("LMCACHE_RDMA_PEER_ENDPOINT_FILE", str(peer_file))
+
+        peer_data = {
+            "qpn": 1, "qpns": [1, 2],  # only 2
+            "psn": 200, "gid": "fe80" + "0" * 28, "lid": 0,
+            "nonce": "test456",
+        }
+        peer_file.write_text(json.dumps(peer_data))
+
+        ctx_mock = MagicMock()
+        port_attr = MagicMock()
+        port_attr.lid = 1
+        ctx_mock.query_port.return_value = port_attr
+        gid_mock = MagicMock()
+        gid_mock.gid = b"\xfe\x80" + b"\x00" * 14
+        ctx_mock.query_gid.return_value = gid_mock
+        mock_pyverbs.VerbsContext.return_value = ctx_mock
+
+        qp_mocks = [MagicMock() for _ in range(4)]
+        for i, qm in enumerate(qp_mocks):
+            qm.qp_num = 300 + i
+        mock_pyverbs.QP.side_effect = qp_mocks
+
+        # 4 QPs locally, peer only has 2 → ValueError
+        monkeypatch.setenv("LMCACHE_RDMA_QP_COUNT", "4")
+        with pytest.raises(ValueError, match="QP count mismatch"):
+            mock_pyverbs.VerbsRdmaTransport.from_env()
+        mock_pyverbs.QP.side_effect = None
