@@ -85,15 +85,17 @@ def get_nixl_agent():
 
 
 def _deregister_on_gc(data_ptr: int, reg_desc: object) -> None:
-    """Finalizer: deregister memory region when tensor is collected."""
+    """Finalizer: remove the stale cache entry when tensor is collected.
+
+    We do NOT call ``agent.deregister_memory`` here because deregistering
+    a UCX memory region while a NIXL transfer from the server subprocess
+    may still be reading that region (or the UCX endpoint still has state
+    referencing it) can cause the subsequent NIXL READ to stall permanently.
+    Memory regions remain registered for the lifetime of the process-level
+    agent; UCX releases them when the agent is destroyed.
+    """
     with _REG_LOCK:
         _REG_PTRS.pop(data_ptr, None)
-    agent = _AGENT
-    if agent is not None:
-        try:
-            agent.deregister_memory(reg_desc)
-        except Exception:
-            pass
 
 
 def _ensure_registered(tensor: torch.Tensor) -> object:
