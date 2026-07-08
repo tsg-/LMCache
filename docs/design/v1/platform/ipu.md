@@ -118,8 +118,8 @@ DRAM/SSD, not to run inference.
     |   RdmaWrapper (NEW)  -- rkey + remote_vaddr + length      |
     +-------------------------------------------------------------+
     | Layer 2: TransferContext (how store/retrieve are submitted)  |
-    |   LMCacheDrivenTransferContext (REUSED, no changes)          |
-    |     - passes event.ipc_handle() -> server calls to_tensor() |
+    |   RdmaTransferContext (NEW)                                  |
+    |     - passes event.ipc_handle() -> pickled RdmaWrapper bytes |
     +-------------------------------------------------------------+
     | Layer 3: Platform registry (auto-discovery by device_type)   |
     |   "cuda" -> CudaIPCWrapper.wrap                             |
@@ -130,11 +130,13 @@ DRAM/SSD, not to run inference.
 
 Key decisions:
 
-1. We do NOT add a new `TransferContext` subclass. The existing
-   `LMCacheDrivenTransferContext` already implements pull semantics (server
-   receives handle, calls `to_tensor()` at its own pace). We only need a new
-   `DeviceIPCWrapper` that makes `to_tensor()` post an RDMA Read instead of
-   doing a local mmap.
+1. A new `RdmaTransferContext` subclass is added in `worker_transfer.py`.
+   Unlike `LMCacheDrivenTransferContext` (which sends a CUDA IPC handle and
+   lets the server pull from GPU memory), `RdmaTransferContext` sends pickled
+   `RdmaWrapper` bytes containing the RDMA descriptor; `block_ids` is always
+   `[]`. No CUDA events, no `.to_cuda_future()`. We also need a new
+   `DeviceIPCWrapper` (`RdmaWrapper`) that makes `to_tensor()` post an RDMA
+   Read instead of doing a local mmap.
 
 2. **RDMA pulls write data** — the storage server (target) always initiates
    the data transfer via RDMA Read. This keeps the storage server in full
@@ -362,10 +364,10 @@ No changes to:
 - Token hasher, session manager, cache engine
 
 New code:
-- `RdmaTransferContext` (new, in `worker_transfer.py`) — replaces
-  `LMCacheDrivenTransferContext` on the IPU path. Sends pickled
-  `RdmaWrapper` as the RDMA descriptor; `block_ids` is always `[]`.
-  No CUDA events, no `.to_cuda_future()`.
+- `RdmaTransferContext` (new, in `worker_transfer.py`) — new dedicated
+  subclass for the RDMA path. Sends pickled `RdmaWrapper` as the RDMA
+  descriptor; `block_ids` is always `[]`. No CUDA events,
+  no `.to_cuda_future()`.
 - `RdmaTransferModule` (new, in `modules/rdma_transfer.py`) — server-side
   STORE/RETRIEVE handler. Zero-copy: `post_read`/`post_write` target
   `MemoryObj.data_ptr` directly. No `REGISTER_KV_CACHE` handler needed.
@@ -382,7 +384,7 @@ The new config surface:
 
 On the initiator, compute engine (TPU/GPU) writes KV to host DRAM via DMA.
 The `wrap()` method must not return until that DMA is complete — otherwise the
-IPU may serve stale data on RDMA Read. The fence contract:
+NIC/IPU may serve stale data on RDMA Read. The fence contract:
 
 ```
     # In the vLLM adapter, before wrap():
@@ -390,12 +392,13 @@ IPU may serve stale data on RDMA Read. The fence contract:
     wrapper = RdmaWrapper.wrap(tensor)  # safe to serve
 ```
 
-This fence already exists in the `EngineDrivenTransferContext` path
-(`torch_dev.synchronize()` at line 413 of `worker_transfer.py`). For the
-`LMCacheDrivenTransferContext` path, the fence is implicit in the CUDA IPC
-handle — but for IPU we need to ensure the adapter inserts it. This is
-handled by the `IPCEvent` protocol: the event's `ipc_handle()` method should
-not return until the source buffer is stable.
+This fence is performed by the vLLM adapter before calling `ipc_handle()` on
+the RDMA path. It is also present in the `EngineDrivenTransferContext` path
+(SHM case) at `worker_transfer.py`. On the RDMA path, the fence is explicit:
+the adapter must ensure all compute-engine DMA is complete before handing the
+`RdmaWrapper` to the server. This is enforced by the `IPCEvent` protocol:
+the event's `ipc_handle()` method should not return until the source buffer
+is stable.
 
 
 ### Testing Strategy
@@ -685,8 +688,8 @@ sequenceDiagram
 The `RdmaTransport` protocol abstraction already isolates the transport layer.
 An IPT backend would implement the same interface (`register_mr`, `post_read`,
 `post_write`, `poll_completion`) but backed by IPT program calls rather than
-libibverbs. The `RdmaWrapper` and `LMCacheDrivenTransferContext` layers
-remain unchanged.
+libibverbs. The `RdmaWrapper` and `RdmaTransferContext` layers remain
+unchanged.
 
 **Status:** Under patent by Anjali's team. Integration depends on IPT SDK
 availability and Falcon program toolchain access. Current implementation

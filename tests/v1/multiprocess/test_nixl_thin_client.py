@@ -23,14 +23,6 @@ wrapped via :class:`NixlWrapper`, with descriptors sent as
        .venv-ipu/bin/python -m pytest tests/v1/multiprocess/test_nixl_thin_client.py -xvs
 
 This test is automatically skipped if no nixl variant is importable.
-
-**Known issue (xfail):** The multi-test sequence (store + store+retrieve + miss)
-stalls on the second STORE when using UCX TCP transport between pytest worker
-and spawned server subprocess.  Root cause: with TCP transport, the server's
-NIXL READ requires the worker to actively respond to the incoming TCP packet.
-The worker's UCX progress thread is delayed in the pytest environment (GIL
-contention), causing the server to wait indefinitely.  This does NOT affect
-production use (real RDMA NIC uses one-sided DMA, no worker involvement).
 """
 
 from __future__ import annotations
@@ -180,14 +172,6 @@ class TestNixlThinClientE2E:
         assert ok is True
         assert response_bytes == b""
 
-    @pytest.mark.xfail(
-        reason=(
-            "UCX TCP progress thread delayed in pytest environment (GIL contention). "
-            "Second STORE stalls waiting for worker UCX response. "
-            "Not a production issue: real RDMA NICs use one-sided DMA."
-        ),
-        strict=False,
-    )
     def test_store_then_retrieve(
         self,
         client: MessageQueueClient,
@@ -215,16 +199,12 @@ class TestNixlThinClientE2E:
 
         retrieve_future = client.submit_request(
             RequestType.RETRIEVE,
-            [key, os.getpid(), [], retrieve_descriptor],
+            [key, os.getpid(), [], retrieve_descriptor, 0],
         )
         _, retrieve_ok = retrieve_future.result(timeout=DEFAULT_TIMEOUT)
         assert retrieve_ok is True
         assert torch.allclose(dst, src), f"Mismatch: {dst} != {src}"
 
-    @pytest.mark.xfail(
-        reason="Depends on test_store_then_retrieve; xfail for same reason.",
-        strict=False,
-    )
     def test_retrieve_miss_returns_false(
         self,
         client: MessageQueueClient,
@@ -239,7 +219,7 @@ class TestNixlThinClientE2E:
 
         future = client.submit_request(
             RequestType.RETRIEVE,
-            [key, os.getpid(), [], descriptor],
+            [key, os.getpid(), [], descriptor, 0],
         )
         _, ok = future.result(timeout=DEFAULT_TIMEOUT)
         assert ok is False

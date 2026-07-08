@@ -23,13 +23,15 @@ a second engine-driven path that works across non-CUDA backends.
 ```text
 Worker adapter (vLLM MP adapter)
   └─ TransferContext (transfer_context/worker_transfer.py)
-      ├─ LMCacheDrivenTransferContext  (IPC path via stream/event)
-      └─ EngineDrivenTransferContext    (data path via data copying in adapter)
-          ├─ AsyncEngineDrivenTransferContext (async_engine_driven.py)
-          │    (store-only async: all three phases run in background thread pool)
-          └─ EngineDrivenContext (transfer_context/base.py)
-             ├─ EngineDrivenContextPickle (transfer_context/pickle.py)
-             └─ EngineDrivenContextShm    (transfer_context/shm.py)
+      ├─ LMCacheDrivenTransferContext  (IPC path via CUDA stream/event)
+      ├─ EngineDrivenTransferContext    (data path via data copying in adapter)
+      │   ├─ AsyncEngineDrivenTransferContext (async_engine_driven.py)
+      │   │    (store-only async: all three phases run in background thread pool)
+      │   └─ EngineDrivenContext (transfer_context/base.py)
+      │      ├─ EngineDrivenContextPickle (transfer_context/pickle.py)
+      │      └─ EngineDrivenContextShm    (transfer_context/shm.py)
+      ├─ RdmaTransferContext            (RDMA/RoCEv2 path; see docs/design/v1/platform/ipu.md)
+      └─ NixlTransferContext            (NIXL/UCX path; see transfer_context/nixl_transfer.py)
 
 MPCacheServer (server)
 ├─ MPCacheServerContext (engine_context.py)
@@ -50,11 +52,15 @@ State machine overview (worker-side):
 ```text
                        create_transfer_context()
                                  |
+              (mode=auto, device-type dispatch)
+                                 |
                  +---------------+---------------+
                  |                               |
                  v                               v
       LMCacheDrivenTransferContext    EngineDrivenTransferContext
-          (device == CUDA)            (device != CUDA, sync fallback)
+          (device == CUDA)            (device != CUDA)
+        (other modes: rdma/nixl/lmcache_driven/engine_driven
+         bypass this branch — see MPTransferMode)
                  |                       AsyncEngineDrivenTransferContext
                  |                       (device != CUDA, async primitives available)
                  |                               |
@@ -140,13 +146,17 @@ Why `prepare → data operation → commit`:
   CPU chunks, performed between protocol phases.
 - `commit_*`: finalize and notify server to consume or release transfer state.
 
-`create_transfer_context()` selects the implementation once based on device type
-and async capability:
+`create_transfer_context()` selects the implementation by checking the
+`LMCACHE_MP_TRANSFER_MODE` env var (or the `mode` argument) first. Explicit
+modes (`rdma`, `nixl`, `lmcache_driven`, `engine_driven`) bypass device-type
+detection. In `auto` mode (the default), it falls back to device type and async
+capability:
 - CUDA device → `LMCacheDrivenTransferContext`
 - Non-CUDA device → `_build_engine_driven_context()`, which probes async primitives:
   - async primitives available (stream, event with record/synchronize/wait, pin_memory) →
     `AsyncEngineDrivenTransferContext`
   - otherwise → `EngineDrivenTransferContext` (synchronous fallback)
+
 
 It also validates that all KV cache tensors share one device type and rejects
 mixed-device configurations by raising an error.
