@@ -176,6 +176,10 @@ class NixlWrapper(DeviceIPCWrapper):
     def wrap(cls, tensor: torch.Tensor) -> "NixlWrapper":
         """Register the tensor's backing memory with NIXL and create a wrapper.
 
+        Sends partial agent metadata (only this tensor's registration entry +
+        connection info) so the server can locate the new tensor even after
+        the agent already exists in its registry from a prior wrap() call.
+
         Args:
             tensor: A contiguous tensor in CPU DRAM or GPU VRAM.
 
@@ -185,11 +189,15 @@ class NixlWrapper(DeviceIPCWrapper):
         if not tensor.is_contiguous():
             raise ValueError("NixlWrapper requires a contiguous tensor")
 
-        _ensure_registered(tensor)
+        reg_descs = _ensure_registered(tensor)
         agent = get_nixl_agent()
 
         agent_name = agent.name
-        agent_metadata = agent.get_agent_metadata()
+        # Use partial metadata scoped to this tensor so the server can add or
+        # update the remote descriptor even when the agent is already known.
+        agent_metadata = agent.get_partial_agent_metadata(
+            reg_descs, inc_conn_info=True
+        )
         base_addr = tensor.data_ptr()
         nbytes = tensor.numel() * tensor.element_size()
         device_id = max(tensor.get_device(), 0)
