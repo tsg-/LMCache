@@ -157,3 +157,5 @@ docs/source/locale/**/*.mo
 *.db
 .beads-credential-key
 .beads/proxieddb/
+.claude/CLAUDE.md
+.DS_Store
