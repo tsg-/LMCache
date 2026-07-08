@@ -73,8 +73,6 @@ def _server_process_runner(host: str, port: int, chunk_size: int) -> None:
     """Entry point for the NIXL-mode server subprocess."""
     import os as _os
     # Set UCX_TLS before any nixl/ucx initialization to force TCP loopback.
-    # UCX shmem transport causes the second cross-process transfer to stall
-    # when the first transfer's MR has been deregistered/re-registered.
     _os.environ["UCX_TLS"] = "tcp,self"
     mp_config = MPServerConfig(
         host=host,
@@ -109,7 +107,7 @@ def nixl_server_process() -> Generator[mp.Process, None, None]:
         daemon=True,
     )
     proc.start()
-    time.sleep(2)
+    time.sleep(3)  # Give server more time; NIXL UCX init can be slow.
     yield proc
     if proc.is_alive():
         proc.terminate()
@@ -129,8 +127,7 @@ def zmq_context() -> Generator[zmq.Context, None, None]:
 def client(
     nixl_server_process: mp.Process, zmq_context: zmq.Context
 ) -> Generator[MessageQueueClient, None, None]:
-    """Single module-scoped client — reused across tests to keep the ZMQ
-    connection alive and avoid UCX endpoint churn between test functions."""
+    """Single module-scoped client — reused across all tests."""
     c = MessageQueueClient(server_url=SERVER_URL, context=zmq_context)
     yield c
     c.close()
@@ -154,14 +151,23 @@ def _make_key(request_id: str, tok_start: int = 0) -> IPCCacheServerKey:
 
 
 # ---------------------------------------------------------------------------
-# Tests
+# Tests — ordered to exercise STORE then STORE+RETRIEVE+MISS in one session
 # ---------------------------------------------------------------------------
 
 
-class TestNixlThinClientStore:
-    """Drives STORE against a real server via a real ZMQ + NIXL client."""
+class TestNixlThinClientE2E:
+    """End-to-end STORE / RETRIEVE / miss tests against a live NIXL server.
 
-    def test_store_succeeds(self, client: MessageQueueClient) -> None:
+    All three tests reuse the same module-scoped server and client.
+    The store test runs first and is depended upon by the retrieve test.
+    """
+
+    def test_store_succeeds(
+        self,
+        client: MessageQueueClient,
+        nixl_server_process: mp.Process,
+    ) -> None:
+        assert nixl_server_process.is_alive(), "Server subprocess died before test"
         src = torch.arange(CHUNK_SIZE, dtype=torch.float32)
         wrapper = NixlWrapper.wrap(src)
         descriptor = DeviceIPCWrapper.Serialize(wrapper)
@@ -173,14 +179,16 @@ class TestNixlThinClientStore:
         )
         response_bytes, ok = future.result(timeout=DEFAULT_TIMEOUT)
 
+        assert nixl_server_process.is_alive(), "Server died after STORE"
         assert ok is True
         assert response_bytes == b""
 
-
-class TestNixlThinClientRetrieve:
-    """Drives STORE then RETRIEVE, verifying the round-tripped bytes."""
-
-    def test_retrieve_returns_same_data(self, client: MessageQueueClient) -> None:
+    def test_store_then_retrieve(
+        self,
+        client: MessageQueueClient,
+        nixl_server_process: mp.Process,
+    ) -> None:
+        assert nixl_server_process.is_alive(), "Server subprocess died before retrieve test"
         src = torch.arange(CHUNK_SIZE, dtype=torch.float32) + 10.0
 
         store_wrapper = NixlWrapper.wrap(src)
@@ -192,7 +200,8 @@ class TestNixlThinClientRetrieve:
             [key, os.getpid(), [], store_descriptor],
         )
         _, store_ok = store_future.result(timeout=DEFAULT_TIMEOUT)
-        assert store_ok is True
+        assert nixl_server_process.is_alive(), "Server died after STORE in retrieve test"
+        assert store_ok is True, f"Store failed (server alive={nixl_server_process.is_alive()})"
 
         dst = torch.zeros(CHUNK_SIZE, dtype=torch.float32)
         retrieve_wrapper = NixlWrapper.wrap(dst)
@@ -206,7 +215,12 @@ class TestNixlThinClientRetrieve:
         assert retrieve_ok is True
         assert torch.allclose(dst, src), f"Mismatch: {dst} != {src}"
 
-    def test_retrieve_miss_returns_false(self, client: MessageQueueClient) -> None:
+    def test_retrieve_miss_returns_false(
+        self,
+        client: MessageQueueClient,
+        nixl_server_process: mp.Process,
+    ) -> None:
+        assert nixl_server_process.is_alive(), "Server subprocess died before miss test"
         key = _make_key("nixl-miss-0", tok_start=9000)
         dst = torch.zeros(CHUNK_SIZE, dtype=torch.float32)
         wrapper = NixlWrapper.wrap(dst)
