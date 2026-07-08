@@ -136,19 +136,52 @@ def zmq_context() -> Generator[zmq.Context, None, None]:
 def client(
     nixl_server_process: mp.Process, zmq_context: zmq.Context
 ) -> Generator[MessageQueueClient, None, None]:
-    """Single module-scoped client — reused across all tests."""
+    """Single module-scoped client — reused across all tests.
+
+    Also starts a background UCX progress pumper thread so the worker
+    responds to server TCP requests promptly (the worker's nixl_agent
+    has ``enable_prog_thread=False``).
+    """
     c = MessageQueueClient(server_url=SERVER_URL, context=zmq_context)
+    stop = _start_ucx_progress_pumper()
     yield c
+    stop.set()
     c.close()
 
 
-def _await_future(future: MessagingFuture, timeout: float = DEFAULT_TIMEOUT) -> tuple:
-    """Wait for a future while pumping UCX progress in the worker.
+import threading as _threading
 
-    With TCP transport, the server sends a READ request to the worker and
-    the worker's UCX must respond.  The NIXL progress thread handles this,
-    but in the pytest environment the GIL can delay it.  We manually call
-    ``get_new_notifs()`` (which drives UCX inline) while waiting.
+
+def _start_ucx_progress_pumper() -> "_threading.Event":
+    """Start a background thread that continuously pumps UCX progress.
+
+    With ``enable_prog_thread=False`` on the worker's nixl_agent, all UCX
+    progress must happen inline.  This thread calls ``get_new_notifs()``
+    every millisecond so the worker responds to server TCP requests promptly.
+
+    Returns:
+        A stop event; set it to stop the pumper thread.
+    """
+    stop_event = _threading.Event()
+
+    def _pump():
+        agent = get_nixl_agent()
+        while not stop_event.is_set():
+            try:
+                agent.get_new_notifs()
+            except Exception:
+                pass
+            time.sleep(0.001)
+
+    t = _threading.Thread(target=_pump, daemon=True, name="ucx-progress-pumper")
+    t.start()
+    return stop_event
+
+
+def _await_future(future: MessagingFuture, timeout: float = DEFAULT_TIMEOUT) -> tuple:
+    """Wait for a future.
+
+    The UCX progress pumper thread drives UCX progress in the background.
 
     Args:
         future: The MessagingFuture to wait for.
@@ -160,14 +193,9 @@ def _await_future(future: MessagingFuture, timeout: float = DEFAULT_TIMEOUT) -> 
     Raises:
         TimeoutError: If the future does not resolve within ``timeout``.
     """
-    agent = get_nixl_agent()
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline and not future.query():
-        try:
-            agent.get_new_notifs()
-        except Exception:
-            pass
-        time.sleep(0.001)
+        time.sleep(0.010)
     if not future.query():
         raise TimeoutError(f"Future timed out after {timeout}s")
     return future.result(timeout=1)
