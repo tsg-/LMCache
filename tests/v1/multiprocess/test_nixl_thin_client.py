@@ -36,7 +36,16 @@ import pytest
 import torch
 import zmq
 
-pytest.importorskip("nixl._api", reason="nixl not installed; skipping NIXL integration tests")
+# Try each cuXX variant in order; skip if none are importable.
+for _nixl_modname in ("nixl._api", "nixl_cu12._api", "nixl_cu13._api"):
+    try:
+        import importlib as _il
+        _il.import_module(_nixl_modname)
+        break
+    except ImportError:
+        pass
+else:
+    pytest.skip("nixl not installed; skipping NIXL integration tests", allow_module_level=True)
 
 from lmcache.v1.distributed.config import (
     EvictionConfig,
