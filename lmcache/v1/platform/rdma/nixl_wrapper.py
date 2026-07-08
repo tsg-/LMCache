@@ -234,6 +234,12 @@ class NixlWrapper(DeviceIPCWrapper):
 
         _ensure_registered(tensor)
         agent = get_nixl_agent()
+        # Drive UCX progress to flush any pending operations (e.g., MR
+        # deregistrations from prior GC finalizers) before the next transfer.
+        try:
+            agent.get_new_notifs()
+        except Exception:
+            pass
 
         data_ptr = tensor.data_ptr()
         nbytes = tensor.numel() * tensor.element_size()
