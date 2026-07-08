@@ -58,23 +58,6 @@ Issues are grouped by severity:
 See `docs/coding_standards.md` Section 9 for the full severity calibration and reviewer guidelines.
 
 
-## Environment Facts (bmg0 / bmg1)
-
-Avoid wasting turns re-discovering these:
-
-- **SSH hosts:** `bmg0` (smc-test01, 192.168.100.3/200.3), `bmg1` (smc-test02, 192.168.100.4/200.4)
-- **SSH user:** `dev` — not `root`. Always `ssh dev@bmg0` or just `ssh bmg0` (alias resolves).
-- **Working dir on remote:** `~/tsg/LMCache` (`/home/dev/tsg/LMCache`)
-- **Python venv:** `~/tsg/LMCache/.venv-ipu/bin/python3` (Python 3.12.3). Use `.venv-ipu/bin/pytest` and `.venv-ipu/bin/pip`. The system `python3` is at `/usr/bin/python3` but lacks test packages.
-- **pytest command:** `cd ~/tsg/LMCache && .venv-ipu/bin/python -m pytest <args>` — always use the venv python, not bare `pytest`.
-- **ulimit -l:** already `unlimited` on both hosts — no need to raise it for RDMA MR registration.
-- **RDMA devices:** `mlx5_0` (192.168.100.x) and `mlx5_1` (192.168.200.x) on both hosts. CX7, RoCEv2.
-- **Cross-wire:** bmg0:mlx5_0 ↔ bmg1:mlx5_1 (192.168.100 subnet); bmg0:mlx5_1 ↔ bmg1:mlx5_0 (192.168.200 subnet).
-- **GID index for RoCEv2:** typically index 3 (`LMCACHE_RDMA_GID_INDEX=3`).
-- **nixl installed:** `nixl-cu12` in `.venv-ipu`. Import as `nixl_cu12._api`.
-- **Server port in tests:** 5605 for NIXL, 5601 for RDMA thin client. Kill stale servers with `fuser -k 5605/tcp` before re-running.
-- **Repo sync:** `cd ~/tsg/LMCache && git fetch tsg && git reset --hard tsg/ipu-poc`
-
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:6cd5cc61 -->
 ## Beads Issue Tracker
 
