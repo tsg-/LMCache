@@ -206,11 +206,27 @@ class TestNixlThinClientE2E:
             [key, os.getpid(), [], store_descriptor],
         )
         print("[DEBUG] STORE request submitted, waiting...")
-        try:
-            _, store_ok = store_future.result(timeout=DEFAULT_TIMEOUT)
-        except Exception as e:
-            print(f"[DEBUG] STORE result error: {e} server alive={nixl_server_process.is_alive()}")
-            raise
+        # Actively drive UCX progress while waiting for the future.
+        # The NIXL progress thread may not be responsive enough in the pytest
+        # environment; manually pumping UCX ensures the worker responds to
+        # the server's TCP READ request.
+        from lmcache.v1.platform.rdma.nixl_wrapper import get_nixl_agent
+        _agent = get_nixl_agent()
+        import time as _time
+        _deadline = _time.monotonic() + DEFAULT_TIMEOUT
+        store_ok = False
+        response_bytes = b""
+        while _time.monotonic() < _deadline and not store_future.query():
+            try:
+                _agent.get_new_notifs()  # drive UCX progress
+            except Exception:
+                pass
+            _time.sleep(0.001)
+        if store_future.query():
+            response_bytes, store_ok = store_future.result(timeout=1)
+        else:
+            raise TimeoutError(f"STORE timed out after {DEFAULT_TIMEOUT}s")
+        print(f"[DEBUG] STORE result: ok={store_ok}")
         assert nixl_server_process.is_alive(), "Server died after STORE in retrieve test"
         assert store_ok is True, f"Store failed (server alive={nixl_server_process.is_alive()})"
 
