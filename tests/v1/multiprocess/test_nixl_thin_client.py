@@ -23,6 +23,14 @@ wrapped via :class:`NixlWrapper`, with descriptors sent as
        .venv-ipu/bin/python -m pytest tests/v1/multiprocess/test_nixl_thin_client.py -xvs
 
 This test is automatically skipped if no nixl variant is importable.
+
+**Note on UCX progress:**
+With ``UCX_TLS=tcp,self``, UCX reads are *two-sided*: the server sends a
+read request and the worker must process and respond to it.  The NIXL
+progress thread handles this, but in the pytest process the GIL can delay
+the progress thread.  We work around this by manually calling
+``get_new_notifs()`` (which drives UCX progress) while the test waits for
+each future to resolve.
 """
 
 from __future__ import annotations
@@ -56,11 +64,12 @@ from lmcache.v1.distributed.config import (
 from lmcache.v1.mp_observability.config import DEFAULT_OBSERVABILITY_CONFIG
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocols.base import RequestType
 from lmcache.v1.multiprocess.server import run_cache_server
 from lmcache.v1.platform.base_ipc_wrapper import DeviceIPCWrapper
-from lmcache.v1.platform.rdma.nixl_wrapper import NixlWrapper
+from lmcache.v1.platform.rdma.nixl_wrapper import NixlWrapper, get_nixl_agent
 
 SERVER_HOST = "localhost"
 SERVER_PORT = 5605
@@ -72,9 +81,8 @@ DEFAULT_TIMEOUT = 30.0
 def _server_process_runner(host: str, port: int, chunk_size: int) -> None:
     """Entry point for the NIXL-mode server subprocess."""
     import os as _os
-    # Use CMA (Cross-Memory Attach) which is reliable for inter-process
-    # transfers on Linux without shared shmem segment issues.
-    _os.environ.setdefault("UCX_TLS", "rc,self")
+    # Use tcp transport (rc not available without RDMA HW connection setup).
+    _os.environ.setdefault("UCX_TLS", "tcp,self")
     mp_config = MPServerConfig(
         host=host,
         port=port,
@@ -108,7 +116,7 @@ def nixl_server_process() -> Generator[mp.Process, None, None]:
         daemon=True,
     )
     proc.start()
-    time.sleep(3)  # Give server more time; NIXL UCX init can be slow.
+    time.sleep(3)
     yield proc
     if proc.is_alive():
         proc.terminate()
@@ -134,6 +142,37 @@ def client(
     c.close()
 
 
+def _await_future(future: MessagingFuture, timeout: float = DEFAULT_TIMEOUT) -> tuple:
+    """Wait for a future while pumping UCX progress in the worker.
+
+    With TCP transport, the server sends a READ request to the worker and
+    the worker's UCX must respond.  The NIXL progress thread handles this,
+    but in the pytest environment the GIL can delay it.  We manually call
+    ``get_new_notifs()`` (which drives UCX inline) while waiting.
+
+    Args:
+        future: The MessagingFuture to wait for.
+        timeout: Maximum wait time in seconds.
+
+    Returns:
+        The future's result tuple.
+
+    Raises:
+        TimeoutError: If the future does not resolve within ``timeout``.
+    """
+    agent = get_nixl_agent()
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and not future.query():
+        try:
+            agent.get_new_notifs()
+        except Exception:
+            pass
+        time.sleep(0.001)
+    if not future.query():
+        raise TimeoutError(f"Future timed out after {timeout}s")
+    return future.result(timeout=1)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -152,16 +191,12 @@ def _make_key(request_id: str, tok_start: int = 0) -> IPCCacheServerKey:
 
 
 # ---------------------------------------------------------------------------
-# Tests — ordered to exercise STORE then STORE+RETRIEVE+MISS in one session
+# Tests
 # ---------------------------------------------------------------------------
 
 
 class TestNixlThinClientE2E:
-    """End-to-end STORE / RETRIEVE / miss tests against a live NIXL server.
-
-    All three tests reuse the same module-scoped server and client.
-    The store test runs first and is depended upon by the retrieve test.
-    """
+    """End-to-end STORE / RETRIEVE / miss tests against a live NIXL server."""
 
     def test_store_succeeds(
         self,
@@ -178,7 +213,7 @@ class TestNixlThinClientE2E:
             RequestType.STORE,
             [key, os.getpid(), [], descriptor],
         )
-        response_bytes, ok = future.result(timeout=DEFAULT_TIMEOUT)
+        response_bytes, ok = _await_future(future)
 
         assert nixl_server_process.is_alive(), "Server died after STORE"
         assert ok is True
@@ -191,44 +226,18 @@ class TestNixlThinClientE2E:
     ) -> None:
         assert nixl_server_process.is_alive(), "Server subprocess died before retrieve test"
         src = torch.arange(CHUNK_SIZE, dtype=torch.float32) + 10.0
-        print(f"\n[DEBUG] src.data_ptr={src.data_ptr():#x} alive={nixl_server_process.is_alive()}")
 
         store_wrapper = NixlWrapper.wrap(src)
         store_descriptor = DeviceIPCWrapper.Serialize(store_wrapper)
-        print(f"[DEBUG] wrapper.base_addr={store_wrapper.base_addr:#x} agent={store_wrapper.agent_name}")
-
-        # Give the NIXL progress thread time to start and UCX to be ready
-        time.sleep(0.5)
 
         key = _make_key("nixl-store-retrieve-0", tok_start=100)
         store_future = client.submit_request(
             RequestType.STORE,
             [key, os.getpid(), [], store_descriptor],
         )
-        print("[DEBUG] STORE request submitted, waiting...")
-        # Actively drive UCX progress while waiting for the future.
-        # The NIXL progress thread may not be responsive enough in the pytest
-        # environment; manually pumping UCX ensures the worker responds to
-        # the server's TCP READ request.
-        from lmcache.v1.platform.rdma.nixl_wrapper import get_nixl_agent
-        _agent = get_nixl_agent()
-        import time as _time
-        _deadline = _time.monotonic() + DEFAULT_TIMEOUT
-        store_ok = False
-        response_bytes = b""
-        while _time.monotonic() < _deadline and not store_future.query():
-            try:
-                _agent.get_new_notifs()  # drive UCX progress
-            except Exception:
-                pass
-            _time.sleep(0.001)
-        if store_future.query():
-            response_bytes, store_ok = store_future.result(timeout=1)
-        else:
-            raise TimeoutError(f"STORE timed out after {DEFAULT_TIMEOUT}s")
-        print(f"[DEBUG] STORE result: ok={store_ok}")
+        _, store_ok = _await_future(store_future)
         assert nixl_server_process.is_alive(), "Server died after STORE in retrieve test"
-        assert store_ok is True, f"Store failed (server alive={nixl_server_process.is_alive()})"
+        assert store_ok is True
 
         dst = torch.zeros(CHUNK_SIZE, dtype=torch.float32)
         retrieve_wrapper = NixlWrapper.wrap(dst)
@@ -238,7 +247,7 @@ class TestNixlThinClientE2E:
             RequestType.RETRIEVE,
             [key, os.getpid(), [], retrieve_descriptor],
         )
-        _, retrieve_ok = retrieve_future.result(timeout=DEFAULT_TIMEOUT)
+        _, retrieve_ok = _await_future(retrieve_future)
         assert retrieve_ok is True
         assert torch.allclose(dst, src), f"Mismatch: {dst} != {src}"
 
@@ -257,5 +266,5 @@ class TestNixlThinClientE2E:
             RequestType.RETRIEVE,
             [key, os.getpid(), [], descriptor],
         )
-        _, ok = future.result(timeout=DEFAULT_TIMEOUT)
+        _, ok = _await_future(future)
         assert ok is False
