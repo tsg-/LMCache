@@ -72,8 +72,9 @@ DEFAULT_TIMEOUT = 30.0
 def _server_process_runner(host: str, port: int, chunk_size: int) -> None:
     """Entry point for the NIXL-mode server subprocess."""
     import os as _os
-    # Set UCX_TLS before any nixl/ucx initialization to force TCP loopback.
-    _os.environ["UCX_TLS"] = "tcp,self"
+    # Use CMA (Cross-Memory Attach) which is reliable for inter-process
+    # transfers on Linux without shared shmem segment issues.
+    _os.environ.setdefault("UCX_TLS", "cma,self")
     mp_config = MPServerConfig(
         host=host,
         port=port,

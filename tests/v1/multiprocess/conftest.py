@@ -11,9 +11,11 @@ collection). Must be set before the first import of any nixl binding.
 
 import os
 
-# Force UCX TCP loopback on both server and worker sides.
-os.environ.setdefault("UCX_TLS", "tcp,self")
-
-# Disable UCX shmem transport explicitly.
-os.environ.setdefault("UCX_SHM_DEVICES", "")
-os.environ.setdefault("UCX_POSIX_USE_PROC_LINK", "n")
+# Set UCX_TLS before any test module import so UCX initializes with this
+# transport when nixl_cu12._api is first imported at collection time.
+# The "cma" (Cross-Memory Attach) transport is reliable for inter-process
+# transfers on Linux — it uses process_vm_readv/writev which don't require
+# additional memory registration beyond what NIXL already does.
+# Avoid "posix" (shmem segment) which requires shared mapping state that
+# can become inconsistent after MR deregister/re-register across requests.
+os.environ.setdefault("UCX_TLS", "cma,self")

@@ -133,11 +133,10 @@ class NixlTransferModule:
         import os
         _backends = backends if backends is not None else ["UCX"]
 
-        # Set UCX_TLS before first NIXL/UCX initialization so UCX uses TCP
-        # loopback.  UCX shmem transport can stall on the second cross-process
-        # NIXL READ when local MRs are deregistered/re-registered between
-        # requests.  Must be set before _load_nixl() triggers UCX init.
-        os.environ.setdefault("UCX_TLS", "tcp,self")
+        # Set UCX_TLS before first NIXL/UCX initialization.  Use CMA
+        # (Cross-Memory Attach) for reliable inter-process transfers on
+        # Linux without shmem-segment issues across sequential requests.
+        os.environ.setdefault("UCX_TLS", "cma,self")
 
         nixl_agent_cls, nixl_agent_config_cls = _load_nixl()
 
