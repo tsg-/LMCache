@@ -59,8 +59,9 @@ class MPServerConfig:
     supported_transfer_mode: str = "auto"
     """Transfer mode: 'lmcache_driven' for server-driven transfer
     (STORE/RETRIEVE, supports CUDA IPC and CPU SHM), 'engine_driven' for
-    engine-driven transfer (PREPARE/COMMIT), 'auto' to enable both, or
-    'rdma' for RDMA-based transfer (RdmaTransferModule)."""
+    engine-driven transfer (PREPARE/COMMIT), 'auto' to enable both,
+    'rdma' for RDMA-based transfer (RdmaTransferModule), or 'nixl' for
+    NIXL/UCX-based transfer (NixlTransferModule)."""
 
     runtime_plugin_config: "RuntimePluginConfig" = field(
         default_factory=lambda: RuntimePluginConfig()
@@ -305,12 +306,13 @@ def add_mp_server_args(
         "--supported-transfer-mode",
         type=str,
         default="auto",
-        choices=["lmcache_driven", "engine_driven", "auto", "rdma"],
+        choices=["lmcache_driven", "engine_driven", "auto", "rdma", "nixl"],
         help="Supported transfer mode: 'lmcache_driven' for server-driven "
         "transfer (STORE/RETRIEVE, supports CUDA IPC and CPU SHM), "
         "'engine_driven' for engine-driven transfer (PREPARE/COMMIT), "
-        "'auto' to enable both transfer paths, or 'rdma' for "
-        "RDMA-based transfer (RdmaTransferModule). Default is 'auto'.",
+        "'auto' to enable both transfer paths, 'rdma' for RDMA-based "
+        "transfer (RdmaTransferModule), or 'nixl' for NIXL/UCX-based "
+        "transfer (NixlTransferModule). Default is 'auto'.",
     )
     mp_group.add_argument(
         "--runtime-plugin-locations",

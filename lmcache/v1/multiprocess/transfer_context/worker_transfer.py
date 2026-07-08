@@ -117,12 +117,15 @@ class MPTransferMode(str, Enum):
       for the device.
     * ``RDMA``: force :class:`RdmaTransferContext` (RoCEv2 RDMA path).
       KV tensors are CPU tensors in host DRAM; no CUDA context required.
+    * ``NIXL``: force :class:`NixlTransferContext` (NIXL/UCX path).
+      Uses NIXL's agent/descriptor model for multi-backend RDMA support.
     """
 
     AUTO = "auto"
     ENGINE_DRIVEN = "engine_driven"
     LMCACHE_DRIVEN = "lmcache_driven"
     RDMA = "rdma"
+    NIXL = "nixl"
 
 
 def _resolve_mode(mode: "str | MPTransferMode | None") -> MPTransferMode:
@@ -812,6 +815,11 @@ def create_transfer_context(
     )
     if resolved_mode is MPTransferMode.RDMA:
         return RdmaTransferContext()
+    if resolved_mode is MPTransferMode.NIXL:
+        from lmcache.v1.multiprocess.transfer_context.nixl_transfer import (
+            NixlTransferContext,
+        )
+        return NixlTransferContext()
     if resolved_mode is MPTransferMode.LMCACHE_DRIVEN:
         return _build_lmcache_driven_context(device_type)
     if resolved_mode is MPTransferMode.ENGINE_DRIVEN:

@@ -199,6 +199,10 @@ def _build_modules(
         from lmcache.v1.multiprocess.modules.rdma_transfer import RdmaTransferModule
 
         transfer_modules.append(RdmaTransferModule(ctx))
+    elif mp_config.supported_transfer_mode == "nixl":
+        from lmcache.v1.multiprocess.modules.nixl_transfer import NixlTransferModule
+
+        transfer_modules.append(NixlTransferModule(ctx))
     elif mp_config.supported_transfer_mode == "auto":
         transfer_modules.append(LMCacheDrivenTransferModule(ctx))
         transfer_modules.append(EngineDrivenTransferModule(ctx))
