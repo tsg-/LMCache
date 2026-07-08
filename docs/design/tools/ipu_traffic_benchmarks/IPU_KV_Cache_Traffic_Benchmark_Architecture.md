@@ -705,7 +705,7 @@ benchmark and production code share a single interface regardless of backend:
 │  LMCache Control Plane                                  │
 │  (admission, eviction, hash index, ZMQ signaling)       │
 ├─────────────────────────────────────────────────────────┤
-│  IPURdmaWrapper                                         │
+│  RdmaWrapper                                         │
 │  wrap() → (rkey, addr, len)    to_tensor() → RDMA Read  │
 ├─────────────────────────────────────────────────────────┤
 │  RdmaTransport (protocol interface)                     │

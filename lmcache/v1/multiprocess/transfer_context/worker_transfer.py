@@ -115,7 +115,7 @@ class MPTransferMode(str, Enum):
     * ``LMCACHE_DRIVEN``: force :class:`LMCacheDrivenTransferContext`
       (IPC / SHM zero-copy path). Requires a registered KV-wrapper factory
       for the device.
-    * ``RDMA``: force :class:`RdmaTransferContext` (IPU RoCEv2 RDMA path).
+    * ``RDMA``: force :class:`RdmaTransferContext` (RoCEv2 RDMA path).
       KV tensors are CPU tensors in host DRAM; no CUDA context required.
     """
 
@@ -607,16 +607,15 @@ class EngineDrivenTransferContext(TransferContext):
 
 
 class RdmaTransferContext(TransferContext):
-    """RDMA-based transfer context for IPU nodes.
+    """RDMA-based transfer context for RoCEv2 nodes.
 
     Used when ``LMCACHE_MP_TRANSFER_MODE=rdma``. Both initiator and target
-    have an IPU (Intel Infrastructure Processing Unit) acting as a RoCEv2
-    NIC. KV data moves via RDMA Read (store: target pulls from initiator)
-    and RDMA Write (retrieve: target pushes to initiator). The IPU is a dumb
-    NIC — no processing or staging on the NIC itself; all CPU processing
-    happens on the Xeon host.
+    have a RoCEv2 NIC. KV data moves via RDMA Read (store: target pulls
+    from initiator) and RDMA Write (retrieve: target pushes to initiator).
+    The NIC is a dumb RDMA device — no processing or staging on the NIC
+    itself; all CPU processing happens on the host.
 
-    ``event.ipc_handle()`` returns pickled :class:`IPURdmaWrapper` bytes
+    ``event.ipc_handle()`` returns pickled :class:`RdmaWrapper` bytes
     that encode the RDMA memory descriptor for the operation. ``block_ids``
     is unused on this path — the RDMA descriptor carries all addressing.
     """
@@ -674,7 +673,7 @@ class RdmaTransferContext(TransferContext):
     ) -> MessagingFuture:
         """Submit an RDMA store request and return the MQ future.
 
-        ``event.ipc_handle()`` must return the pickled :class:`IPURdmaWrapper`
+        ``event.ipc_handle()`` must return the pickled :class:`RdmaWrapper`
         source descriptor. The server's ``poll_completion()`` blocks until the
         RDMA Read completes before sending a response, so the returned future
         only resolves once the target has finished reading from the source
@@ -727,7 +726,7 @@ class RdmaTransferContext(TransferContext):
     ) -> MessagingFuture:
         """Submit an RDMA retrieve request and return the MQ future.
 
-        ``event.ipc_handle()`` must return the pickled :class:`IPURdmaWrapper`
+        ``event.ipc_handle()`` must return the pickled :class:`RdmaWrapper`
         destination descriptor. The server will perform a RDMA Write into the
         initiator's MR and respond when complete. Do not call
         ``.to_cuda_future()`` on the returned future — the response payload is

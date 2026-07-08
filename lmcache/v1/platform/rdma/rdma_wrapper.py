@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-"""IPU RDMA KV-cache IPC wrapper.
+"""RDMA KV-cache IPC wrapper.
 
 Mirrors the GPU-mode CUDA-IPC and CPU-mode POSIX-SHM zero-copy semantics
-for inter-host transfer via RDMA.  The initiator's IPU serves RDMA Read
-responses from registered DRAM; the target's IPU posts RDMA Reads to pull
-KV pages.  CPU never touches data bytes — only control plane.
+for inter-host transfer via RDMA.  The initiator serves RDMA Read responses
+from registered DRAM; the target posts RDMA Reads to pull KV pages.  CPU
+never touches data bytes — only control plane.
 
-Self-registers an ``"ipu"`` factory with
+Self-registers an ``"rdma"`` factory with
 :mod:`lmcache.v1.platform._registry` at import time via the
 ``device_type`` ClassVar, so the multiprocess adapter dispatches by
 ``tensor.device.type`` without any if/elif chain.
@@ -25,7 +25,7 @@ import torch
 
 from lmcache.logging import init_logger
 from lmcache.v1.platform.base_ipc_wrapper import DeviceIPCWrapper
-from lmcache.v1.platform.ipu.rdma_transport import (
+from lmcache.v1.platform.rdma.rdma_transport import (
     MrInfo,
     RegisteredBuffer,
     StubRdmaTransport,
@@ -61,24 +61,24 @@ def _deregister_on_gc(data_ptr: int, mr: MrInfo) -> None:
             pass
 
 
-class IPURdmaWrapper(DeviceIPCWrapper):
-    """IPC wrapper for IPU-registered DRAM exposed via RDMA.
+class RdmaWrapper(DeviceIPCWrapper):
+    """IPC wrapper for RDMA-registered DRAM.
 
-    Used in the symmetric IPU deployment where both initiator and target
-    have an IPU.  The initiator registers its KV buffer as an RDMA MR
+    Used in the symmetric RDMA deployment where both initiator and target
+    have a RoCEv2 NIC.  The initiator registers its KV buffer as an RDMA MR
     (via ``wrap()``), and the target pulls data via RDMA Read (via
     ``to_tensor()``).
 
     The wrapper is serialized across the ZMQ control channel (via pickle,
     inherited from DeviceIPCWrapper).  Only the descriptor travels over
-    ZMQ; actual KV data moves via RDMA on the IPU data plane.
+    ZMQ; actual KV data moves via RDMA on the data plane.
     """
 
-    device_type: ClassVar[str] = "ipu"
+    device_type: ClassVar[str] = "rdma"
     _is_default_wrapper: ClassVar[bool] = True
 
     @classmethod
-    def wrap(cls, tensor: torch.Tensor) -> "IPURdmaWrapper":
+    def wrap(cls, tensor: torch.Tensor) -> "RdmaWrapper":
         """Register the tensor's backing memory as an RDMA MR and wrap.
 
         When the active transport is :class:`StubRdmaTransport`, the
@@ -88,13 +88,13 @@ class IPURdmaWrapper(DeviceIPCWrapper):
         can call :meth:`StubRdmaTransport.map_remote_mr`.
 
         Args:
-            tensor: A contiguous tensor in IPU-registered host DRAM.
+            tensor: A contiguous tensor in RDMA-registered host DRAM.
 
         Returns:
-            A new IPURdmaWrapper carrying the RDMA descriptor.
+            A new RdmaWrapper carrying the RDMA descriptor.
         """
         if not tensor.is_contiguous():
-            raise ValueError("IPURdmaWrapper requires a contiguous tensor")
+            raise ValueError("RdmaWrapper requires a contiguous tensor")
 
         transport = get_rdma_transport()
         shm_name: str = ""
@@ -170,7 +170,7 @@ class IPURdmaWrapper(DeviceIPCWrapper):
             nbytes,
         )
         logger.debug(
-            "IPURdmaWrapper: migrated tensor (nbytes=%d) to SHM %s",
+            "RdmaWrapper: migrated tensor (nbytes=%d) to SHM %s",
             nbytes, shm_name,
         )
         return tensor, shm_name
@@ -220,7 +220,7 @@ class IPURdmaWrapper(DeviceIPCWrapper):
         self.shape = tuple(tensor.shape)
         self.stride = tuple(tensor.stride())
         self.storage_offset = int(tensor.storage_offset())
-        self.device_uuid = "ipu"
+        self.device_uuid = "rdma"
         # SHM segment name for stub cross-process support; empty string
         # when using real verbs backend.
         self.shm_name: str = ""
@@ -229,7 +229,7 @@ class IPURdmaWrapper(DeviceIPCWrapper):
         """Pull data from the remote MR via RDMA Read.
 
         Allocates a local registered buffer, posts an RDMA Read to copy
-        data from the remote address (initiator's IPU-registered DRAM)
+        data from the remote address (initiator's RDMA-registered DRAM)
         into the local buffer, and returns the buffer as a tensor.
         """
         if self.length == 0:
@@ -275,3 +275,7 @@ class IPURdmaWrapper(DeviceIPCWrapper):
         weakref.finalize(storage, free_fn, buf)
 
         return out
+
+
+# Backward-compat alias for deserialization of pickled objects from prior versions.
+IPURdmaWrapper = RdmaWrapper

@@ -15,7 +15,7 @@ SCP until both sides report a connected QP (or the timeout elapses).
 
 Usage::
 
-    python scripts/ipu_bootstrap.py \\
+    python scripts/rdma_bootstrap.py \\
         --initiator-host gpu-node-1 --initiator-cmd "python serve.py" \\
         --target-host kv-node-1 --target-cmd "python serve.py"
 
@@ -96,7 +96,7 @@ def relay_endpoint_file(
     Returns:
         True if both the download and upload legs of the relay succeeded.
     """
-    local_tmp = f"/tmp/.ipu_bootstrap_relay_{secrets.token_hex(4)}.json"
+    local_tmp = f"/tmp/.rdma_bootstrap_relay_{secrets.token_hex(4)}.json"
     download = subprocess.run(
         ["scp", "-q", f"{src_host}:{src_path}", local_tmp],
         capture_output=True,

@@ -196,9 +196,9 @@ def _build_modules(
     elif mp_config.supported_transfer_mode == "engine_driven":
         transfer_modules.append(EngineDrivenTransferModule(ctx))
     elif mp_config.supported_transfer_mode == "rdma":
-        from lmcache.v1.multiprocess.modules.ipu_transfer import IPUTransferModule
+        from lmcache.v1.multiprocess.modules.rdma_transfer import RdmaTransferModule
 
-        transfer_modules.append(IPUTransferModule(ctx))
+        transfer_modules.append(RdmaTransferModule(ctx))
     elif mp_config.supported_transfer_mode == "auto":
         transfer_modules.append(LMCacheDrivenTransferModule(ctx))
         transfer_modules.append(EngineDrivenTransferModule(ctx))

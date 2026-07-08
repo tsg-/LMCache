@@ -115,7 +115,7 @@ DRAM/SSD, not to run inference.
     | Layer 1: DeviceIPCWrapper (how memory is exposed)            |
     |   CudaIPCWrapper        -- CUDA IPC handle (intra-host)     |
     |   CpuShmTensorWrapper   -- POSIX shm_name + mmap            |
-    |   IPURdmaWrapper (NEW)  -- rkey + remote_vaddr + length      |
+    |   RdmaWrapper (NEW)  -- rkey + remote_vaddr + length      |
     +-------------------------------------------------------------+
     | Layer 2: TransferContext (how store/retrieve are submitted)  |
     |   LMCacheDrivenTransferContext (REUSED, no changes)          |
@@ -124,7 +124,7 @@ DRAM/SSD, not to run inference.
     | Layer 3: Platform registry (auto-discovery by device_type)   |
     |   "cuda" -> CudaIPCWrapper.wrap                             |
     |   "cpu"  -> CpuShmTensorWrapper.wrap                        |
-    |   "ipu"  -> IPURdmaWrapper.wrap (NEW)                       |
+    |   "rdma" -> RdmaWrapper.wrap (NEW)                       |
     +-------------------------------------------------------------+
 ```
 
@@ -162,7 +162,7 @@ Key decisions:
     2. Fence: ensure DMA             |              |
        complete                      |              |
                                      |              |
-    3. IPURdmaWrapper.wrap()         |              |
+    3. RdmaWrapper.wrap()         |              |
        - MR already registered       |              |
        - produce (rkey, vaddr, len)  |              |
                                      |              |
@@ -284,26 +284,26 @@ No code changes needed — `chunk_size` is a server config parameter (default
 ### File Layout
 
 ```
-    lmcache/v1/platform/ipu/
+    lmcache/v1/platform/rdma/
     +-- __init__.py              Package marker (matches cpu/cuda pattern)
-    +-- rdma_wrapper.py          IPURdmaWrapper (DeviceIPCWrapper subclass)
+    +-- rdma_wrapper.py          RdmaWrapper (DeviceIPCWrapper subclass)
     +-- rdma_transport.py        RdmaTransport protocol + stub implementation
     +-- verbs_transport.py       VerbsRdmaTransport (libibverbs backend via pyverbs)
 
     lmcache/v1/multiprocess/
-    +-- modules/ipu_transfer.py  IPUTransferModule — server-side STORE/RETRIEVE
+    +-- modules/rdma_transfer.py  RdmaTransferModule — server-side STORE/RETRIEVE
     +-- transfer_context/
         worker_transfer.py       RdmaTransferContext + MPTransferMode.RDMA
 ```
 
-### IPURdmaWrapper
+### RdmaWrapper
 
 The wrapper carries an RDMA memory region descriptor. On the initiator side,
 `wrap()` produces it; on the target side, `to_tensor()` consumes it:
 
 ```
-    class IPURdmaWrapper(DeviceIPCWrapper):
-        device_type = "ipu"
+    class RdmaWrapper(DeviceIPCWrapper):
+        device_type = "rdma"
         _is_default_wrapper = True
 
         # Stored fields (serialized across wire via pickle)
@@ -314,10 +314,10 @@ The wrapper carries an RDMA memory region descriptor. On the initiator side,
         shape: tuple            # Original tensor shape
         stride: tuple           # Original tensor stride
         storage_offset: int     # Storage offset
-        device_uuid: str        # Always "ipu" (identifier string, not a PyTorch device
+        device_uuid: str        # Always "rdma" (identifier string, not a PyTorch device
                                 #   type — tensor.device.type is always "cpu" on this path)
 
-        wrap(tensor) -> IPURdmaWrapper:
+        wrap(tensor) -> RdmaWrapper:
             - Verify tensor is contiguous, in registered DRAM
             - Look up (or register) MR with IPU transport layer
             - Return wrapper with rkey + vaddr + length + metadata
@@ -364,16 +364,16 @@ No changes to:
 New code:
 - `RdmaTransferContext` (new, in `worker_transfer.py`) — replaces
   `LMCacheDrivenTransferContext` on the IPU path. Sends pickled
-  `IPURdmaWrapper` as the RDMA descriptor; `block_ids` is always `[]`.
+  `RdmaWrapper` as the RDMA descriptor; `block_ids` is always `[]`.
   No CUDA events, no `.to_cuda_future()`.
-- `IPUTransferModule` (new, in `modules/ipu_transfer.py`) — server-side
+- `RdmaTransferModule` (new, in `modules/rdma_transfer.py`) — server-side
   STORE/RETRIEVE handler. Zero-copy: `post_read`/`post_write` target
   `MemoryObj.data_ptr` directly. No `REGISTER_KV_CACHE` handler needed.
 - `create_transfer_context()` now dispatches by mode string, not device type.
 
 The new config surface:
 - `LMCACHE_MP_TRANSFER_MODE=rdma` (env var on initiator; selects `RdmaTransferContext`)
-- `--supported-transfer-mode rdma` (server CLI flag; selects `IPUTransferModule`)
+- `--supported-transfer-mode rdma` (server CLI flag; selects `RdmaTransferModule`)
 - `chunk_size=128` (existing config key)
 - `LMCACHE_RDMA_TRANSPORT` (env var: `stub` or `verbs`; selects transport backend)
 
@@ -387,7 +387,7 @@ IPU may serve stale data on RDMA Read. The fence contract:
 ```
     # In the vLLM adapter, before wrap():
     torch_dev.synchronize()  # fence: GPU/TPU DMA complete
-    wrapper = IPURdmaWrapper.wrap(tensor)  # safe to serve
+    wrapper = RdmaWrapper.wrap(tensor)  # safe to serve
 ```
 
 This fence already exists in the `EngineDrivenTransferContext` path
@@ -422,7 +422,7 @@ pytest tests/v1/platform/test_ipu_rdma_wrapper.py -v
 ```
 
 The unit test exercises:
-- `IPURdmaWrapper.wrap()` on a random CPU tensor
+- `RdmaWrapper.wrap()` on a random CPU tensor
 - Pickle round-trip (simulates ZMQ wire serialization)
 - `to_tensor()` on the deserialized wrapper (RDMA Read via stub memcpy)
 - Tensor content and shape equality between source and result
@@ -685,7 +685,7 @@ sequenceDiagram
 The `RdmaTransport` protocol abstraction already isolates the transport layer.
 An IPT backend would implement the same interface (`register_mr`, `post_read`,
 `post_write`, `poll_completion`) but backed by IPT program calls rather than
-libibverbs. The `IPURdmaWrapper` and `LMCacheDrivenTransferContext` layers
+libibverbs. The `RdmaWrapper` and `LMCacheDrivenTransferContext` layers
 remain unchanged.
 
 **Status:** Under patent by Anjali's team. Integration depends on IPT SDK

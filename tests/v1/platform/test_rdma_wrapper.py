@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for ``lmcache.v1.platform.ipu.rdma_wrapper``.
+"""Tests for ``lmcache.v1.platform.rdma.rdma_wrapper``.
 
 Validates the full wrap() → serialize → to_tensor() round-trip using
 StubRdmaTransport (memcpy, no RDMA hardware required).
@@ -12,12 +12,12 @@ import weakref
 import pytest
 import torch
 
-from lmcache.v1.platform.ipu.rdma_transport import (
+from lmcache.v1.platform.rdma.rdma_transport import (
     StubRdmaTransport,
     set_rdma_transport,
 )
-from lmcache.v1.platform.ipu.rdma_wrapper import (
-    IPURdmaWrapper,
+from lmcache.v1.platform.rdma.rdma_wrapper import (
+    RdmaWrapper,
     _REGISTERED_MRS,
 )
 
@@ -37,7 +37,7 @@ class TestWrapBasic:
 
     def test_wrap_random_tensor(self):
         src = torch.randn(4, 8, dtype=torch.float32)
-        wrapper = IPURdmaWrapper.wrap(src)
+        wrapper = RdmaWrapper.wrap(src)
 
         assert wrapper.rkey > 0
         assert wrapper.remote_addr == src.data_ptr()
@@ -51,19 +51,19 @@ class TestWrapBasic:
         src = torch.randn(4, 8, dtype=torch.float32)[:, ::2]
         assert not src.is_contiguous()
         with pytest.raises(ValueError, match="contiguous"):
-            IPURdmaWrapper.wrap(src)
+            RdmaWrapper.wrap(src)
 
     def test_wrap_reuses_mr_for_same_tensor(self):
         src = torch.randn(16, dtype=torch.float32)
-        w1 = IPURdmaWrapper.wrap(src)
-        w2 = IPURdmaWrapper.wrap(src)
+        w1 = RdmaWrapper.wrap(src)
+        w2 = RdmaWrapper.wrap(src)
         assert w1.rkey == w2.rkey
 
     def test_wrap_different_tensors_get_different_rkeys(self):
         t1 = torch.randn(8, dtype=torch.float32)
         t2 = torch.randn(8, dtype=torch.float32)
-        w1 = IPURdmaWrapper.wrap(t1)
-        w2 = IPURdmaWrapper.wrap(t2)
+        w1 = RdmaWrapper.wrap(t1)
+        w2 = RdmaWrapper.wrap(t2)
         assert w1.rkey != w2.rkey
 
 
@@ -72,7 +72,7 @@ class TestPickleRoundTrip:
 
     def test_pickle_preserves_fields(self):
         src = torch.randn(2, 3, 4, dtype=torch.bfloat16)
-        wrapper = IPURdmaWrapper.wrap(src)
+        wrapper = RdmaWrapper.wrap(src)
 
         data = pickle.dumps(wrapper)
         restored = pickle.loads(data)
@@ -87,9 +87,9 @@ class TestPickleRoundTrip:
 
     def test_pickle_preserves_type(self):
         src = torch.randn(4, dtype=torch.float32)
-        wrapper = IPURdmaWrapper.wrap(src)
+        wrapper = RdmaWrapper.wrap(src)
         restored = pickle.loads(pickle.dumps(wrapper))
-        assert type(restored) is IPURdmaWrapper
+        assert type(restored) is RdmaWrapper
 
 
 class TestToTensor:
@@ -97,7 +97,7 @@ class TestToTensor:
 
     def test_round_trip_content_equality(self):
         src = torch.randn(4, 8, dtype=torch.float32)
-        wrapper = IPURdmaWrapper.wrap(src)
+        wrapper = RdmaWrapper.wrap(src)
         restored = pickle.loads(pickle.dumps(wrapper))
 
         result = restored.to_tensor()
@@ -105,7 +105,7 @@ class TestToTensor:
 
     def test_round_trip_shape_preserved(self):
         src = torch.randn(2, 3, 5, dtype=torch.float32)
-        wrapper = IPURdmaWrapper.wrap(src)
+        wrapper = RdmaWrapper.wrap(src)
         restored = pickle.loads(pickle.dumps(wrapper))
 
         result = restored.to_tensor()
@@ -121,7 +121,7 @@ class TestToTensor:
     ])
     def test_round_trip_dtypes(self, dtype):
         src = torch.ones(16, dtype=dtype)
-        wrapper = IPURdmaWrapper.wrap(src)
+        wrapper = RdmaWrapper.wrap(src)
         restored = pickle.loads(pickle.dumps(wrapper))
 
         result = restored.to_tensor()
@@ -129,11 +129,11 @@ class TestToTensor:
         assert torch.equal(result, src)
 
     def test_round_trip_large_tensor(self):
-        """256KB page (IPU DMA sweet spot)."""
+        """256KB page (RDMA DMA sweet spot)."""
         nbytes = 256 * 1024
         numel = nbytes // 4  # float32
         src = torch.randn(numel, dtype=torch.float32)
-        wrapper = IPURdmaWrapper.wrap(src)
+        wrapper = RdmaWrapper.wrap(src)
         restored = pickle.loads(pickle.dumps(wrapper))
 
         result = restored.to_tensor()
@@ -143,7 +143,7 @@ class TestToTensor:
     def test_round_trip_multidimensional(self):
         """Simulates a KV page shape: [num_heads, tokens, head_dim]."""
         src = torch.randn(8, 256, 128, dtype=torch.float32)
-        wrapper = IPURdmaWrapper.wrap(src)
+        wrapper = RdmaWrapper.wrap(src)
         restored = pickle.loads(pickle.dumps(wrapper))
 
         result = restored.to_tensor()
@@ -152,7 +152,7 @@ class TestToTensor:
 
     def test_empty_tensor(self):
         src = torch.empty(0, dtype=torch.float32)
-        wrapper = IPURdmaWrapper.wrap(src)
+        wrapper = RdmaWrapper.wrap(src)
         restored = pickle.loads(pickle.dumps(wrapper))
 
         result = restored.to_tensor()
@@ -165,7 +165,7 @@ class TestBufferLifetime:
 
     def test_result_tensor_valid_after_to_tensor(self):
         src = torch.randn(16, dtype=torch.float32)
-        wrapper = IPURdmaWrapper.wrap(src)
+        wrapper = RdmaWrapper.wrap(src)
         restored = pickle.loads(pickle.dumps(wrapper))
 
         result = restored.to_tensor()
@@ -175,7 +175,7 @@ class TestBufferLifetime:
     def test_buffer_freed_on_tensor_gc(self, _isolate_transport):
         transport = _isolate_transport
         src = torch.randn(16, dtype=torch.float32)
-        wrapper = IPURdmaWrapper.wrap(src)
+        wrapper = RdmaWrapper.wrap(src)
         restored = pickle.loads(pickle.dumps(wrapper))
 
         result = restored.to_tensor()
@@ -188,7 +188,7 @@ class TestBufferLifetime:
     def test_mr_deregistered_on_source_tensor_gc(self, _isolate_transport):
         transport = _isolate_transport
         src = torch.randn(8, dtype=torch.float32)
-        IPURdmaWrapper.wrap(src)
+        RdmaWrapper.wrap(src)
         # After wrap, data_ptr may have changed (SHM migration on stub)
         data_ptr = src.data_ptr()
 
@@ -202,14 +202,14 @@ class TestBufferLifetime:
     def test_stale_mr_entry_replaced_on_id_reuse(self):
         """A GC'd tensor whose data_ptr is recycled must not reuse stale MR."""
         t1 = torch.randn(8, dtype=torch.float32)
-        w1 = IPURdmaWrapper.wrap(t1)
+        w1 = RdmaWrapper.wrap(t1)
         rkey1 = w1.rkey
 
         del t1
         gc.collect()
 
         t2 = torch.randn(8, dtype=torch.float32)
-        w2 = IPURdmaWrapper.wrap(t2)
+        w2 = RdmaWrapper.wrap(t2)
         # May or may not get same data_ptr, but if it does, rkey must differ
         if w2.remote_addr == w1.remote_addr:
             assert w2.rkey != rkey1
@@ -228,7 +228,7 @@ class TestPostWrite:
         local_mr = transport.register_mr(src.data_ptr(), src_nbytes)
         remote_mr = transport.register_mr(dst.data_ptr(), dst_nbytes)
 
-        from lmcache.v1.platform.ipu.rdma_transport import RegisteredBuffer
+        from lmcache.v1.platform.rdma.rdma_transport import RegisteredBuffer
 
         future = transport.post_write(
             local_buf=RegisteredBuffer(
@@ -248,14 +248,14 @@ class TestCrossProcessSHM:
     def test_wrap_produces_shm_name_on_stub(self, _isolate_transport):
         """wrap() migrates tensor to SHM and carries the name in wrapper."""
         src = torch.randn(32, dtype=torch.float32)
-        wrapper = IPURdmaWrapper.wrap(src)
+        wrapper = RdmaWrapper.wrap(src)
         assert wrapper.shm_name != ""
         assert wrapper.shm_name.startswith("/lmcache_rdma_")
 
     def test_shm_name_survives_pickle(self, _isolate_transport):
         """shm_name is preserved across ZMQ serialization (pickle)."""
         src = torch.randn(16, dtype=torch.float32)
-        wrapper = IPURdmaWrapper.wrap(src)
+        wrapper = RdmaWrapper.wrap(src)
         restored = pickle.loads(pickle.dumps(wrapper))
         assert restored.shm_name == wrapper.shm_name
 
@@ -265,7 +265,7 @@ class TestCrossProcessSHM:
 
         # Client side: wrap tensor (migrates to SHM)
         src = torch.arange(24, dtype=torch.float32)
-        wrapper = IPURdmaWrapper.wrap(src)
+        wrapper = RdmaWrapper.wrap(src)
 
         # Server side: map the remote SHM and post_read into a local buffer
         transport.map_remote_mr(
@@ -297,7 +297,7 @@ class TestCrossProcessSHM:
 
         # Client side: allocate a destination buffer in SHM
         dst = torch.zeros(16, dtype=torch.float32)
-        wrapper = IPURdmaWrapper.wrap(dst)
+        wrapper = RdmaWrapper.wrap(dst)
 
         # Server side: map the remote SHM, write local data into it
         transport.map_remote_mr(
@@ -308,7 +308,7 @@ class TestCrossProcessSHM:
         src_nbytes = src_data.numel() * src_data.element_size()
         src_mr = transport.register_mr(src_data.data_ptr(), src_nbytes)
 
-        from lmcache.v1.platform.ipu.rdma_transport import RegisteredBuffer
+        from lmcache.v1.platform.rdma.rdma_transport import RegisteredBuffer
 
         future = transport.post_write(
             local_buf=RegisteredBuffer(
@@ -331,7 +331,7 @@ class TestCrossProcessSHM:
         transport = _isolate_transport
 
         src = torch.arange(32, dtype=torch.float32)
-        wrapper = IPURdmaWrapper.wrap(src)
+        wrapper = RdmaWrapper.wrap(src)
 
         transport.map_remote_mr(
             wrapper.rkey, wrapper.shm_name,
@@ -362,7 +362,7 @@ class TestCrossProcessSHM:
     def test_no_shm_name_when_verbs_backend(self):
         """wrap() does NOT migrate to SHM when a non-stub transport is active."""
         from unittest.mock import MagicMock
-        from lmcache.v1.platform.ipu.rdma_transport import MrInfo
+        from lmcache.v1.platform.rdma.rdma_transport import MrInfo
 
         mock_transport = MagicMock()
         mock_transport.register_mr.return_value = MrInfo(
@@ -371,5 +371,5 @@ class TestCrossProcessSHM:
         set_rdma_transport(mock_transport)
 
         src = torch.randn(16, dtype=torch.float32)
-        wrapper = IPURdmaWrapper.wrap(src)
+        wrapper = RdmaWrapper.wrap(src)
         assert wrapper.shm_name == ""
