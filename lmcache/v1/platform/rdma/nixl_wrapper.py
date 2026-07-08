@@ -189,15 +189,11 @@ class NixlWrapper(DeviceIPCWrapper):
         if not tensor.is_contiguous():
             raise ValueError("NixlWrapper requires a contiguous tensor")
 
-        reg_descs = _ensure_registered(tensor)
+        _ensure_registered(tensor)
         agent = get_nixl_agent()
 
         agent_name = agent.name
-        # Use partial metadata scoped to this tensor so the server can add or
-        # update the remote descriptor even when the agent is already known.
-        agent_metadata = agent.get_partial_agent_metadata(
-            reg_descs, inc_conn_info=True
-        )
+        agent_metadata = agent.get_agent_metadata()
         base_addr = tensor.data_ptr()
         nbytes = tensor.numel() * tensor.element_size()
         device_id = max(tensor.get_device(), 0)
