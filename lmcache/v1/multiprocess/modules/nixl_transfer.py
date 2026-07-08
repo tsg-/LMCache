@@ -135,9 +135,25 @@ class NixlTransferModule:
         nixl_agent_cls, nixl_agent_config_cls = _load_nixl()
         _backends = backends if backends is not None else ["UCX"]
         import os
+        # Use STRICT sync mode so concurrent AFFINITY-pool threads don't race
+        # on shared nixl_agent internal state.
+        nixl_thread_sync_t = None
+        for _mod in ("nixl._api", "nixl_cu12._api", "nixl_cu13._api"):
+            try:
+                _m = importlib.import_module(_mod)
+                nixl_thread_sync_t = getattr(_m, "nixl_thread_sync_t", None)
+                if nixl_thread_sync_t is not None:
+                    break
+            except ImportError:
+                pass
+
+        agent_kwargs: dict = {"backends": _backends}
+        if nixl_thread_sync_t is not None:
+            agent_kwargs["sync_mode"] = nixl_thread_sync_t.NIXL_THREAD_SYNC_STRICT
+
         self._agent = nixl_agent_cls(
             f"lmcache_server_{os.getpid()}_{id(self)}",
-            nixl_agent_config_cls(backends=_backends),
+            nixl_agent_config_cls(**agent_kwargs),
         )
         logger.info(
             "NixlTransferModule initialised (backends=%s)", _backends
