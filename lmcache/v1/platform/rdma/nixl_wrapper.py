@@ -74,9 +74,24 @@ def get_nixl_agent():
             import os
             os.environ.setdefault("UCX_TLS", "tcp,self")
             nixl_agent_cls, nixl_agent_config_cls = _load_nixl()
+            # Use STRICT sync so the progress thread and manual get_new_notifs()
+            # calls from the test's _await_future() don't race on UCX state.
+            nixl_thread_sync_t = None
+            for _m in ("nixl._api", "nixl_cu12._api", "nixl_cu13._api"):
+                try:
+                    nixl_thread_sync_t = getattr(
+                        importlib.import_module(_m), "nixl_thread_sync_t", None
+                    )
+                    if nixl_thread_sync_t is not None:
+                        break
+                except ImportError:
+                    pass
+            worker_cfg: dict = {"backends": ["UCX"]}
+            if nixl_thread_sync_t is not None:
+                worker_cfg["sync_mode"] = nixl_thread_sync_t.NIXL_THREAD_SYNC_STRICT
             _AGENT = nixl_agent_cls(
                 f"lmcache_worker_{os.getpid()}",
-                nixl_agent_config_cls(backends=["UCX"]),
+                nixl_agent_config_cls(**worker_cfg),
             )
             logger.info(
                 "NixlWrapper: created process-level nixl_agent %s",
