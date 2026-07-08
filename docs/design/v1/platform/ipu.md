@@ -523,9 +523,9 @@ For the full env var reference (PSN, nonce, remote params, rendezvous files),
 see [verbs-transport.md](verbs-transport.md#environment-variables).
 
 
-## Future Enhancement: Direct-to-Accelerator Retrieve
+## Direct-to-Accelerator Retrieve
 
-The current design uses a two-hop retrieve path:
+The default retrieve path is two-hop:
 
 ```
     Target DRAM --RDMA--> Initiator Host DRAM --DMA--> TPU/GPU HBM (KV cache)
@@ -535,27 +535,36 @@ The `to_tensor()` call lands data in host DRAM. The inference engine then
 copies it into the active KV cache blocks in accelerator HBM. This matches
 the existing `DeviceIPCWrapper.to_tensor()` contract and works universally.
 
-A future optimization would bypass host DRAM entirely on the retrieve path:
+The one-hop path bypasses host DRAM entirely:
 
 ```
-    Target DRAM --RDMA Write--> TPU/GPU HBM (KV cache blocks) directly
+    Target DRAM --RDMA Read--> GPU HBM (KV cache blocks) directly
 ```
 
-This requires:
-- **For GPUs:** GPUDirect RDMA — NIC/IPU DMAs directly into GPU HBM via PCIe
-  BAR. NVIDIA supports this with `ibv_reg_mr` over GPU memory.
-- **For TPUs:** TPU HBM must be PCIe-BAR-exposed to the IPU. Not publicly
-  documented whether Google exposes this.
+### GPU: GPUDirect RDMA (LMCache-1m9) — Implemented
 
-The direct path would bypass `to_tensor()` entirely — data goes straight to
-the vLLM block_id destination in HBM without materializing a host-memory
-tensor. This would require a new interface (likely below TransferContext)
-that maps RDMA target addresses directly to KV cache block slots.
+GPUDirect RDMA allows the NIC to DMA directly into GPU HBM via PCIe BAR.
+NVIDIA exposes GPU memory as a PCIe BAR; `ibv_reg_mr()` accepts CUDA device
+memory pointers on GPUDirect-capable drivers.
 
-**Status:** Deferred. Current implementation targets the two-hop path. The
-direct-to-accelerator path is a performance optimization for after hardware
-validation confirms PCIe BAR accessibility from the IPU on both GPU and TPU
-platforms.
+**Implementation:**
+- `lmcache/v1/platform/rdma/gpudirect.py` — `GpuDirectBuffer` (CUDA
+  allocation + MR) and `allocate_gpudirect_buffer()` factory.
+- `RdmaWrapper.to_tensor_direct()` — uses `GpuDirectBuffer` as `local_buf`
+  in `post_read`; transparent fallback to `to_tensor()` when GPUDirect is
+  unavailable or fails.
+- Activated by `LMCACHE_RDMA_GPUDIRECT=1` (see
+  [verbs-transport.md](verbs-transport.md#gpudirect-rdma-lmcache-1m9)).
+
+The existing `to_tensor()` host-DRAM path is unchanged and remains the
+default.  `to_tensor_direct()` never raises due to a GPUDirect failure —
+fallback to `to_tensor()` is always attempted.
+
+### TPU: Deferred
+
+TPU HBM must be PCIe-BAR-exposed to the IPU. It is not publicly documented
+whether Google exposes this. The TPU direct path remains deferred pending
+hardware validation.
 
 
 ## Future Enhancement: Anjali's IPT Transport (Custom Transport)

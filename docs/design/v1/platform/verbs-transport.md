@@ -51,6 +51,7 @@ A single `VerbsRdmaTransport` class that:
 | `LMCACHE_RDMA_ENDPOINT_FILE` | path | no | `/tmp/lmcache_rdma_{role}_{nonce}.json` | Write local endpoint |
 | `LMCACHE_RDMA_PEER_ENDPOINT_FILE` | path | no | `/tmp/lmcache_rdma_{peer_role}_{nonce}.json` | Poll for peer endpoint |
 | `LMCACHE_RDMA_NONCE` | string | rendezvous mode | — | Session nonce (shared by both sides) |
+| `LMCACHE_RDMA_GPUDIRECT` | `0`, `1` | no | `0` | Enable GPUDirect RDMA direct-to-HBM path (requires CUDA + pyverbs) |
 
 **Connection modes:**
 - **Preconfigured:** All three `REMOTE_*` vars set → connect immediately,
@@ -726,6 +727,46 @@ The transport tracks buffers allocated via `allocate_buffer()` in a set
 `RuntimeError("transport is closed")`.
 
 Called by `__del__` as safety net. Tests should call `close()` explicitly.
+
+
+### GPUDirect RDMA (LMCache-1m9)
+
+When `LMCACHE_RDMA_GPUDIRECT=1` is set and CUDA + pyverbs are available, the
+retrieve path bypasses host DRAM entirely:
+
+```
+Target DRAM --RDMA Read--> GPU HBM (KV cache blocks) directly
+```
+
+**Module:** `lmcache/v1/platform/rdma/gpudirect.py`
+
+**Key types:**
+
+- `GpuDirectBuffer` — wraps a CUDA device allocation registered as an
+  ibverbs MR.  Exposes `addr` (raw device pointer) and `mr` (`MrInfo`) so it
+  duck-types `RegisteredBuffer` and can be passed directly as `local_buf` to
+  `post_read`.
+- `is_gpudirect_available() -> bool` — cheap check (env var + cuda query),
+  safe to call on every request.
+- `allocate_gpudirect_buffer(...) -> GpuDirectBuffer | None` — factory that
+  returns `None` on any failure so the caller can fall back.
+
+**New method `RdmaWrapper.to_tensor_direct()`:**
+
+Calls `allocate_gpudirect_buffer` to obtain a GPU buffer, posts an RDMA Read
+with it as `local_buf`, and on completion returns `buf.to_tensor()` (a
+zero-copy view of the GPU allocation).  Buffer lifetime is tied to the
+returned tensor via `weakref.finalize`.
+
+Fallback semantics — `to_tensor_direct()` never raises due to a GPUDirect
+failure:
+- `allocate_gpudirect_buffer` returns `None` → falls back to `to_tensor()`
+- `post_read` or `poll_completion` fails / times out → `gpu_buf.close()` then
+  falls back to `to_tensor()`
+- Any unexpected exception → logs warning, closes buffer, falls back
+
+**Activation:** `LMCACHE_RDMA_GPUDIRECT=1` (see env var table above).  The
+existing `to_tensor()` host-DRAM path is unchanged and remains the default.
 
 
 ## Testing Strategy

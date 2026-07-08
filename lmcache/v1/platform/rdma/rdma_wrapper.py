@@ -276,6 +276,85 @@ class RdmaWrapper(DeviceIPCWrapper):
 
         return out
 
+    def to_tensor_direct(self) -> torch.Tensor:
+        """Pull data via RDMA Read directly into GPU HBM (GPUDirect path).
+
+        Attempts to use GPUDirect RDMA: allocates a CUDA device buffer,
+        registers it as an ibverbs MR, and posts an RDMA Read so the NIC
+        DMAs data straight into GPU HBM — bypassing host DRAM entirely.
+
+        If GPUDirect is unavailable (env var not set, CUDA absent, pyverbs
+        missing, or MR registration fails), falls back transparently to
+        the host-DRAM path via :meth:`to_tensor`.
+
+        This method never raises due to a GPUDirect failure; the fallback
+        is always tried before propagating any error.
+
+        Returns:
+            A torch tensor containing the retrieved KV data, backed by
+            GPU device memory on the GPUDirect path or by a host-DRAM
+            registered buffer on the fallback path.
+        """
+        from lmcache.v1.platform.rdma.gpudirect import allocate_gpudirect_buffer
+
+        if self.length == 0:
+            return torch.empty(self.shape, dtype=self.dtype)
+
+        transport = get_rdma_transport()
+        gpu_buf = allocate_gpudirect_buffer(
+            length=self.length,
+            dtype=self.dtype,
+            shape=self.shape,
+            transport=transport,
+        )
+
+        if gpu_buf is None:
+            # GPUDirect unavailable — fall through to host-DRAM path.
+            return self.to_tensor()
+
+        try:
+            future = transport.post_read(
+                local_buf=gpu_buf,
+                remote_addr=self.remote_addr,
+                rkey=self.rkey,
+                length=self.length,
+            )
+
+            if not transport.poll_completion(future, timeout_ms=5000):
+                flushed = transport.drain_on_timeout()
+                if not flushed:
+                    logger.error(
+                        "GPUDirect RDMA Read timed out and WR not flushed; "
+                        "transport may be dead. Falling back to host-DRAM path."
+                    )
+                else:
+                    logger.warning(
+                        "GPUDirect RDMA Read timed out; falling back to "
+                        "host-DRAM path."
+                    )
+                gpu_buf.close()
+                return self.to_tensor()
+
+            out = gpu_buf.to_tensor()
+            # Close buffer when the tensor's storage is GC'd.
+            storage = out.untyped_storage()
+            weakref.finalize(storage, gpu_buf.close)
+            logger.debug(
+                "GPUDirect RDMA Read succeeded: rkey=%d len=%d",
+                self.rkey,
+                self.length,
+            )
+            return out
+
+        except Exception:
+            logger.warning(
+                "GPUDirect RDMA Read raised an exception; falling back to "
+                "host-DRAM path",
+                exc_info=True,
+            )
+            gpu_buf.close()
+            return self.to_tensor()
+
 
 # Backward-compat alias for deserialization of pickled objects from prior versions.
 IPURdmaWrapper = RdmaWrapper
