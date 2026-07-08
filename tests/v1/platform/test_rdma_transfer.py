@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Unit tests for IPUTransferModule (STORE and RETRIEVE handlers).
+"""Unit tests for RdmaTransferModule (STORE and RETRIEVE handlers).
 
 Uses StubRdmaTransport (memcpy, same process) and mocked
 MPCacheServerContext — no RDMA hardware required.
@@ -15,18 +15,18 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 import torch
 
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, PrefetchHandle
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.modules.ipu_transfer import IPUTransferModule
+from lmcache.v1.multiprocess.modules.rdma_transfer import RdmaTransferModule
 from lmcache.v1.multiprocess.protocols.base import RequestType
 from lmcache.v1.platform.base_ipc_wrapper import DeviceIPCWrapper
-from lmcache.v1.platform.ipu.rdma_transport import (
+from lmcache.v1.platform.rdma.rdma_transport import (
     MrInfo,
     RegisteredBuffer,
     StubRdmaTransport,
     set_rdma_transport,
 )
-from lmcache.v1.platform.ipu.rdma_wrapper import IPURdmaWrapper, _REGISTERED_MRS
+from lmcache.v1.platform.rdma.rdma_wrapper import RdmaWrapper, _REGISTERED_MRS
 
 
 # ---------------------------------------------------------------------------
@@ -35,7 +35,7 @@ from lmcache.v1.platform.ipu.rdma_wrapper import IPURdmaWrapper, _REGISTERED_MRS
 
 
 class _FakeWrapper(DeviceIPCWrapper):
-    """Non-IPURdmaWrapper subclass used to test descriptor validation."""
+    """Non-RdmaWrapper subclass used to test descriptor validation."""
 
     def __init__(self) -> None:
         self.handle = None
@@ -81,13 +81,13 @@ def _make_mem_obj(tensor: torch.Tensor) -> MagicMock:
     return mem_obj
 
 
-def _make_wrapper(tensor: torch.Tensor) -> IPURdmaWrapper:
-    """Return a real IPURdmaWrapper for ``tensor`` (uses the global transport)."""
-    return IPURdmaWrapper.wrap(tensor)
+def _make_wrapper(tensor: torch.Tensor) -> RdmaWrapper:
+    """Return a real RdmaWrapper for ``tensor`` (uses the global transport)."""
+    return RdmaWrapper.wrap(tensor)
 
 
 def _serialized_wrapper(tensor: torch.Tensor) -> bytes:
-    """Serialize an IPURdmaWrapper for ``tensor`` into wire bytes."""
+    """Serialize an RdmaWrapper for ``tensor`` into wire bytes."""
     return DeviceIPCWrapper.Serialize(_make_wrapper(tensor))
 
 
@@ -123,21 +123,21 @@ def mock_ctx() -> MagicMock:
 
 
 @pytest.fixture()
-def module(mock_ctx: MagicMock) -> IPUTransferModule:
-    """IPUTransferModule wired to mock_ctx and StubRdmaTransport."""
-    return IPUTransferModule(mock_ctx)
+def module(mock_ctx: MagicMock) -> RdmaTransferModule:
+    """RdmaTransferModule wired to mock_ctx and StubRdmaTransport."""
+    return RdmaTransferModule(mock_ctx)
 
 
 # ---------------------------------------------------------------------------
-# TestIPUTransferModuleHandlers
+# TestRdmaTransferModuleHandlers
 # ---------------------------------------------------------------------------
 
 
-class TestIPUTransferModuleHandlers:
+class TestRdmaTransferModuleHandlers:
     """get_handlers() contract."""
 
     def test_get_handlers_returns_store_and_retrieve(
-        self, module: IPUTransferModule
+        self, module: RdmaTransferModule
     ) -> None:
         specs = module.get_handlers()
         request_types = {s.request_type for s in specs}
@@ -145,25 +145,25 @@ class TestIPUTransferModuleHandlers:
         assert RequestType.RETRIEVE in request_types
 
     def test_no_register_kv_cache_handler(
-        self, module: IPUTransferModule
+        self, module: RdmaTransferModule
     ) -> None:
         specs = module.get_handlers()
         request_types = {s.request_type for s in specs}
         assert RequestType.REGISTER_KV_CACHE not in request_types
 
     def test_get_handlers_returns_exactly_two(
-        self, module: IPUTransferModule
+        self, module: RdmaTransferModule
     ) -> None:
         """Only STORE and RETRIEVE — no extra handler registered."""
         assert len(module.get_handlers()) == 2
 
 
 # ---------------------------------------------------------------------------
-# TestIPUTransferModuleStore
+# TestRdmaTransferModuleStore
 # ---------------------------------------------------------------------------
 
 
-class TestIPUTransferModuleStore:
+class TestRdmaTransferModuleStore:
     """store() correctness against StubRdmaTransport."""
 
     # ------------------------------------------------------------------
@@ -184,7 +184,7 @@ class TestIPUTransferModuleStore:
 
     def test_store_posts_rdma_read_into_memory_obj_backing(
         self,
-        module: IPUTransferModule,
+        module: RdmaTransferModule,
         mock_ctx: MagicMock,
         transport: StubRdmaTransport,
     ) -> None:
@@ -249,7 +249,7 @@ class TestIPUTransferModuleStore:
 
     def test_store_finish_write_called_on_rdma_timeout(
         self,
-        module: IPUTransferModule,
+        module: RdmaTransferModule,
         mock_ctx: MagicMock,
         transport: StubRdmaTransport,
     ) -> None:
@@ -277,7 +277,7 @@ class TestIPUTransferModuleStore:
 
     def test_store_finish_write_called_on_exception(
         self,
-        module: IPUTransferModule,
+        module: RdmaTransferModule,
         mock_ctx: MagicMock,
         transport: StubRdmaTransport,
     ) -> None:
@@ -303,7 +303,7 @@ class TestIPUTransferModuleStore:
 
     def test_store_multi_chunk_uses_correct_offsets(
         self,
-        module: IPUTransferModule,
+        module: RdmaTransferModule,
         mock_ctx: MagicMock,
         transport: StubRdmaTransport,
     ) -> None:
@@ -364,7 +364,7 @@ class TestIPUTransferModuleStore:
 
     def test_store_multi_chunk_reserve_write_uses_per_chunk_shape(
         self,
-        module: IPUTransferModule,
+        module: RdmaTransferModule,
         mock_ctx: MagicMock,
         transport: StubRdmaTransport,
     ) -> None:
@@ -407,14 +407,14 @@ class TestIPUTransferModuleStore:
             assert layout_desc.shapes == [torch.Size((numel_per_chunk,))]
             assert layout_desc.dtypes == [torch.float32]
 
-    def test_store_validates_descriptor_is_ipu_rdma_wrapper(
+    def test_store_validates_descriptor_is_rdma_wrapper(
         self,
-        module: IPUTransferModule,
+        module: RdmaTransferModule,
         mock_ctx: MagicMock,
     ) -> None:
-        """Non-IPURdmaWrapper descriptors must raise ValueError."""
+        """Non-RdmaWrapper descriptors must raise ValueError."""
         bad_bytes = DeviceIPCWrapper.Serialize(_FakeWrapper())
-        with pytest.raises(ValueError, match="expected IPURdmaWrapper"):
+        with pytest.raises(ValueError, match="expected RdmaWrapper"):
             module.store(
                 key=_make_ipc_key(),
                 instance_id=1,
@@ -424,7 +424,7 @@ class TestIPUTransferModuleStore:
 
     def test_store_returns_false_on_poll_timeout(
         self,
-        module: IPUTransferModule,
+        module: RdmaTransferModule,
         mock_ctx: MagicMock,
         transport: StubRdmaTransport,
     ) -> None:
@@ -451,7 +451,7 @@ class TestIPUTransferModuleStore:
 
     def test_store_zero_chunks_returns_success(
         self,
-        module: IPUTransferModule,
+        module: RdmaTransferModule,
         mock_ctx: MagicMock,
     ) -> None:
         """When resolve_obj_keys returns empty list, store returns (b'', True)."""
@@ -468,7 +468,7 @@ class TestIPUTransferModuleStore:
 
     def test_store_data_actually_transferred(
         self,
-        module: IPUTransferModule,
+        module: RdmaTransferModule,
         mock_ctx: MagicMock,
     ) -> None:
         """StubRdmaTransport post_read copies bytes from src into dst."""
@@ -497,7 +497,7 @@ class TestIPUTransferModuleStore:
 
 
 # ---------------------------------------------------------------------------
-# TestIPUTransferModuleRetrieve
+# TestRdmaTransferModuleRetrieve
 # ---------------------------------------------------------------------------
 
 
@@ -515,12 +515,34 @@ def _build_read_prefetched_cm(
     return cm
 
 
-class TestIPUTransferModuleRetrieve:
+def _mock_prefetch_hit(num_chunks: int) -> PrefetchHandle:
+    """Return a PrefetchHandle indicating all chunks are L1 hits."""
+    return PrefetchHandle(
+        prefetch_request_id=-1,
+        external_request_id="",
+        l1_found_indices=tuple(range(num_chunks)),
+        total_requested_keys=num_chunks,
+        submit_time=0.0,
+    )
+
+
+def _mock_prefetch_miss() -> PrefetchHandle:
+    """Return a PrefetchHandle indicating no L1 hits."""
+    return PrefetchHandle(
+        prefetch_request_id=-1,
+        external_request_id="",
+        l1_found_indices=(),
+        total_requested_keys=0,
+        submit_time=0.0,
+    )
+
+
+class TestRdmaTransferModuleRetrieve:
     """retrieve() correctness against StubRdmaTransport."""
 
     def test_retrieve_posts_rdma_write_from_memory_obj_backing(
         self,
-        module: IPUTransferModule,
+        module: RdmaTransferModule,
         mock_ctx: MagicMock,
         transport: StubRdmaTransport,
     ) -> None:
@@ -534,6 +556,7 @@ class TestIPUTransferModuleRetrieve:
         mem_obj = _make_mem_obj(src)  # storage-manager side
 
         mock_ctx.resolve_obj_keys.return_value = [[obj_key]]
+        mock_ctx.storage_manager.submit_prefetch_task.return_value = _mock_prefetch_hit(1)
         mock_ctx.storage_manager.read_prefetched_results = _build_read_prefetched_cm(
             [mem_obj]
         )
@@ -579,7 +602,7 @@ class TestIPUTransferModuleRetrieve:
 
     def test_retrieve_finish_read_prefetched_after_rdma_completion(
         self,
-        module: IPUTransferModule,
+        module: RdmaTransferModule,
         mock_ctx: MagicMock,
         transport: StubRdmaTransport,
     ) -> None:
@@ -590,6 +613,7 @@ class TestIPUTransferModuleRetrieve:
 
         mem_obj = _make_mem_obj(src)
         mock_ctx.resolve_obj_keys.return_value = [[obj_key]]
+        mock_ctx.storage_manager.submit_prefetch_task.return_value = _mock_prefetch_hit(1)
         mock_ctx.storage_manager.read_prefetched_results = _build_read_prefetched_cm(
             [mem_obj]
         )
@@ -624,7 +648,7 @@ class TestIPUTransferModuleRetrieve:
 
     def test_retrieve_not_finished_before_rdma_completion(
         self,
-        module: IPUTransferModule,
+        module: RdmaTransferModule,
         mock_ctx: MagicMock,
         transport: StubRdmaTransport,
     ) -> None:
@@ -635,6 +659,7 @@ class TestIPUTransferModuleRetrieve:
 
         mem_obj = _make_mem_obj(src)
         mock_ctx.resolve_obj_keys.return_value = [[obj_key]]
+        mock_ctx.storage_manager.submit_prefetch_task.return_value = _mock_prefetch_hit(1)
         mock_ctx.storage_manager.read_prefetched_results = _build_read_prefetched_cm(
             [mem_obj]
         )
@@ -656,15 +681,13 @@ class TestIPUTransferModuleRetrieve:
 
     def test_retrieve_returns_false_on_missing_keys(
         self,
-        module: IPUTransferModule,
+        module: RdmaTransferModule,
         mock_ctx: MagicMock,
     ) -> None:
-        """Cache miss (read_prefetched_results yields None) -> (b'', False)."""
+        """Cache miss (submit_prefetch_task finds no L1 hits) -> (b'', False)."""
         obj_key = _make_obj_key(0)
         mock_ctx.resolve_obj_keys.return_value = [[obj_key]]
-        mock_ctx.storage_manager.read_prefetched_results = _build_read_prefetched_cm(
-            None  # simulates cache miss
-        )
+        mock_ctx.storage_manager.submit_prefetch_task.return_value = _mock_prefetch_miss()
 
         dst = torch.zeros(16, dtype=torch.float32)
         wrapper = _make_wrapper(dst)
@@ -683,7 +706,7 @@ class TestIPUTransferModuleRetrieve:
 
     def test_retrieve_multi_chunk_offsets(
         self,
-        module: IPUTransferModule,
+        module: RdmaTransferModule,
         mock_ctx: MagicMock,
         transport: StubRdmaTransport,
     ) -> None:
@@ -705,6 +728,7 @@ class TestIPUTransferModuleRetrieve:
         mem_obj1 = _make_mem_obj(src1)
 
         mock_ctx.resolve_obj_keys.return_value = [[obj_key0, obj_key1]]
+        mock_ctx.storage_manager.submit_prefetch_task.return_value = _mock_prefetch_hit(2)
         mock_ctx.storage_manager.read_prefetched_results = _build_read_prefetched_cm(
             [mem_obj0, mem_obj1]
         )
@@ -742,7 +766,7 @@ class TestIPUTransferModuleRetrieve:
 
     def test_retrieve_data_actually_transferred(
         self,
-        module: IPUTransferModule,
+        module: RdmaTransferModule,
         mock_ctx: MagicMock,
     ) -> None:
         """StubRdmaTransport post_write copies bytes from src into dst."""
@@ -753,6 +777,7 @@ class TestIPUTransferModuleRetrieve:
         obj_key = _make_obj_key(0)
         mem_obj = _make_mem_obj(src)
         mock_ctx.resolve_obj_keys.return_value = [[obj_key]]
+        mock_ctx.storage_manager.submit_prefetch_task.return_value = _mock_prefetch_hit(1)
         mock_ctx.storage_manager.read_prefetched_results = _build_read_prefetched_cm(
             [mem_obj]
         )
@@ -772,7 +797,7 @@ class TestIPUTransferModuleRetrieve:
 
     def test_retrieve_zero_chunks_returns_failure(
         self,
-        module: IPUTransferModule,
+        module: RdmaTransferModule,
         mock_ctx: MagicMock,
     ) -> None:
         """resolve_obj_keys returns empty -> retrieve returns (b'', False)."""
@@ -788,14 +813,14 @@ class TestIPUTransferModuleRetrieve:
         assert out_bytes == b""
         assert ok is False
 
-    def test_retrieve_validates_descriptor_is_ipu_rdma_wrapper(
+    def test_retrieve_validates_descriptor_is_rdma_wrapper(
         self,
-        module: IPUTransferModule,
+        module: RdmaTransferModule,
         mock_ctx: MagicMock,
     ) -> None:
-        """Non-IPURdmaWrapper descriptors must raise ValueError."""
+        """Non-RdmaWrapper descriptors must raise ValueError."""
         bad_bytes = DeviceIPCWrapper.Serialize(_FakeWrapper())
-        with pytest.raises(ValueError, match="expected IPURdmaWrapper"):
+        with pytest.raises(ValueError, match="expected RdmaWrapper"):
             module.retrieve(
                 key=_make_ipc_key(),
                 instance_id=1,

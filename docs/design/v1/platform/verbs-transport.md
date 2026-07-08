@@ -71,7 +71,7 @@ QP creation. Override via `LMCACHE_RDMA_LOCAL_PSN` for reproducible testing.
 ### File Location
 
 ```
-lmcache/v1/platform/ipu/verbs_transport.py
+lmcache/v1/platform/rdma/verbs_transport.py
 ```
 
 Lives alongside `rdma_transport.py` (protocol + stub). Changes to existing
@@ -102,7 +102,7 @@ def post_read(
 - `StubRdmaTransport.post_read()`: updated to accept `RegisteredBuffer`,
   extracts `.addr` for memcpy. No overload.
 - `VerbsRdmaTransport.post_read()`: extracts `.mr.handle` for lkey.
-- `IPURdmaWrapper.to_tensor()`: passes the `RegisteredBuffer` from
+- `RdmaWrapper.to_tensor()`: passes the `RegisteredBuffer` from
   `allocate_buffer()` directly.
 - Design doc `docs/design/v1/platform/ipu.md` "RdmaTransport Protocol" section:
   updated to show new signature.
@@ -368,7 +368,7 @@ def free_buffer(self, buf: RegisteredBuffer) -> None:
 ### Completion Model — Lock-Serialized Post/Poll
 
 **Concurrency contract:** The transport is process-global (`get_rdma_transport()`).
-Multiple server threads may call `IPURdmaWrapper.to_tensor()` concurrently.
+Multiple server threads may call `RdmaWrapper.to_tensor()` concurrently.
 A `threading.Lock` serializes access to the single QP:
 
 ```python
@@ -515,7 +515,7 @@ def drain_on_timeout(self) -> bool:
 the specific timed-out WR's flush CQE has been observed. Only then is the
 buffer provably safe to free (HCA will not DMA into it).
 
-**Call site in IPURdmaWrapper.to_tensor():**
+**Call site in RdmaWrapper.to_tensor():**
 
 ```python
 if not transport.poll_completion(future, timeout_ms=5000):
@@ -537,7 +537,7 @@ POC; production reconnection is LMCache-6c9.
 
 ### MR Deregistration Lifecycle
 
-**Issue 10 resolution:** `IPURdmaWrapper.wrap()` registers MRs via the
+**Issue 10 resolution:** `RdmaWrapper.wrap()` registers MRs via the
 global `_REGISTERED_MRS` cache in `rdma_wrapper.py`. With the stub, leaked
 MRs are harmless (just memory). With verbs, leaked MRs pin physical pages.
 
@@ -632,7 +632,7 @@ weakref.finalize(tensor, _deregister_on_gc, data_ptr, mr)
 weakref finalizer — same unsafe pattern. Apply the captured-callback fix:
 
 ```python
-# In IPURdmaWrapper.to_tensor(), after successful RDMA Read:
+# In RdmaWrapper.to_tensor(), after successful RDMA Read:
 transport.release_buffer_tracking(buf)  # transport won't free on close()
 free_fn = transport.free_buffer  # capture at allocation time
 weakref.finalize(storage, lambda: free_fn(buf))
@@ -677,7 +677,7 @@ In `rdma_transport.py`, the `get_rdma_transport()` factory gains one branch:
 
 ```python
 elif backend == "verbs":
-    from lmcache.v1.platform.ipu.verbs_transport import VerbsRdmaTransport
+    from lmcache.v1.platform.rdma.verbs_transport import VerbsRdmaTransport
     _global_transport = VerbsRdmaTransport.from_env()
 ```
 
