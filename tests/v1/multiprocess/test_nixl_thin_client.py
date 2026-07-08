@@ -74,7 +74,7 @@ def _server_process_runner(host: str, port: int, chunk_size: int) -> None:
     import os as _os
     # Use CMA (Cross-Memory Attach) which is reliable for inter-process
     # transfers on Linux without shared shmem segment issues.
-    _os.environ.setdefault("UCX_TLS", "cma,self")
+    _os.environ.setdefault("UCX_TLS", "tcp,self")
     mp_config = MPServerConfig(
         host=host,
         port=port,
@@ -196,6 +196,9 @@ class TestNixlThinClientE2E:
         store_wrapper = NixlWrapper.wrap(src)
         store_descriptor = DeviceIPCWrapper.Serialize(store_wrapper)
         print(f"[DEBUG] wrapper.base_addr={store_wrapper.base_addr:#x} agent={store_wrapper.agent_name}")
+
+        # Give the NIXL progress thread time to start and UCX to be ready
+        time.sleep(0.5)
 
         key = _make_key("nixl-store-retrieve-0", tok_start=100)
         store_future = client.submit_request(

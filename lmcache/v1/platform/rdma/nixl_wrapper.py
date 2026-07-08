@@ -71,7 +71,7 @@ def get_nixl_agent():
             # are deregistered/re-registered between requests.  This must be
             # set before _load_nixl() triggers UCX initialization.
             import os
-            os.environ.setdefault("UCX_TLS", "cma,self")
+            os.environ.setdefault("UCX_TLS", "tcp,self")
             nixl_agent_cls, nixl_agent_config_cls = _load_nixl()
             _AGENT = nixl_agent_cls(
                 f"lmcache_worker_{os.getpid()}",

@@ -136,7 +136,7 @@ class NixlTransferModule:
         # Set UCX_TLS before first NIXL/UCX initialization.  Use CMA
         # (Cross-Memory Attach) for reliable inter-process transfers on
         # Linux without shmem-segment issues across sequential requests.
-        os.environ.setdefault("UCX_TLS", "cma,self")
+        os.environ.setdefault("UCX_TLS", "tcp,self")
 
         nixl_agent_cls, nixl_agent_config_cls = _load_nixl()
 

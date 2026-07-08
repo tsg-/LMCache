@@ -18,4 +18,4 @@ import os
 # additional memory registration beyond what NIXL already does.
 # Avoid "posix" (shmem segment) which requires shared mapping state that
 # can become inconsistent after MR deregister/re-register across requests.
-os.environ.setdefault("UCX_TLS", "cma,self")
+os.environ.setdefault("UCX_TLS", "tcp,self")
