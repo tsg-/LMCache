@@ -12,7 +12,7 @@ sequenceDiagram
 
     vLLM->>LMC_I: retrieve(tokens)
     LMC_I->>LMC_I: hash tokens → chunk keys (BLAKE3)
-    LMC_I->>LMC_I: allocate dest buffer in host DRAM<br/>IPURdmaWrapper.wrap() → (dst_rkey, dst_addr, 256KB)
+    LMC_I->>LMC_I: allocate dest buffer in host DRAM<br/>RdmaWrapper.wrap() → (dst_rkey, dst_addr, 256KB)
     LMC_I->>WIRE: retrieve request (keys + dst descriptor) [ZMQ control]
     WIRE->>LMC_T: retrieve request
 
@@ -56,7 +56,7 @@ sequenceDiagram
 
     vLLM->>LMC_I: store(tokens, kv_tensor)
     LMC_I->>LMC_I: DMA from GPU HBM → host DRAM, fence
-    LMC_I->>LMC_I: IPURdmaWrapper.wrap() → (rkey, addr, 256KB)
+    LMC_I->>LMC_I: RdmaWrapper.wrap() → (rkey, addr, 256KB)
     LMC_I->>WIRE: write intent (hash, rkey, addr, len) [ZMQ control, 128B]
     WIRE->>LMC_T: write intent
 

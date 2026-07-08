@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-"""End-to-end integration test for the IPU RDMA path.
+"""End-to-end integration test for the RDMA path.
 
 Spins up a real ``MPCacheServer`` subprocess with
 ``supported_transfer_mode="rdma"`` (routing STORE/RETRIEVE to
-:class:`IPUTransferModule`) and drives it from a real
+:class:`RdmaTransferModule`) and drives it from a real
 :class:`~lmcache.v1.multiprocess.mq.MessageQueueClient`, exactly as a
 standalone initiator thin client would: plain CPU host-DRAM tensors,
-wrapped via :class:`IPURdmaWrapper`, with descriptors sent as
+wrapped via :class:`RdmaWrapper`, with descriptors sent as
 ``rdma_descriptor_bytes`` over the wire.  No CUDA, no vLLM, no
 ``LMCacheDrivenTransferContext`` involvement anywhere in this path.
 
@@ -39,7 +39,7 @@ from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocols.base import RequestType
 from lmcache.v1.multiprocess.server import run_cache_server
 from lmcache.v1.platform.base_ipc_wrapper import DeviceIPCWrapper
-from lmcache.v1.platform.ipu.rdma_wrapper import IPURdmaWrapper
+from lmcache.v1.platform.rdma.rdma_wrapper import RdmaWrapper
 
 SERVER_HOST = "localhost"
 SERVER_PORT = 5601
@@ -134,7 +134,7 @@ class TestRdmaThinClientStore:
         numel = CHUNK_SIZE
         src = torch.arange(numel, dtype=torch.float32)
 
-        wrapper = IPURdmaWrapper.wrap(src)
+        wrapper = RdmaWrapper.wrap(src)
         descriptor = DeviceIPCWrapper.Serialize(wrapper)
 
         key = _make_key("store-req-0", numel)
@@ -151,19 +151,13 @@ class TestRdmaThinClientStore:
 class TestRdmaThinClientRetrieve:
     """Drives STORE then RETRIEVE, verifying the round-tripped bytes."""
 
-    @pytest.mark.xfail(
-        reason="IPUTransferModule.retrieve() calls read_prefetched_results "
-        "which requires a prior submit_prefetch_task; thin client does not "
-        "issue that step yet (LMCache-eow scope)",
-        strict=False,
-    )
     def test_retrieve_pushes_bytes_into_initiator_buffer(
         self, client: MessageQueueClient
     ) -> None:
         numel = CHUNK_SIZE
         src = torch.arange(numel, dtype=torch.float32) + 100.0
 
-        store_wrapper = IPURdmaWrapper.wrap(src)
+        store_wrapper = RdmaWrapper.wrap(src)
         store_descriptor = DeviceIPCWrapper.Serialize(store_wrapper)
 
         # Use token_ids that don't collide with earlier tests.
@@ -186,7 +180,7 @@ class TestRdmaThinClientRetrieve:
         # Allocate a fresh destination buffer and wrap it as the RDMA
         # descriptor the server should RDMA-Write into.
         dst = torch.zeros(numel, dtype=torch.float32)
-        retrieve_wrapper = IPURdmaWrapper.wrap(dst)
+        retrieve_wrapper = RdmaWrapper.wrap(dst)
         retrieve_descriptor = DeviceIPCWrapper.Serialize(retrieve_wrapper)
 
         retrieve_future = client.submit_request(
@@ -204,7 +198,7 @@ class TestRdmaThinClientRetrieve:
         """A key that was never stored must report a clean miss."""
         numel = CHUNK_SIZE
         dst = torch.zeros(numel, dtype=torch.float32)
-        wrapper = IPURdmaWrapper.wrap(dst)
+        wrapper = RdmaWrapper.wrap(dst)
         descriptor = DeviceIPCWrapper.Serialize(wrapper)
 
         key = IPCCacheServerKey(

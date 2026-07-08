@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""RDMA transport abstraction for IPU-driven KV cache transfers.
+"""RDMA transport abstraction for KV cache transfers.
 
 Defines the :class:`RdmaTransport` protocol and a stub implementation
 that uses local memory copies for testing without RDMA hardware.
@@ -65,7 +65,7 @@ class RdmaFuture:
 class RdmaTransport(Protocol):
     """Protocol for RDMA verb operations.
 
-    Concrete implementations wrap libibverbs (or the IPU SDK equivalent).
+    Concrete implementations wrap libibverbs (or equivalent).
     The stub implementation uses memcpy for local testing.
     """
 
@@ -304,7 +304,7 @@ def get_rdma_transport() -> RdmaTransport:
             logger.info("Using StubRdmaTransport (no RDMA hardware)")
             _global_transport = StubRdmaTransport()
         elif backend == "verbs":
-            from lmcache.v1.platform.ipu.verbs_transport import (
+            from lmcache.v1.platform.rdma.verbs_transport import (
                 VerbsRdmaTransport,
             )
             _global_transport = VerbsRdmaTransport.from_env()

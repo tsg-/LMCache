@@ -98,12 +98,14 @@ def add_server_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--mode",
-        choices=["cpu", "gpu"],
+        choices=["cpu", "gpu", "rdma"],
         default="gpu",
         help=(
             "Run mode (default: gpu). In cpu mode the client allocates "
             "POSIX-SHM-backed KV cache tensors and the server maps the "
-            "same physical pages."
+            "same physical pages. In rdma mode the client uses the "
+            "RdmaThinClient to drive store/retrieve via RDMA "
+            "descriptors (set LMCACHE_RDMA_TRANSPORT=stub or verbs)."
         ),
     )
     parser.add_argument(
@@ -191,6 +193,12 @@ def add_server_arguments(parser: argparse.ArgumentParser) -> None:
         default="http://localhost:8080",
         help=("HTTP base URL for checksum API (default: http://localhost:8080)"),
     )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=30.0,
+        help="Per-request timeout in seconds (default: 30). Used by rdma mode.",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +218,10 @@ def run_server_bench(
             ``command.create_metrics``.
         args: Parsed CLI arguments for ``lmcache bench server``.
     """
+    if args.mode == "rdma":
+        _run_rdma_bench(command, args)
+        return
+
     _require_full_install()
 
     # Heavy imports — safe now that _require_full_install passed.
@@ -603,6 +615,125 @@ def run_server_bench(
         warm_lookup_ms=warm_lookup_ms,
         warm_retrieve_ms=warm_retrieve_ms,
     )
+    log("Done.")
+
+
+def _run_rdma_bench(
+    command: "BaseCommand",
+    args: argparse.Namespace,
+) -> None:
+    """Run the RDMA-mode server bench: store/retrieve via RdmaThinClient.
+
+    Exercises the RDMA data path without KV cache registration, paged
+    tensors, or GPU allocation. Each iteration stores a synthetic tensor,
+    then retrieves it and verifies data integrity.
+
+    Args:
+        command: The owning :class:`BaseCommand` for metrics output.
+        args: Parsed CLI arguments.
+    """
+    import torch
+
+    from lmcache.v1.platform.rdma.thin_client import RdmaThinClient
+
+    quiet = getattr(args, "quiet", False)
+
+    def log(msg: str) -> None:
+        if not quiet:
+            print(msg)
+
+    url = args.rpc_url
+    num_tokens = args.num_tokens
+    model_name = "rdma-bench"
+
+    log("Connecting to LMCache server at %s (mode=rdma) ..." % url)
+
+    store_ms_list: list[float] = []
+    retrieve_ms_list: list[float] = []
+    total_requests = 0
+    total_match = 0
+    total_mismatch = 0
+
+    with RdmaThinClient(
+        server_url=url,
+        model_name=model_name,
+        timeout=args.timeout,
+    ) as client:
+        if args.end is not None:
+            seq_iter: range | itertools.count = range(args.start, args.end)
+        else:
+            seq_iter = itertools.count(args.start)
+
+        try:
+            for seq_no in seq_iter:
+                token_ids = list(range(seq_no * num_tokens, (seq_no + 1) * num_tokens))
+                data = torch.arange(num_tokens, dtype=torch.float32) + float(seq_no)
+
+                # Store
+                t0 = time.monotonic()
+                store_ok = client.store(
+                    f"bench-store-{seq_no}",
+                    token_ids=token_ids,
+                    data=data,
+                )
+                store_elapsed = (time.monotonic() - t0) * 1000
+                store_ms_list.append(store_elapsed)
+
+                if not store_ok:
+                    log("  [seq %d] STORE FAILED" % seq_no)
+                    total_requests += 1
+                    total_mismatch += 1
+                    time.sleep(args.interval)
+                    continue
+
+                # Retrieve
+                t1 = time.monotonic()
+                result = client.retrieve(
+                    f"bench-retrieve-{seq_no}",
+                    token_ids=token_ids,
+                    numel=num_tokens,
+                    dtype=torch.float32,
+                )
+                retrieve_elapsed = (time.monotonic() - t1) * 1000
+                retrieve_ms_list.append(retrieve_elapsed)
+
+                total_requests += 1
+                if result is not None and torch.equal(result, data):
+                    total_match += 1
+                    log(
+                        "  [seq %d] OK  store=%.2fms retrieve=%.2fms"
+                        % (seq_no, store_elapsed, retrieve_elapsed)
+                    )
+                else:
+                    total_mismatch += 1
+                    log("  [seq %d] DATA MISMATCH" % seq_no)
+
+                time.sleep(args.interval)
+        except KeyboardInterrupt:
+            log("\nStopping...")
+
+    # Emit metrics
+    metrics = command.create_metrics("RDMA Bench Result", args, width=64)
+
+    cfg = metrics.add_section("config", "Configuration")
+    cfg.add("rpc_url", "RPC URL", args.rpc_url)
+    cfg.add("mode", "Mode", "rdma")
+    cfg.add("num_tokens", "Elements / request", num_tokens)
+    cfg.add("bytes_per_request", "Bytes / request", num_tokens * 4)
+    cfg.add("interval", "Interval (s)", args.interval)
+
+    res = metrics.add_section("results", "Results")
+    res.add("total_requests", "Total requests", total_requests)
+    res.add("data_match", "Data match", total_match)
+    res.add("data_mismatch", "Data mismatch", total_mismatch)
+    if total_requests > 0:
+        pass_rate = total_match / total_requests * 100
+        res.add("pass_rate", "Pass rate (%)", round(pass_rate, 2))
+
+    _add_latency_section(metrics, "store", "Store (ms)", store_ms_list)
+    _add_latency_section(metrics, "retrieve", "Retrieve (ms)", retrieve_ms_list)
+
+    metrics.emit()
     log("Done.")
 
 

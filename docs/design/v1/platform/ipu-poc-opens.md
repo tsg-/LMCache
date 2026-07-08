@@ -166,12 +166,12 @@ style: |
 <!-- _class: title -->
 <!-- _paginate: false -->
 
-# IPU KV Cache PoC: Open Questions
+# KV Cache Offload over RDMA
 
-## Internal alignment before external communication
+## Details on LMCache based prototype with IPU as RDMA/Falcon NIC
 
 <div class="byline">
-June 2026
+July 2026
 </div>
 
 ---
@@ -251,17 +251,25 @@ Pull model value shifts to:
 
 # Open Questions for Anthropic
 
+<br/>
+
 **Transport architecture:**
 - Is NVMe-on-initiator (NVMe-oF fabric) a hard requirement, or are you open to direct RDMA between registered memory regions?
 - If NVMe: block command set or KV command set? LMCache addresses by token hash natively, not LBA.
+
+<br/>
 
 **PoC outcomes:**
 - Bandwidth/offload proof only (IPU sustains 400G line rate, CPU out of data path)?
 - Or full disaggregated cache serving (server-side dedup, admission control, multi-initiator scaling)?
 
+<br/>
+
 **Initiator-side caching:**
 - Should the compute node run its own local cache tier (HBM/DRAM as L0/L1, remote KV Cache Node as L2)?
 - Or single-tier remote only for the PoC?
+
+<br/>
 
 **Hardware config:**
 - Confirm target SSD config on KV Cache Node (16x2 Gen5 NVMe assumed)

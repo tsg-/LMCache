@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-"""IPU RDMA transfer module for LMCache multiprocess server.
+"""RDMA transfer module for LMCache multiprocess server.
 
-Implements :class:`IPUTransferModule`, an :class:`EngineModule` that handles
+Implements :class:`RdmaTransferModule`, an :class:`EngineModule` that handles
 STORE and RETRIEVE requests by moving KV tensors between host DRAM buffers
 over RoCEv2 RDMA (ibverbs post_read / post_write).
 
-The IPU is a dumb RoCEv2 NIC.  All KV processing happens on the Xeon CPU.
-KV tensors are plain CPU tensors in host DRAM.  The IPU handles only RDMA
+The NIC is a dumb RoCEv2 device.  All KV processing happens on the CPU.
+KV tensors are plain CPU tensors in host DRAM.  The NIC handles only RDMA
 DMA operations.  There are no CUDA events, no GPU block IDs, and no GPU
 synchronisation anywhere in this module.
 """
@@ -23,12 +23,12 @@ from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.engine_module import EngineModule, HandlerSpec, ThreadPoolType
 from lmcache.v1.platform.base_ipc_wrapper import DeviceIPCWrapper
-from lmcache.v1.platform.ipu.rdma_transport import (
+from lmcache.v1.platform.rdma.rdma_transport import (
     RegisteredBuffer,
     StubRdmaTransport,
     get_rdma_transport,
 )
-from lmcache.v1.platform.ipu.rdma_wrapper import IPURdmaWrapper
+from lmcache.v1.platform.rdma.rdma_wrapper import RdmaWrapper
 from lmcache.v1.multiprocess.protocols.base import RequestType
 
 if TYPE_CHECKING:
@@ -40,7 +40,7 @@ logger = init_logger(__name__)
 def _per_chunk_shape(full_shape: tuple[int, ...], num_chunks: int) -> torch.Size:
     """Divide a wrapper's leading dimension by ``num_chunks``.
 
-    :class:`IPURdmaWrapper` describes the *entire* registered buffer, which
+    :class:`RdmaWrapper` describes the *entire* registered buffer, which
     may span multiple LMCache chunks. ``reserve_write`` must be given the
     shape of a single chunk, not the whole range, or the storage manager
     allocates an oversized :class:`MemoryObj` per chunk.
@@ -66,7 +66,7 @@ def _per_chunk_shape(full_shape: tuple[int, ...], num_chunks: int) -> torch.Size
     return torch.Size((per_chunk,) + tuple(full_shape[1:]))
 
 
-class IPUTransferModule:
+class RdmaTransferModule:
     """Handles STORE and RETRIEVE KV cache transfers over RDMA.
 
     Binds directly to the process-global :class:`RdmaTransport` obtained at
@@ -85,7 +85,7 @@ class IPUTransferModule:
         # rather than surfacing errors on the first STORE/RETRIEVE call.
         self._transport = get_rdma_transport()
         logger.info(
-            "IPUTransferModule initialised with transport %s",
+            "RdmaTransferModule initialised with transport %s",
             type(self._transport).__name__,
         )
 
@@ -115,11 +115,11 @@ class IPUTransferModule:
         """Return module status including the active transport type.
 
         Returns:
-            A dict with key ``"ipu_transfer"`` containing the transport
+            A dict with key ``"rdma_transfer"`` containing the transport
             class name.
         """
         return {
-            "ipu_transfer": {
+            "rdma_transfer": {
                 "rdma_transport": type(self._transport).__name__,
             }
         }
@@ -137,7 +137,7 @@ class IPUTransferModule:
     # SHM mapping helpers (stub backend only)
     # ------------------------------------------------------------------
 
-    def _map_remote_if_stub(self, wrapper: IPURdmaWrapper) -> None:
+    def _map_remote_if_stub(self, wrapper: RdmaWrapper) -> None:
         """Map the remote wrapper's SHM segment if using stub transport."""
         if (
             isinstance(self._transport, StubRdmaTransport)
@@ -150,7 +150,7 @@ class IPUTransferModule:
                 wrapper.length,
             )
 
-    def _unmap_remote_if_stub(self, wrapper: IPURdmaWrapper) -> None:
+    def _unmap_remote_if_stub(self, wrapper: RdmaWrapper) -> None:
         """Unmap a previously mapped remote SHM segment."""
         if (
             isinstance(self._transport, StubRdmaTransport)
@@ -173,7 +173,7 @@ class IPUTransferModule:
 
         The initiator has already registered its KV buffer as an RDMA MR and
         sent the descriptor (rkey, remote_addr, length, shape, dtype) as a
-        pickled :class:`IPURdmaWrapper`.  This handler iterates over the
+        pickled :class:`RdmaWrapper`.  This handler iterates over the
         resolved object keys, reserves write slots in the storage manager,
         registers each MemoryObj's backing memory as a local RDMA MR, and
         posts an RDMA Read to pull the data directly from the initiator's
@@ -182,8 +182,8 @@ class IPUTransferModule:
         Args:
             key: The IPC cache key identifying the token range to store.
             instance_id: Initiator process ID (used for logging only).
-            block_ids: GPU block IDs — always ``[]`` for IPU; ignored.
-            rdma_descriptor_bytes: Pickled :class:`IPURdmaWrapper` carrying
+            block_ids: GPU block IDs — always ``[]`` for RDMA; ignored.
+            rdma_descriptor_bytes: Pickled :class:`RdmaWrapper` carrying
                 the source RDMA descriptor (rkey, remote_addr, length,
                 shape, dtype).
 
@@ -192,14 +192,14 @@ class IPUTransferModule:
             only when every chunk completed without error or timeout.
 
         Raises:
-            ValueError: If the deserialized descriptor is not an
-                :class:`IPURdmaWrapper`, or if the total length is not
+            ValueError: If the deserialized descriptor is not a
+                :class:`RdmaWrapper`, or if the total length is not
                 evenly divisible by the number of chunks.
         """
         wrapper = DeviceIPCWrapper.Deserialize(rdma_descriptor_bytes)
-        if not isinstance(wrapper, IPURdmaWrapper):
+        if not isinstance(wrapper, RdmaWrapper):
             raise ValueError(
-                f"store: expected IPURdmaWrapper, got {type(wrapper).__name__}"
+                f"store: expected RdmaWrapper, got {type(wrapper).__name__}"
             )
 
         # Map the remote SHM segment locally so post_read can access it.
@@ -315,7 +315,7 @@ class IPUTransferModule:
 
         The initiator has already allocated and registered a destination buffer
         in its host DRAM and sent its RDMA descriptor as a pickled
-        :class:`IPURdmaWrapper`.  This handler reads the matching MemoryObjs
+        :class:`RdmaWrapper`.  This handler reads the matching MemoryObjs
         from the storage manager, registers each as a local RDMA source MR,
         and posts an RDMA Write to push the data directly into the initiator's
         buffer.
@@ -327,8 +327,8 @@ class IPUTransferModule:
         Args:
             key: The IPC cache key identifying the token range to retrieve.
             instance_id: Initiator process ID (used for logging only).
-            block_ids: GPU block IDs — always ``[]`` for IPU; ignored.
-            rdma_descriptor_bytes: Pickled :class:`IPURdmaWrapper` carrying
+            block_ids: GPU block IDs — always ``[]`` for RDMA; ignored.
+            rdma_descriptor_bytes: Pickled :class:`RdmaWrapper` carrying
                 the destination RDMA descriptor (rkey, remote_addr) on the
                 initiator side.
             skip_first_n_tokens: Number of tokens to skip at the start of
@@ -341,14 +341,14 @@ class IPUTransferModule:
             without timeout or error.
 
         Raises:
-            ValueError: If the deserialized descriptor is not an
-                :class:`IPURdmaWrapper`, or if the total length is not
+            ValueError: If the deserialized descriptor is not a
+                :class:`RdmaWrapper`, or if the total length is not
                 evenly divisible by the number of resolved chunks.
         """
         wrapper = DeviceIPCWrapper.Deserialize(rdma_descriptor_bytes)
-        if not isinstance(wrapper, IPURdmaWrapper):
+        if not isinstance(wrapper, RdmaWrapper):
             raise ValueError(
-                f"retrieve: expected IPURdmaWrapper, got {type(wrapper).__name__}"
+                f"retrieve: expected RdmaWrapper, got {type(wrapper).__name__}"
             )
 
         # Map the remote SHM segment locally so post_write can write into it.
@@ -374,12 +374,40 @@ class IPUTransferModule:
                 f"divisible by num_chunks={num_chunks}"
             )
 
+        layout_desc = MemoryLayoutDesc(
+            shapes=[_per_chunk_shape(wrapper.shape, num_chunks)],
+            dtypes=[wrapper.dtype],
+        )
+
+        # Acquire read locks before read_prefetched_results. The vLLM engine
+        # adapter normally does this via submit_prefetch_task in the request
+        # pipeline, but thin clients bypass that layer (LMCache-gyk).
+        prefetch_handle = self._ctx.storage_manager.submit_prefetch_task(
+            obj_keys, layout_desc, skip_l2=True
+        )
+        if len(prefetch_handle.l1_found_indices) < num_chunks:
+            logger.debug(
+                "retrieve: cache miss for key=%s (instance_id=%d, "
+                "found=%d/%d chunks)",
+                key,
+                instance_id,
+                len(prefetch_handle.l1_found_indices),
+                num_chunks,
+            )
+            # Release any partial read locks acquired by submit_prefetch_task.
+            if prefetch_handle.l1_found_indices:
+                found_keys = [obj_keys[i] for i in prefetch_handle.l1_found_indices]
+                self._ctx.storage_manager.finish_read_prefetched(found_keys)
+            self._unmap_remote_if_stub(wrapper)
+            return (b"", False)
+
         all_succeeded = True
 
         with self._ctx.storage_manager.read_prefetched_results(obj_keys) as mem_objs:
             if mem_objs is None:
                 logger.debug(
-                    "retrieve: cache miss for key=%s (instance_id=%d)",
+                    "retrieve: read_prefetched_results returned None for "
+                    "key=%s (instance_id=%d)",
                     key,
                     instance_id,
                 )
@@ -441,3 +469,7 @@ class IPUTransferModule:
 
         self._unmap_remote_if_stub(wrapper)
         return (b"", all_succeeded)
+
+
+# Backward-compat alias.
+IPUTransferModule = RdmaTransferModule

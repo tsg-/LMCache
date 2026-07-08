@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 
 from lmcache.logging import init_logger
-from lmcache.v1.platform.ipu.rdma_transport import (
+from lmcache.v1.platform.rdma.rdma_transport import (
     MrInfo,
     RdmaFuture,
     RegisteredBuffer,

@@ -2,7 +2,7 @@ graph BT
     L2("<div style='width:520px'><b>VerbsRdmaTransport (isolated)</b><br/>construct -&gt; connect() -&gt; post_read() -&gt; raw CQE poll<br/><br/>✓ tested &amp; working on CX7 / RoCEv2</div>")
     L2b("<div style='width:520px'><b>post_write() (RDMA Write)</b><br/>unit-tested with mocked pyverbs + StubRdmaTransport<br/><br/>● unit-tested only, not yet hardware-validated &mdash; LMCache-zbg</div>")
     L3("<div style='width:560px'><b>LMCache RDMA Transport, End-to-End</b><br/>get_rdma_transport() -&gt; post_read() -&gt; poll_completion() + data-content verification<br/><br/>✓ tested &amp; working on CX7 / RoCEv2<br/><i>(single point-to-point RoCEv2 link; no IPU/Falcon hardware, no switched fabric yet)</i></div>")
-    L3b("<div style='width:520px'><b>IPURdmaWrapper + IPUTransferModule</b><br/>to_tensor / wrap, MR lifecycle, GC finalizers &middot; server-side zero-copy RDMA store/retrieve<br/><br/>○ not yet exercised on hardware</div>")
+    L3b("<div style='width:520px'><b>RdmaWrapper + RdmaTransferModule</b><br/>to_tensor / wrap, MR lifecycle, GC finalizers &middot; server-side zero-copy RDMA store/retrieve<br/><br/>○ not yet exercised on hardware</div>")
     L4("<div style='width:520px'><b>LMCache L1/L2 Traffic Benchmarks</b><br/>synthetic scenarios (transfer_channel_benchmark, storage_backend_io), throughput / latency<br/><br/>○ not yet exercised on hardware</div>")
 
     L2 --> L2b --> L3 --> L3b --> L4

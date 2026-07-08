@@ -60,7 +60,7 @@ class MPServerConfig:
     """Transfer mode: 'lmcache_driven' for server-driven transfer
     (STORE/RETRIEVE, supports CUDA IPC and CPU SHM), 'engine_driven' for
     engine-driven transfer (PREPARE/COMMIT), 'auto' to enable both, or
-    'rdma' for IPU RDMA-based transfer (IPUTransferModule)."""
+    'rdma' for RDMA-based transfer (RdmaTransferModule)."""
 
     runtime_plugin_config: "RuntimePluginConfig" = field(
         default_factory=lambda: RuntimePluginConfig()
@@ -309,8 +309,8 @@ def add_mp_server_args(
         help="Supported transfer mode: 'lmcache_driven' for server-driven "
         "transfer (STORE/RETRIEVE, supports CUDA IPC and CPU SHM), "
         "'engine_driven' for engine-driven transfer (PREPARE/COMMIT), "
-        "'auto' to enable both transfer paths, or 'rdma' for IPU "
-        "RDMA-based transfer (IPUTransferModule). Default is 'auto'.",
+        "'auto' to enable both transfer paths, or 'rdma' for "
+        "RDMA-based transfer (RdmaTransferModule). Default is 'auto'.",
     )
     mp_group.add_argument(
         "--runtime-plugin-locations",

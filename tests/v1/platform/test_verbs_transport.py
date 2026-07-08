@@ -70,7 +70,7 @@ def mock_pyverbs(monkeypatch):
         monkeypatch.setitem(__import__("sys").modules, name, mod)
 
     import importlib
-    import lmcache.v1.platform.ipu.verbs_transport as vt_mod
+    import lmcache.v1.platform.rdma.verbs_transport as vt_mod
     monkeypatch.setattr(vt_mod, "HAS_PYVERBS", True)
     monkeypatch.setattr(vt_mod, "VerbsContext", mock_device.Context)
     monkeypatch.setattr(vt_mod, "PD", mock_pd.PD)
@@ -197,7 +197,7 @@ class TestRoleValidation:
 
     def test_initiator_post_read_raises(self, mock_pyverbs):
         transport = _make_transport(mock_pyverbs, role="initiator")
-        from lmcache.v1.platform.ipu.rdma_transport import RegisteredBuffer, MrInfo
+        from lmcache.v1.platform.rdma.rdma_transport import RegisteredBuffer, MrInfo
         buf = RegisteredBuffer(addr=0x1000, length=4096,
                               mr=MrInfo(rkey=1, addr=0x1000, length=4096, handle=MagicMock()))
         with pytest.raises(RuntimeError, match="target role"):
@@ -205,7 +205,7 @@ class TestRoleValidation:
 
     def test_initiator_post_write_raises(self, mock_pyverbs):
         transport = _make_transport(mock_pyverbs, role="initiator")
-        from lmcache.v1.platform.ipu.rdma_transport import RegisteredBuffer, MrInfo
+        from lmcache.v1.platform.rdma.rdma_transport import RegisteredBuffer, MrInfo
         mr = MrInfo(rkey=1, addr=0x1000, length=4096, handle=MagicMock())
         buf = RegisteredBuffer(addr=0x1000, length=4096, mr=mr)
         with pytest.raises(RuntimeError, match="target role"):
@@ -215,7 +215,7 @@ class TestRoleValidation:
 class TestPostRead:
     def test_returns_future(self, mock_pyverbs):
         transport = _make_transport(mock_pyverbs, role="target")
-        from lmcache.v1.platform.ipu.rdma_transport import RegisteredBuffer, MrInfo, RdmaFuture
+        from lmcache.v1.platform.rdma.rdma_transport import RegisteredBuffer, MrInfo, RdmaFuture
         mr = MrInfo(rkey=1, addr=0x1000, length=4096, handle=MagicMock())
         buf = RegisteredBuffer(addr=0x1000, length=4096, mr=mr)
         future = transport.post_read(buf, remote_addr=0x2000, rkey=5, length=4096)
@@ -230,7 +230,7 @@ class TestPostRead:
 
     def test_concurrent_blocks(self, mock_pyverbs):
         transport = _make_transport(mock_pyverbs, role="target")
-        from lmcache.v1.platform.ipu.rdma_transport import RegisteredBuffer, MrInfo
+        from lmcache.v1.platform.rdma.rdma_transport import RegisteredBuffer, MrInfo
         mr = MrInfo(rkey=1, addr=0x1000, length=4096, handle=MagicMock())
         buf = RegisteredBuffer(addr=0x1000, length=4096, mr=mr)
 
@@ -262,7 +262,7 @@ class TestPostRead:
 class TestPostWrite:
     def test_returns_future(self, mock_pyverbs):
         transport = _make_transport(mock_pyverbs, role="target")
-        from lmcache.v1.platform.ipu.rdma_transport import RegisteredBuffer, MrInfo, RdmaFuture
+        from lmcache.v1.platform.rdma.rdma_transport import RegisteredBuffer, MrInfo, RdmaFuture
         mr = MrInfo(rkey=1, addr=0x1000, length=4096, handle=MagicMock())
         buf = RegisteredBuffer(addr=0x1000, length=4096, mr=mr)
         future = transport.post_write(buf, remote_addr=0x2000, rkey=5, length=4096)
@@ -277,7 +277,7 @@ class TestPostWrite:
 
     def test_uses_rdma_write_opcode(self, mock_pyverbs):
         transport = _make_transport(mock_pyverbs, role="target")
-        from lmcache.v1.platform.ipu.rdma_transport import RegisteredBuffer, MrInfo
+        from lmcache.v1.platform.rdma.rdma_transport import RegisteredBuffer, MrInfo
         lkey_mock = MagicMock()
         lkey_mock.lkey = 77
         mr = MrInfo(rkey=1, addr=0x1000, length=4096, handle=lkey_mock)
@@ -303,7 +303,7 @@ class TestPostWrite:
 
     def test_concurrent_blocks(self, mock_pyverbs):
         transport = _make_transport(mock_pyverbs, role="target")
-        from lmcache.v1.platform.ipu.rdma_transport import RegisteredBuffer, MrInfo
+        from lmcache.v1.platform.rdma.rdma_transport import RegisteredBuffer, MrInfo
         mr = MrInfo(rkey=1, addr=0x1000, length=4096, handle=MagicMock())
         buf = RegisteredBuffer(addr=0x1000, length=4096, mr=mr)
 
@@ -335,7 +335,7 @@ class TestPostWrite:
 class TestPollCompletion:
     def test_success(self, mock_pyverbs):
         transport = _make_transport(mock_pyverbs, role="target")
-        from lmcache.v1.platform.ipu.rdma_transport import RegisteredBuffer, MrInfo
+        from lmcache.v1.platform.rdma.rdma_transport import RegisteredBuffer, MrInfo
         mr = MrInfo(rkey=1, addr=0x1000, length=4096, handle=MagicMock())
         buf = RegisteredBuffer(addr=0x1000, length=4096, mr=mr)
 
@@ -351,7 +351,7 @@ class TestPollCompletion:
 
     def test_timeout_returns_false(self, mock_pyverbs):
         transport = _make_transport(mock_pyverbs, role="target")
-        from lmcache.v1.platform.ipu.rdma_transport import RegisteredBuffer, MrInfo
+        from lmcache.v1.platform.rdma.rdma_transport import RegisteredBuffer, MrInfo
         mr = MrInfo(rkey=1, addr=0x1000, length=4096, handle=MagicMock())
         buf = RegisteredBuffer(addr=0x1000, length=4096, mr=mr)
 
@@ -368,7 +368,7 @@ class TestPollCompletion:
 
     def test_releases_lock_on_success(self, mock_pyverbs):
         transport = _make_transport(mock_pyverbs, role="target")
-        from lmcache.v1.platform.ipu.rdma_transport import RegisteredBuffer, MrInfo
+        from lmcache.v1.platform.rdma.rdma_transport import RegisteredBuffer, MrInfo
         mr = MrInfo(rkey=1, addr=0x1000, length=4096, handle=MagicMock())
         buf = RegisteredBuffer(addr=0x1000, length=4096, mr=mr)
 
@@ -384,7 +384,7 @@ class TestPollCompletion:
 
     def test_skips_mismatched_wr_id(self, mock_pyverbs):
         transport = _make_transport(mock_pyverbs, role="target")
-        from lmcache.v1.platform.ipu.rdma_transport import RegisteredBuffer, MrInfo
+        from lmcache.v1.platform.rdma.rdma_transport import RegisteredBuffer, MrInfo
         mr = MrInfo(rkey=1, addr=0x1000, length=4096, handle=MagicMock())
         buf = RegisteredBuffer(addr=0x1000, length=4096, mr=mr)
 
@@ -404,7 +404,7 @@ class TestPollCompletion:
 
     def test_wrong_future_raises(self, mock_pyverbs):
         transport = _make_transport(mock_pyverbs, role="target")
-        from lmcache.v1.platform.ipu.rdma_transport import RegisteredBuffer, MrInfo, RdmaFuture
+        from lmcache.v1.platform.rdma.rdma_transport import RegisteredBuffer, MrInfo, RdmaFuture
         mr = MrInfo(rkey=1, addr=0x1000, length=4096, handle=MagicMock())
         buf = RegisteredBuffer(addr=0x1000, length=4096, mr=mr)
         transport.post_read(buf, remote_addr=0x2000, rkey=5, length=4096)
@@ -418,7 +418,7 @@ class TestPollCompletion:
 
     def test_error_wc_returns_false(self, mock_pyverbs):
         transport = _make_transport(mock_pyverbs, role="target")
-        from lmcache.v1.platform.ipu.rdma_transport import RegisteredBuffer, MrInfo
+        from lmcache.v1.platform.rdma.rdma_transport import RegisteredBuffer, MrInfo
         mr = MrInfo(rkey=1, addr=0x1000, length=4096, handle=MagicMock())
         buf = RegisteredBuffer(addr=0x1000, length=4096, mr=mr)
 
@@ -433,7 +433,7 @@ class TestPollCompletion:
 
     def test_cq_exception_releases_lock(self, mock_pyverbs):
         transport = _make_transport(mock_pyverbs, role="target")
-        from lmcache.v1.platform.ipu.rdma_transport import RegisteredBuffer, MrInfo
+        from lmcache.v1.platform.rdma.rdma_transport import RegisteredBuffer, MrInfo
         mr = MrInfo(rkey=1, addr=0x1000, length=4096, handle=MagicMock())
         buf = RegisteredBuffer(addr=0x1000, length=4096, mr=mr)
 
@@ -451,7 +451,7 @@ class TestPollCompletion:
 class TestDrainOnTimeout:
     def test_returns_true_on_flush(self, mock_pyverbs):
         transport = _make_transport(mock_pyverbs, role="target")
-        from lmcache.v1.platform.ipu.rdma_transport import RegisteredBuffer, MrInfo
+        from lmcache.v1.platform.rdma.rdma_transport import RegisteredBuffer, MrInfo
         mr = MrInfo(rkey=1, addr=0x1000, length=4096, handle=MagicMock())
         buf = RegisteredBuffer(addr=0x1000, length=4096, mr=mr)
 
@@ -469,7 +469,7 @@ class TestDrainOnTimeout:
 
     def test_returns_false_on_no_flush(self, mock_pyverbs):
         transport = _make_transport(mock_pyverbs, role="target")
-        from lmcache.v1.platform.ipu.rdma_transport import RegisteredBuffer, MrInfo
+        from lmcache.v1.platform.rdma.rdma_transport import RegisteredBuffer, MrInfo
         mr = MrInfo(rkey=1, addr=0x1000, length=4096, handle=MagicMock())
         buf = RegisteredBuffer(addr=0x1000, length=4096, mr=mr)
 
@@ -486,7 +486,7 @@ class TestDrainOnTimeout:
 
     def test_releases_lock(self, mock_pyverbs):
         transport = _make_transport(mock_pyverbs, role="target")
-        from lmcache.v1.platform.ipu.rdma_transport import RegisteredBuffer, MrInfo
+        from lmcache.v1.platform.rdma.rdma_transport import RegisteredBuffer, MrInfo
         mr = MrInfo(rkey=1, addr=0x1000, length=4096, handle=MagicMock())
         buf = RegisteredBuffer(addr=0x1000, length=4096, mr=mr)
 
@@ -504,7 +504,7 @@ class TestDrainOnTimeout:
 
     def test_sets_qp_error(self, mock_pyverbs):
         transport = _make_transport(mock_pyverbs, role="target")
-        from lmcache.v1.platform.ipu.rdma_transport import RegisteredBuffer, MrInfo
+        from lmcache.v1.platform.rdma.rdma_transport import RegisteredBuffer, MrInfo
         mr = MrInfo(rkey=1, addr=0x1000, length=4096, handle=MagicMock())
         buf = RegisteredBuffer(addr=0x1000, length=4096, mr=mr)
 
@@ -678,7 +678,7 @@ class TestClose:
         transport = _make_transport(mock_pyverbs, role="target")
         transport.close()
 
-        from lmcache.v1.platform.ipu.rdma_transport import RegisteredBuffer, MrInfo
+        from lmcache.v1.platform.rdma.rdma_transport import RegisteredBuffer, MrInfo
         mr = MrInfo(rkey=1, addr=0x1000, length=4096, handle=MagicMock())
         buf = RegisteredBuffer(addr=0x1000, length=4096, mr=mr)
         with pytest.raises(RuntimeError, match="closed or drained"):
@@ -688,7 +688,7 @@ class TestClose:
         transport = _make_transport(mock_pyverbs, role="target")
         transport.close()
 
-        from lmcache.v1.platform.ipu.rdma_transport import RegisteredBuffer, MrInfo
+        from lmcache.v1.platform.rdma.rdma_transport import RegisteredBuffer, MrInfo
         mr = MrInfo(rkey=1, addr=0x1000, length=4096, handle=MagicMock())
         buf = RegisteredBuffer(addr=0x1000, length=4096, mr=mr)
         with pytest.raises(RuntimeError, match="closed or drained"):
