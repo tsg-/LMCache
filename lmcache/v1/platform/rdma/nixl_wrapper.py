@@ -66,39 +66,11 @@ def get_nixl_agent():
         return _AGENT
     with _AGENT_LOCK:
         if _AGENT is None:
-            # Set UCX_TLS before first NIXL/UCX init.  Avoid shmem transport;
-            # use TCP loopback for reliable cross-process transfers.
-            # UCX shmem stalls on the second cross-process transfer when MRs
-            # are deregistered/re-registered between requests.  This must be
-            # set before _load_nixl() triggers UCX initialization.
             import os
-            os.environ.setdefault("UCX_TLS", "tcp,self")
             nixl_agent_cls, nixl_agent_config_cls = _load_nixl()
-            # Use STRICT sync so the progress thread and manual get_new_notifs()
-            # calls from the test's _await_future() don't race on UCX state.
-            nixl_thread_sync_t = None
-            for _m in ("nixl._api", "nixl_cu12._api", "nixl_cu13._api"):
-                try:
-                    nixl_thread_sync_t = getattr(
-                        importlib.import_module(_m), "nixl_thread_sync_t", None
-                    )
-                    if nixl_thread_sync_t is not None:
-                        break
-                except ImportError:
-                    pass
-            # Disable the internal progress thread.  We drive UCX progress
-            # explicitly via get_new_notifs() in _await_future() in the test.
-            # This avoids mutex contention between the progress thread and
-            # the test thread's get_new_notifs() calls.
-            worker_cfg: dict = {
-                "backends": ["UCX"],
-                "enable_prog_thread": False,
-            }
-            if nixl_thread_sync_t is not None:
-                worker_cfg["sync_mode"] = nixl_thread_sync_t.NIXL_THREAD_SYNC_NONE
             _AGENT = nixl_agent_cls(
                 f"lmcache_worker_{os.getpid()}",
-                nixl_agent_config_cls(**worker_cfg),
+                nixl_agent_config_cls(backends=["UCX"]),
             )
             logger.info(
                 "NixlWrapper: created process-level nixl_agent %s",

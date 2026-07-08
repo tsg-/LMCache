@@ -69,7 +69,7 @@ from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocols.base import RequestType
 from lmcache.v1.multiprocess.server import run_cache_server
 from lmcache.v1.platform.base_ipc_wrapper import DeviceIPCWrapper
-from lmcache.v1.platform.rdma.nixl_wrapper import NixlWrapper, get_nixl_agent
+from lmcache.v1.platform.rdma.nixl_wrapper import NixlWrapper
 
 SERVER_HOST = "localhost"
 SERVER_PORT = 5605
@@ -80,9 +80,6 @@ DEFAULT_TIMEOUT = 30.0
 
 def _server_process_runner(host: str, port: int, chunk_size: int) -> None:
     """Entry point for the NIXL-mode server subprocess."""
-    import os as _os
-    # Use tcp transport (rc not available without RDMA HW connection setup).
-    _os.environ.setdefault("UCX_TLS", "tcp,self")
     mp_config = MPServerConfig(
         host=host,
         port=port,
@@ -136,52 +133,14 @@ def zmq_context() -> Generator[zmq.Context, None, None]:
 def client(
     nixl_server_process: mp.Process, zmq_context: zmq.Context
 ) -> Generator[MessageQueueClient, None, None]:
-    """Single module-scoped client — reused across all tests.
-
-    Also starts a background UCX progress pumper thread so the worker
-    responds to server TCP requests promptly (the worker's nixl_agent
-    has ``enable_prog_thread=False``).
-    """
+    """Single module-scoped client — reused across all tests."""
     c = MessageQueueClient(server_url=SERVER_URL, context=zmq_context)
-    stop = _start_ucx_progress_pumper()
     yield c
-    stop.set()
     c.close()
 
 
-import threading as _threading
-
-
-def _start_ucx_progress_pumper() -> "_threading.Event":
-    """Start a background thread that continuously pumps UCX progress.
-
-    With ``enable_prog_thread=False`` on the worker's nixl_agent, all UCX
-    progress must happen inline.  This thread calls ``get_new_notifs()``
-    every millisecond so the worker responds to server TCP requests promptly.
-
-    Returns:
-        A stop event; set it to stop the pumper thread.
-    """
-    stop_event = _threading.Event()
-
-    def _pump():
-        agent = get_nixl_agent()
-        while not stop_event.is_set():
-            try:
-                agent.get_new_notifs()
-            except Exception:
-                pass
-            time.sleep(0.001)
-
-    t = _threading.Thread(target=_pump, daemon=True, name="ucx-progress-pumper")
-    t.start()
-    return stop_event
-
-
 def _await_future(future: MessagingFuture, timeout: float = DEFAULT_TIMEOUT) -> tuple:
-    """Wait for a future.
-
-    The UCX progress pumper thread drives UCX progress in the background.
+    """Wait for a future, returning its result.
 
     Args:
         future: The MessagingFuture to wait for.
@@ -193,12 +152,7 @@ def _await_future(future: MessagingFuture, timeout: float = DEFAULT_TIMEOUT) -> 
     Raises:
         TimeoutError: If the future does not resolve within ``timeout``.
     """
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline and not future.query():
-        time.sleep(0.010)
-    if not future.query():
-        raise TimeoutError(f"Future timed out after {timeout}s")
-    return future.result(timeout=1)
+    return future.result(timeout=timeout)
 
 
 # ---------------------------------------------------------------------------

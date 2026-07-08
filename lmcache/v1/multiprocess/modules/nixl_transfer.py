@@ -133,11 +133,6 @@ class NixlTransferModule:
         import os
         _backends = backends if backends is not None else ["UCX"]
 
-        # Set UCX_TLS before first NIXL/UCX initialization.
-        # Avoid shmem transport (segment-state issues across requests);
-        # use TCP loopback instead.
-        os.environ.setdefault("UCX_TLS", "tcp,self")
-
         nixl_agent_cls, nixl_agent_config_cls = _load_nixl()
 
         # Use STRICT sync mode so concurrent AFFINITY-pool threads don't race
