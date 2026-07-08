@@ -127,12 +127,40 @@ def _ensure_registered(tensor: torch.Tensor) -> object:
     nbytes = tensor.numel() * tensor.element_size()
     agent = get_nixl_agent()
 
+    stale_reg_desc = None
+
     with _REG_LOCK:
+        entry = _REG_PTRS.get(data_ptr)
+        if entry is not None:
+            ref, old_reg_desc = entry
+            if ref() is tensor:
+                return old_reg_desc
+            # Stale entry: save the old reg_desc so we can deregister it
+            # synchronously BEFORE registering the new tensor at the same
+            # address.  Without this, calling register_memory twice on the
+            # same address creates a double-registration that can be
+            # invalidated when the GC finalizer deregisters the old one,
+            # corrupting the new registration mid-transfer.
+            _REG_PTRS.pop(data_ptr, None)
+            stale_reg_desc = old_reg_desc
+
+    # Deregister the stale MR outside the lock so UCX can complete the
+    # operation without holding _REG_LOCK.
+    if stale_reg_desc is not None:
+        try:
+            agent.deregister_memory(stale_reg_desc)
+        except Exception:
+            pass
+
+    with _REG_LOCK:
+        # Re-check after dropping the lock: another thread might have
+        # registered the same address.
         entry = _REG_PTRS.get(data_ptr)
         if entry is not None:
             ref, reg_desc = entry
             if ref() is tensor:
                 return reg_desc
+            # Still stale — this shouldn't happen in single-threaded usage.
             _REG_PTRS.pop(data_ptr, None)
 
         device_id = max(tensor.get_device(), 0)
