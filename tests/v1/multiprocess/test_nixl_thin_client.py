@@ -74,7 +74,7 @@ def _server_process_runner(host: str, port: int, chunk_size: int) -> None:
     import os as _os
     # Use CMA (Cross-Memory Attach) which is reliable for inter-process
     # transfers on Linux without shared shmem segment issues.
-    _os.environ.setdefault("UCX_TLS", "tcp,self")
+    _os.environ.setdefault("UCX_TLS", "rc,self")
     mp_config = MPServerConfig(
         host=host,
         port=port,
