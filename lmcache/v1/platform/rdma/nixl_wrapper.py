@@ -86,9 +86,16 @@ def get_nixl_agent():
                         break
                 except ImportError:
                     pass
-            worker_cfg: dict = {"backends": ["UCX"]}
+            # Disable the internal progress thread.  We drive UCX progress
+            # explicitly via get_new_notifs() in _await_future() in the test.
+            # This avoids mutex contention between the progress thread and
+            # the test thread's get_new_notifs() calls.
+            worker_cfg: dict = {
+                "backends": ["UCX"],
+                "enable_prog_thread": False,
+            }
             if nixl_thread_sync_t is not None:
-                worker_cfg["sync_mode"] = nixl_thread_sync_t.NIXL_THREAD_SYNC_STRICT
+                worker_cfg["sync_mode"] = nixl_thread_sync_t.NIXL_THREAD_SYNC_NONE
             _AGENT = nixl_agent_cls(
                 f"lmcache_worker_{os.getpid()}",
                 nixl_agent_config_cls(**worker_cfg),
