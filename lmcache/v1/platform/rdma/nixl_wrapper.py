@@ -68,6 +68,8 @@ def get_nixl_agent():
         if _AGENT is None:
             nixl_agent_cls, nixl_agent_config_cls = _load_nixl()
             import os
+            # Match server: disable shmem to avoid cross-process stall issues.
+            os.environ.setdefault("UCX_TLS", "tcp,self")
             _AGENT = nixl_agent_cls(
                 f"lmcache_worker_{os.getpid()}",
                 nixl_agent_config_cls(backends=["UCX"]),

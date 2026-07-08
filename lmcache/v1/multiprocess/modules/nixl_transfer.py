@@ -151,6 +151,13 @@ class NixlTransferModule:
         if nixl_thread_sync_t is not None:
             agent_kwargs["sync_mode"] = nixl_thread_sync_t.NIXL_THREAD_SYNC_STRICT
 
+        # Disable UCX shared-memory transport: shmem transfers between the
+        # server subprocess (spawned) and the parent test process can stall
+        # on the second request when UCX shmem segment tracking gets
+        # inconsistent after the first transfer's deregister/re-register cycle.
+        # TCP loopback is reliable for all inter-process transfers.
+        os.environ.setdefault("UCX_TLS", "tcp,self")
+
         self._agent = nixl_agent_cls(
             f"lmcache_server_{os.getpid()}_{id(self)}",
             nixl_agent_config_cls(**agent_kwargs),
