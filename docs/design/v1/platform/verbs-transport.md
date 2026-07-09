@@ -31,7 +31,7 @@ A single `VerbsRdmaTransport` class that:
 - Dynamic reconnection (LMCache-6c9)
 - Event-driven CQ (LMCache-kyc)
 - GID resolution / rdma_cm (LMCache-ztb)
-- Pre-registered buffer pool (LMCache-br4)
+- ~~Pre-registered buffer pool (LMCache-br4)~~ — **Implemented** (see Buffer Pool section)
 
 
 ## Environment Variables
@@ -51,6 +51,7 @@ A single `VerbsRdmaTransport` class that:
 | `LMCACHE_RDMA_ENDPOINT_FILE` | path | no | `/tmp/lmcache_rdma_{role}_{nonce}.json` | Write local endpoint |
 | `LMCACHE_RDMA_PEER_ENDPOINT_FILE` | path | no | `/tmp/lmcache_rdma_{peer_role}_{nonce}.json` | Poll for peer endpoint |
 | `LMCACHE_RDMA_NONCE` | string | rendezvous mode | — | Session nonce (shared by both sides) |
+| `LMCACHE_RDMA_POOL_SIZE` | integer (bytes) | no | `268435456` (256 MB) | Pre-registered MR arena size |
 
 **Connection modes:**
 - **Preconfigured:** All three `REMOTE_*` vars set → connect immediately,
@@ -300,8 +301,8 @@ RTR ───── ibv_modify_qp(RTS) ───► RTS
 | `post_read` | ibv_post_send(RDMA_READ) | raises RuntimeError |
 | `post_write` | ibv_post_send(RDMA_WRITE) | raises RuntimeError |
 | `poll_completion` | busy-poll ibv_poll_cq | raises RuntimeError |
-| `allocate_buffer` | mmap + register_mr | mmap + register_mr |
-| `free_buffer` | deregister + munmap | deregister + munmap |
+| `allocate_buffer` | pool page (≤256 KB) or mmap+register_mr | pool page or mmap+register_mr |
+| `free_buffer` | pool page → freelist; otherwise deregister+munmap | same |
 
 
 ### Access Flags by Role
@@ -363,6 +364,46 @@ def free_buffer(self, buf: RegisteredBuffer) -> None:
     if buf.backing is not None:
         buf.backing.close()
 ```
+
+
+### Buffer Pool (LMCache-br4)
+
+**Motivation:** Each `allocate_buffer()` was doing `mmap` + `ibv_reg_mr` (two kernel
+calls). For STORE paths with many small chunks this adds measurable latency.
+
+**Design:** At construction, `VerbsRdmaTransport` allocates one large mmap arena and
+registers it as a single MR (`_MrBufferPool`). `allocate_buffer()` carves 256 KB pages
+from a thread-safe freelist. `free_buffer()` returns pages to the freelist with no
+kernel interaction. Requests larger than 256 KB bypass the pool (per-call mmap+register).
+
+```
+init:
+  arena = mmap(-1, POOL_SIZE)           # one mmap (default 256 MB)
+  mr    = ibv_reg_mr(pd, arena, ...)    # one registration
+  freelist = [page_0, page_1, ...]      # 1024 × 256 KB pages
+
+allocate_buffer(n ≤ 256 KB):
+  page_addr = freelist.pop()            # O(1), lock-protected
+  return RegisteredBuffer(addr=page_addr, backing=pool)
+
+free_buffer(buf from pool):
+  freelist.append(buf.addr)             # no syscall
+
+allocate_buffer(n > 256 KB):
+  mmap + ibv_reg_mr (fallback)          # same as before
+
+close():
+  pool.close()   # ibv_dereg_mr + munmap
+  pd.close()     # must happen after MR deregister
+```
+
+**`backing` sentinel:** Pool-sourced buffers have `buf.backing` set to the
+`_MrBufferPool` instance. `free_buffer` checks `isinstance(buf.backing, _MrBufferPool)`
+to route to pool release vs. per-call deregister+munmap.
+
+**Tuning:** `LMCACHE_RDMA_POOL_SIZE` (bytes, default 256 MB). Pool init failures
+(e.g. ENOMEM) are caught and logged — the transport falls back to per-call registration
+transparently.
 
 
 ### Completion Model — Lock-Serialized Post/Poll

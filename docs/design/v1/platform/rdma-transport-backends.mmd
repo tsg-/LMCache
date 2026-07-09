@@ -1,0 +1,55 @@
+---
+title: "LMCache IPU Transfer Path — Transport Backend Options"
+---
+graph BT
+    %% Hardware / kernel
+    NIC["ConnectX-7 NIC · hardware RDMA DMA · RoCEv2 wire"]
+    MLX5["mlx5_ib kernel driver"]
+    NIC --> MLX5
+
+    %% Native (pyverbs) path
+    LIBIBV_N["libibverbs
+ibv_reg_mr · ibv_post_send · ibv_poll_cq"]
+    MLX5 --> LIBIBV_N
+    PYVERBS["pyverbs (rdma-core)"]
+    LIBIBV_N --> PYVERBS
+    VERBS["VerbsRdmaTransport"]
+    PYVERBS --> VERBS
+
+    %% NIXL/UCX path
+    LIBIBV_U["libibverbs"]
+    MLX5 --> LIBIBV_U
+    UCT["UCT rc_mlx5
+(QP mgmt, doorbell batching, multi-rail)"]
+    LIBIBV_U --> UCT
+    LIBUCP["libucp
+ucp_mem_map (MR cache) · ucp_get_nbx (Read)
+ucp_put_nbx (Write) · ucp_worker_progress"]
+    UCT --> LIBUCP
+    UCXPY["ucx-py / pynixl (pip)"]
+    LIBUCP --> UCXPY
+    UCX["UcxRdmaTransport"]
+    UCXPY --> UCX
+
+    %% Common LMCache layers
+    PROTO["RdmaTransport protocol
+register_mr · post_read · post_write · poll_completion"]
+    VERBS --> PROTO
+    UCX --> PROTO
+    IPU["RdmaTransferModule.store() / .retrieve()
+(admission control, chunk commit, MQ response gating)"]
+    PROTO --> IPU
+
+    %% Styling
+    style NIC fill:#e8e8e8,stroke:#333
+    style MLX5 fill:#e8e8e8,stroke:#333
+    style LIBIBV_N fill:#fff,stroke:#333
+    style LIBIBV_U fill:#fff,stroke:#333
+    style UCT fill:#e6f3ff,stroke:#333
+    style LIBUCP fill:#e6f3ff,stroke:#333
+    style UCXPY fill:#e6f3ff,stroke:#333
+    style PYVERBS fill:#fff3e6,stroke:#333
+    style VERBS fill:#fff3e6,stroke:#333
+    style UCX fill:#e6f3ff,stroke:#333
+    style PROTO fill:#fff,stroke:#333
+    style IPU fill:#fff,stroke:#333
