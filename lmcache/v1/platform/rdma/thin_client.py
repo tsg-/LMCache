@@ -8,7 +8,14 @@ Usage::
 
     from lmcache.v1.platform.rdma.thin_client import RdmaThinClient
 
+    # Default: pyverbs RDMA path
     client = RdmaThinClient("tcp://server:5601", model_name="deepseek-v3")
+
+    # NIXL UCX path
+    from lmcache.v1.platform.rdma.nixl_wrapper import NixlWrapper
+    client = RdmaThinClient("tcp://server:5605", model_name="deepseek-v3",
+                            wrapper_cls=NixlWrapper)
+
     client.store("req-0", token_ids=[1, 2, 3, 4], data=my_tensor)
     result = client.retrieve("req-1", token_ids=[1, 2, 3, 4], numel=4, dtype=torch.float32)
     client.close()
@@ -17,7 +24,7 @@ Usage::
 from __future__ import annotations
 
 import os
-from typing import Optional
+from typing import Optional, Type
 
 import torch
 import zmq
@@ -33,9 +40,13 @@ class RdmaThinClient:
     """Standalone initiator that drives RDMA store/retrieve over ZMQ.
 
     Allocates host-DRAM buffers (CPU tensors), registers them via
-    :class:`RdmaWrapper`, and communicates with the LMCache server
-    using the same protocol as the vLLM engine adapter — but without
-    any CUDA or vLLM dependencies.
+    ``wrapper_cls``, and communicates with the LMCache server using
+    the same protocol as the vLLM engine adapter — but without any
+    CUDA or vLLM dependencies.
+
+    The default wrapper is :class:`RdmaWrapper` (pyverbs RDMA path).
+    Pass ``wrapper_cls=NixlWrapper`` to use the NIXL/UCX path against a
+    server started with ``supported_transfer_mode="nixl"``.
 
     Args:
         server_url: ZMQ endpoint of the LMCache server (e.g.
@@ -46,6 +57,10 @@ class RdmaThinClient:
         timeout: Default timeout in seconds for blocking operations.
         zmq_context: Optional shared ZMQ context; a new one is created
             if not provided.
+        wrapper_cls: IPC wrapper class used to register tensors and
+            produce descriptors.  Defaults to :class:`RdmaWrapper`.
+            Pass :class:`~lmcache.v1.platform.rdma.nixl_wrapper.NixlWrapper`
+            for the NIXL transfer path.
     """
 
     def __init__(
@@ -56,12 +71,14 @@ class RdmaThinClient:
         worker_id: int = 0,
         timeout: float = 30.0,
         zmq_context: Optional[zmq.Context] = None,
+        wrapper_cls: Type[DeviceIPCWrapper] = RdmaWrapper,
     ) -> None:
         os.environ.setdefault("LMCACHE_RDMA_TRANSPORT", "stub")
         self._model_name = model_name
         self._world_size = world_size
         self._worker_id = worker_id
         self._timeout = timeout
+        self._wrapper_cls = wrapper_cls
         self._ctx = zmq_context or zmq.Context.instance()
         self._client = MessageQueueClient(
             server_url=server_url, context=self._ctx
@@ -114,7 +131,7 @@ class RdmaThinClient:
             request_id=request_id,
         )
 
-        wrapper = RdmaWrapper.wrap(data)
+        wrapper = self._wrapper_cls.wrap(data)
         descriptor = DeviceIPCWrapper.Serialize(wrapper)
 
         future = self._client.submit_request(
@@ -169,7 +186,7 @@ class RdmaThinClient:
         )
 
         dst = torch.zeros(numel, dtype=dtype)
-        wrapper = RdmaWrapper.wrap(dst)
+        wrapper = self._wrapper_cls.wrap(dst)
         descriptor = DeviceIPCWrapper.Serialize(wrapper)
 
         future = self._client.submit_request(
