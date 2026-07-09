@@ -134,8 +134,8 @@ POC configuration (DeepSeek-V3 proxy):
 
 ## Architecture (POC)
 
-See [ipu.md](ipu.md) for the full architecture (layer map, wrapper, transport
-protocol) and [lmcache-ipu-pull-model-flow.mmd](lmcache-ipu-pull-model-flow.mmd)
+See [ipu.md](../rdma/ipu.md) for the full architecture (layer map, wrapper, transport
+protocol) and [lmcache-ipu-pull-model-flow.mmd](../rdma/diagrams/lmcache-ipu-pull-model-flow.mmd)
 for the combined store + retrieve sequence diagram.
 
 Hardware topology: [ipu-poc-test-setup.mmd](ipu-poc-test-setup.mmd)
@@ -167,9 +167,9 @@ Hardware topology: [ipu-poc-test-setup.mmd](ipu-poc-test-setup.mmd)
 
 ## Related Documents
 
-- [IPU RDMA Platform Backend](ipu.md) — full design doc (architecture, wrapper, transport protocol)
-- [VerbsRdmaTransport Spec](verbs-transport.md) — libibverbs implementation spec (QP state machine, lock protocol, buffer quarantine)
-- [Combined Store+Retrieve Flow](lmcache-ipu-pull-model-flow.mmd) — end-to-end sequence diagram
+- [IPU RDMA Platform Backend](../rdma/ipu.md) — full design doc (architecture, wrapper, transport protocol)
+- [VerbsRdmaTransport Spec](../rdma/verbs-transport.md) — libibverbs implementation spec (QP state machine, lock protocol, buffer quarantine)
+- [Combined Store+Retrieve Flow](../rdma/diagrams/lmcache-ipu-pull-model-flow.mmd) — end-to-end sequence diagram
 - [Open Questions / Architecture Decisions](ipu-poc-opens.md) — stakeholder alignment deck (NVMe-oF vs RDMA, phasing)
 - [Hardware Test Topology](ipu-poc-test-setup.mmd) — two-node lab setup diagram
 - [IPU Traffic Benchmark Configs](../../tools/ipu_traffic_benchmarks/README.md) — all 9 scenarios, model configs, monitoring

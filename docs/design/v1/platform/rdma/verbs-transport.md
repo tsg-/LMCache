@@ -1,7 +1,7 @@
 # VerbsRdmaTransport — Design Spec
 
 > Part of: [IPU RDMA Platform Backend](ipu.md) |
-> POC scope: [ipu-poc.md](ipu-poc.md)
+> POC scope: [ipu-poc.md](../ipu-poc/ipu-poc.md)
 
 Implements `RdmaTransport` protocol backed by real libibverbs via `pyverbs`
 (rdma-core Python bindings). Activated by `LMCACHE_RDMA_TRANSPORT=verbs`.
@@ -105,7 +105,7 @@ def post_read(
 - `VerbsRdmaTransport.post_read()`: extracts `.mr.handle` for lkey.
 - `RdmaWrapper.to_tensor()`: passes the `RegisteredBuffer` from
   `allocate_buffer()` directly.
-- Design doc `docs/design/v1/platform/ipu.md` "RdmaTransport Protocol" section:
+- Design doc `docs/design/v1/platform/rdma/ipu.md` "RdmaTransport Protocol" section:
   updated to show new signature.
 
 
