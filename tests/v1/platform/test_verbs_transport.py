@@ -556,31 +556,55 @@ class TestRegisterMr:
 class TestAllocateBuffer:
     def test_page_aligned(self, mock_pyverbs):
         transport = _make_transport(mock_pyverbs, role="target")
+        buf = transport.allocate_buffer(1000)
+        # Pool pages are 256 KB; addr must be 4096-aligned (mmap guarantee)
+        assert buf.addr % 4096 == 0
+        assert buf.length == 256 * 1024
+
+    def test_pool_page_returned_for_small_request(self, mock_pyverbs):
+        transport = _make_transport(mock_pyverbs, role="target")
+        buf = transport.allocate_buffer(4096)
+        from lmcache.v1.platform.rdma.verbs_transport import _MrBufferPool
+        assert isinstance(buf.backing, _MrBufferPool)
+
+    def test_pool_fallback_for_large_request(self, mock_pyverbs):
+        """Requests larger than the pool page size skip the pool."""
+        transport = _make_transport(mock_pyverbs, role="target")
         mr_mock = MagicMock()
-        mr_mock.rkey = 100
+        mr_mock.rkey = 200
         mock_pyverbs.MR.return_value = mr_mock
 
-        buf = transport.allocate_buffer(1000)
+        large = 512 * 1024  # 512 KB > 256 KB page
+        buf = transport.allocate_buffer(large)
+        from lmcache.v1.platform.rdma.verbs_transport import _MrBufferPool
+        assert not isinstance(buf.backing, _MrBufferPool)
+        assert buf.length >= large
         assert buf.addr % 4096 == 0
-        assert buf.length == 4096
+        transport.free_buffer(buf)
 
-    def test_free_buffer_deregisters_and_unmaps(self, mock_pyverbs):
+    def test_free_pool_buffer_returns_to_freelist(self, mock_pyverbs):
+        transport = _make_transport(mock_pyverbs, role="target")
+        pool = transport._pool
+        free_before = len(pool._freelist)
+        buf = transport.allocate_buffer(4096)
+        assert len(pool._freelist) == free_before - 1
+        transport.free_buffer(buf)
+        assert len(pool._freelist) == free_before
+
+    def test_free_buffer_deregisters_and_unmaps_non_pool(self, mock_pyverbs):
         transport = _make_transport(mock_pyverbs, role="target")
         mr_mock = MagicMock()
         mr_mock.rkey = 100
         mock_pyverbs.MR.return_value = mr_mock
 
-        buf = transport.allocate_buffer(4096)
+        large = 512 * 1024  # bypasses pool
+        buf = transport.allocate_buffer(large)
         backing = buf.backing
         transport.free_buffer(buf)
         assert backing.closed
 
     def test_release_tracking(self, mock_pyverbs):
         transport = _make_transport(mock_pyverbs, role="target")
-        mr_mock = MagicMock()
-        mr_mock.rkey = 100
-        mock_pyverbs.MR.return_value = mr_mock
-
         buf = transport.allocate_buffer(4096)
         assert buf in transport._allocated_buffers
         transport.release_buffer_tracking(buf)
@@ -709,3 +733,119 @@ class TestClose:
         assert buf in transport._allocated_buffers
         transport.close()
         assert len(transport._allocated_buffers) == 0
+
+
+class TestReconnect:
+    """VerbsRdmaTransport.reconnect() — QP teardown and re-establishment."""
+
+    _PEER_INFO = {"qpn": 77, "psn": 300, "gid": "fe80" + "0" * 28, "lid": 3,
+                  "nonce": "reconnect_nonce"}
+
+    def _drained_transport(self, mock_pyverbs, tmp_path, monkeypatch, role="target"):
+        """Return a transport in drained state with _poll_peer_file patched."""
+        monkeypatch.setenv("LMCACHE_RDMA_NONCE", "reconnect_nonce")
+        endpoint_file = tmp_path / f"{role}.json"
+        monkeypatch.setenv("LMCACHE_RDMA_ENDPOINT_FILE", str(endpoint_file))
+
+        transport = _make_transport(mock_pyverbs, role=role)
+        transport._endpoint_file = endpoint_file
+        transport._drained = True
+        transport._inflight_future = None
+
+        # Patch _poll_peer_file so reconnect() doesn't actually wait 30s.
+        monkeypatch.setattr(
+            transport, "_poll_peer_file",
+            lambda path, nonce: dict(self._PEER_INFO),
+        )
+        return transport
+
+    def test_reconnect_creates_new_qp(self, mock_pyverbs, tmp_path, monkeypatch):
+        """reconnect() calls QP constructor a second time for the fresh QP."""
+        transport = self._drained_transport(
+            mock_pyverbs, tmp_path, monkeypatch
+        )
+        old_call_count = mock_pyverbs.QP.call_count
+
+        transport.reconnect()
+
+        assert mock_pyverbs.QP.call_count == old_call_count + 1
+
+    def test_reconnect_clears_drained_flag(self, mock_pyverbs, tmp_path, monkeypatch):
+        """After reconnect(), _drained is False and transport is usable."""
+        transport = self._drained_transport(
+            mock_pyverbs, tmp_path, monkeypatch
+        )
+        transport.reconnect()
+
+        assert transport._drained is False
+
+    def test_reconnect_updates_endpoint_file(
+        self, mock_pyverbs, tmp_path, monkeypatch
+    ):
+        """reconnect() re-writes the endpoint file with the new QPN."""
+        transport = self._drained_transport(mock_pyverbs, tmp_path, monkeypatch)
+
+        # Set the QP mock AFTER construction so only reconnect's QP() call
+        # returns qp_num=99; the init call already returned qp_num=42.
+        new_qp_mock = MagicMock()
+        new_qp_mock.qp_num = 99
+        mock_pyverbs.QP.return_value = new_qp_mock
+
+        transport.reconnect()
+
+        endpoint_path = transport._endpoint_file
+        assert endpoint_path is not None and endpoint_path.exists()
+        data = json.loads(endpoint_path.read_text())
+        assert data["qpn"] == 99
+        assert data["nonce"] == "reconnect_nonce"
+
+    def test_reconnect_raises_if_closed(self, mock_pyverbs, tmp_path, monkeypatch):
+        """reconnect() must raise if the transport is already closed."""
+        transport = self._drained_transport(
+            mock_pyverbs, tmp_path, monkeypatch
+        )
+        transport._closed = True
+
+        with pytest.raises(RuntimeError, match="closed"):
+            transport.reconnect()
+
+    def test_reconnect_raises_without_rendezvous_file(
+        self, mock_pyverbs, tmp_path, monkeypatch
+    ):
+        """reconnect() must raise if not in rendezvous mode."""
+        transport = _make_transport(mock_pyverbs, role="target")
+        transport._drained = True
+        transport._endpoint_file = None  # not in rendezvous mode
+
+        with pytest.raises(RuntimeError, match="rendezvous mode"):
+            transport.reconnect()
+
+    def test_reconnect_raises_without_nonce(
+        self, mock_pyverbs, tmp_path, monkeypatch
+    ):
+        """reconnect() raises if LMCACHE_RDMA_NONCE is unset."""
+        monkeypatch.delenv("LMCACHE_RDMA_NONCE", raising=False)
+        transport = self._drained_transport(
+            mock_pyverbs, tmp_path, monkeypatch
+        )
+        # _drained_transport sets the env var; remove it again.
+        monkeypatch.delenv("LMCACHE_RDMA_NONCE", raising=False)
+
+        with pytest.raises(RuntimeError, match="NONCE"):
+            transport.reconnect()
+
+    def test_reconnect_calls_connect_with_peer_info(
+        self, mock_pyverbs, tmp_path, monkeypatch
+    ):
+        """reconnect() calls connect() with the peer file's QPN/PSN."""
+        transport = self._drained_transport(
+            mock_pyverbs, tmp_path, monkeypatch
+        )
+        with MagicMock() as conn_mock:
+            transport.connect = conn_mock
+            transport.reconnect()
+            conn_mock.assert_called_once()
+            args = conn_mock.call_args
+            assert args.kwargs.get("remote_qpn") == 77 or (
+                args.args and args.args[0] == 77
+            )
