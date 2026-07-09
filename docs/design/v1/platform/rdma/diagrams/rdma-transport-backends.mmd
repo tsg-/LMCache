@@ -28,17 +28,22 @@ ucp_put_nbx (Write) · ucp_worker_progress"]
     UCT --> LIBUCP
     UCXPY["ucx-py / pynixl (pip)"]
     LIBUCP --> UCXPY
-    UCX["UcxRdmaTransport"]
-    UCXPY --> UCX
+    NIXL["NixlTransferModule
+(nixl_transfer.py)"]
+    UCXPY --> NIXL
 
-    %% Common LMCache layers
+    %% pyverbs path — RdmaTransport Protocol
     PROTO["RdmaTransport protocol
 register_mr · post_read · post_write · poll_completion"]
     VERBS --> PROTO
-    UCX --> PROTO
-    IPU["RdmaTransferModule.store() / .retrieve()
+    RDMA_MOD["RdmaTransferModule.store() / .retrieve()
 (admission control, chunk commit, MQ response gating)"]
-    PROTO --> IPU
+    PROTO --> RDMA_MOD
+
+    %% NIXL path — direct server interface, no RdmaTransport protocol
+    NIXL_MOD["NixlTransferModule.store() / .retrieve()
+(add_remote_agent · initialize_xfer · poll → DONE)"]
+    NIXL --> NIXL_MOD
 
     %% Styling
     style NIC fill:#e8e8e8,stroke:#333
@@ -50,6 +55,7 @@ register_mr · post_read · post_write · poll_completion"]
     style UCXPY fill:#e6f3ff,stroke:#333
     style PYVERBS fill:#fff3e6,stroke:#333
     style VERBS fill:#fff3e6,stroke:#333
-    style UCX fill:#e6f3ff,stroke:#333
+    style NIXL fill:#e6f3ff,stroke:#333
     style PROTO fill:#fff,stroke:#333
-    style IPU fill:#fff,stroke:#333
+    style RDMA_MOD fill:#fff,stroke:#333
+    style NIXL_MOD fill:#e6f3ff,stroke:#333

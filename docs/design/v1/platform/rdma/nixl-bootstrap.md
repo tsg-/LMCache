@@ -4,7 +4,7 @@
 `lmcache/v1/multiprocess/modules/nixl_transfer.py`
 
 **Related:** [verbs-transport.md](verbs-transport.md),
-[ipu/transport-stack-rationale-pyverbs_nixl.md](ipu/transport-stack-rationale-pyverbs_nixl.md)
+[transport-stack-rationale-pyverbs_nixl.md](transport-stack-rationale-pyverbs_nixl.md)
 
 ---
 
