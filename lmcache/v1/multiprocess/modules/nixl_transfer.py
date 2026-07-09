@@ -24,7 +24,10 @@ No CUDA events, no GPU block IDs, and no GPU synchronisation occur here.
 
 from __future__ import annotations
 
+import ctypes
 import importlib
+import mmap
+import threading
 import time
 from typing import TYPE_CHECKING, Optional
 
@@ -45,6 +48,8 @@ logger = init_logger(__name__)
 
 _POLL_INTERVAL_S: float = 0.0001  # 100 µs between check_xfer_state polls
 _XFER_TIMEOUT_S: float = 15.0
+_POOL_PAGE_SIZE: int = 256 * 1024          # 256 KB — matches verbs_transport pool page
+_POOL_DEFAULT_SIZE: int = 256 * 1024 * 1024  # 256 MB arena default
 
 
 def _load_nixl():
@@ -106,6 +111,84 @@ def _poll_until_done(agent, xfer_handle, timeout_s: float) -> bool:
     return False
 
 
+class _NixlBufferPool:
+    """Pre-registered DRAM arena for zero-registration NIXL local buffers.
+
+    Allocates one large mmap arena, registers it once with the NIXL agent,
+    then services ``acquire()`` by carving 256 KB aligned pages from a
+    freelist.  ``release()`` returns pages to the freelist without any NIXL
+    call.  Requests larger than the page size bypass the pool entirely.
+
+    Thread-safe: a single lock guards the freelist.
+
+    Args:
+        agent: The nixl_agent to register the arena against.
+        arena_size: Total arena size in bytes (multiple of page_size).
+        page_size: Granularity of pool pages in bytes.
+    """
+
+    def __init__(
+        self,
+        agent: object,
+        arena_size: int = _POOL_DEFAULT_SIZE,
+        page_size: int = _POOL_PAGE_SIZE,
+    ) -> None:
+        if arena_size % page_size != 0:
+            raise ValueError(
+                f"_NixlBufferPool: arena_size={arena_size} must be a "
+                f"multiple of page_size={page_size}"
+            )
+        self._page_size = page_size
+        self._lock = threading.Lock()
+        self._agent = agent
+
+        self._backing = mmap.mmap(-1, arena_size)
+        self._base_addr: int = ctypes.addressof(
+            ctypes.c_char.from_buffer(self._backing)
+        )
+
+        # Register the whole arena once with NIXL.
+        self._reg_dlist = agent.register_memory(
+            [(self._base_addr, arena_size, 0, "")], "DRAM"
+        )
+
+        num_pages = arena_size // page_size
+        self._freelist: list[int] = [
+            self._base_addr + i * page_size for i in range(num_pages)
+        ]
+        logger.info(
+            "NixlBufferPool: arena=%d MB, page=%d KB, pages=%d",
+            arena_size // (1024 * 1024),
+            page_size // 1024,
+            num_pages,
+        )
+
+    def acquire(self, length: int) -> Optional[int]:
+        """Return a free page address if ``length <= page_size``; else None."""
+        if length > self._page_size:
+            return None
+        with self._lock:
+            if not self._freelist:
+                return None
+            return self._freelist.pop()
+
+    def release(self, addr: int) -> None:
+        """Return a page address to the freelist."""
+        with self._lock:
+            self._freelist.append(addr)
+
+    def close(self) -> None:
+        """Deregister the arena and unmap backing memory."""
+        try:
+            self._agent.deregister_memory(self._reg_dlist)
+        except Exception as exc:
+            logger.warning("NixlBufferPool: deregister_memory failed: %s", exc)
+        try:
+            self._backing.close()
+        except Exception as exc:
+            logger.warning("NixlBufferPool: mmap close failed: %s", exc)
+
+
 class NixlTransferModule:
     """Handles STORE and RETRIEVE KV cache transfers over NIXL.
 
@@ -155,8 +238,19 @@ class NixlTransferModule:
             f"lmcache_server_{os.getpid()}_{id(self)}",
             nixl_agent_config_cls(**agent_kwargs),
         )
+
+        pool_mb = int(os.environ.get("LMCACHE_NIXL_POOL_SIZE_MB", "256"))
+        if pool_mb > 0:
+            self._pool: Optional[_NixlBufferPool] = _NixlBufferPool(
+                self._agent, arena_size=pool_mb * 1024 * 1024
+            )
+        else:
+            self._pool = None
+
         logger.info(
-            "NixlTransferModule initialised (backends=%s)", _backends
+            "NixlTransferModule initialised (backends=%s, pool=%s MB)",
+            _backends,
+            pool_mb if pool_mb > 0 else "disabled",
         )
 
     @property
@@ -195,8 +289,10 @@ class NixlTransferModule:
         }
 
     def close(self) -> None:
-        """Release module resources (no-op; agent lifecycle managed here)."""
-        pass
+        """Release module resources including the pre-registered buffer pool."""
+        if self._pool is not None:
+            self._pool.close()
+            self._pool = None
 
     # ------------------------------------------------------------------
     # Helpers
@@ -217,6 +313,11 @@ class NixlTransferModule:
         key: IPCCacheServerKey,
     ) -> bool:
         """Register local memory, build both dlists, post and poll a transfer.
+
+        If a pre-registered pool is available and ``mem_type == "DRAM"`` and
+        ``chunk_length <= pool page``, acquires a pool page instead of calling
+        ``register_memory`` (zero NIXL calls on the hot path).  A
+        ``ctypes.memmove`` bridges the pool page and ``local_ptr`` when needed.
 
         Uses ``initialize_xfer`` (combined one-shot API) rather than
         ``prep_xfer_dlist`` + ``make_prepped_xfer`` to avoid stale UCX
@@ -239,17 +340,33 @@ class NixlTransferModule:
             True on success, False on timeout, error, or exception.
         """
         local_reg = None
+        pool_addr: Optional[int] = None
         xfer_handle = None
         try:
-            # Register local memory per-chunk.
-            local_reg = self._agent.register_memory(
-                self._agent.get_reg_descs(
-                    [(local_ptr, chunk_length, 0, "")], mem_type
+            # Try pool first (O(1), no NIXL call) for DRAM local buffers.
+            # Pool pages are pre-registered; only fall back to per-call
+            # register_memory for VRAM or chunks larger than the pool page.
+            if mem_type == "DRAM" and self._pool is not None:
+                pool_addr = self._pool.acquire(chunk_length)
+
+            if pool_addr is not None:
+                # Pool hit: arena already registered — no kernel call needed.
+                # For WRITE (RETRIEVE): copy storage data into pool page first.
+                if operation == "WRITE":
+                    ctypes.memmove(pool_addr, local_ptr, chunk_length)
+                local_dlist = self._agent.get_xfer_descs(
+                    [(pool_addr, chunk_length, 0)], "DRAM"
                 )
-            )
-            local_dlist = self._agent.get_xfer_descs(
-                [(local_ptr, chunk_length, 0)], mem_type
-            )
+            else:
+                # Pool miss or VRAM: register local memory per-chunk.
+                local_reg = self._agent.register_memory(
+                    self._agent.get_reg_descs(
+                        [(local_ptr, chunk_length, 0, "")], mem_type
+                    )
+                )
+                local_dlist = self._agent.get_xfer_descs(
+                    [(local_ptr, chunk_length, 0)], mem_type
+                )
             remote_dlist = self._agent.get_xfer_descs(
                 [(remote_ptr, chunk_length, device_id)], mem_type
             )
@@ -274,15 +391,20 @@ class NixlTransferModule:
                 )
                 return False
             if status == "DONE":
-                return True
-            ok = _poll_until_done(self._agent, xfer_handle, _XFER_TIMEOUT_S)
+                ok = True
+            else:
+                ok = _poll_until_done(self._agent, xfer_handle, _XFER_TIMEOUT_S)
             if not ok:
                 logger.warning(
                     "_run_xfer: NIXL %s timed out for chunk %d/%d "
                     "(instance_id=%d key=%s)",
                     operation, chunk_idx, num_chunks, instance_id, key,
                 )
-            return ok
+                return False
+            # For READ (STORE): data landed in pool page; copy to storage buffer.
+            if pool_addr is not None and operation == "READ":
+                ctypes.memmove(local_ptr, pool_addr, chunk_length)
+            return True
         except Exception:
             logger.exception(
                 "_run_xfer: error for chunk %d/%d (instance_id=%d key=%s)",
@@ -295,7 +417,9 @@ class NixlTransferModule:
                     self._agent.release_xfer_handle(xfer_handle)
                 except Exception:
                     pass
-            if local_reg is not None:
+            if pool_addr is not None and self._pool is not None:
+                self._pool.release(pool_addr)
+            elif local_reg is not None:
                 try:
                     self._agent.deregister_memory(local_reg)
                 except Exception:
