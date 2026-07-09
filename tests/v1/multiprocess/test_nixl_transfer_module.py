@@ -129,7 +129,9 @@ def mock_ctx() -> MagicMock:
 
 
 @pytest.fixture()
-def module(mock_ctx: MagicMock) -> "NixlTransferModule":
+def module(mock_ctx: MagicMock, monkeypatch) -> "NixlTransferModule":
+    # Disable pool so tests using fake data_ptr values don't segfault on memmove.
+    monkeypatch.setenv("LMCACHE_NIXL_POOL_SIZE_MB", "0")
     from lmcache.v1.multiprocess.modules.nixl_transfer import NixlTransferModule
 
     return NixlTransferModule(mock_ctx)
@@ -562,6 +564,164 @@ class TestMPTransferModeNIXL:
         t = torch.zeros(4, dtype=torch.float32)
         ctx = create_transfer_context({"layer0": t}, mode="nixl")
         assert isinstance(ctx, NixlTransferContext)
+
+
+# ---------------------------------------------------------------------------
+# TestNixlBufferPool
+# ---------------------------------------------------------------------------
+
+
+class TestNixlBufferPool:
+    """_NixlBufferPool freelist and arena registration."""
+
+    def _make_pool(self, pool_cls, agent_mock, arena_mb: int = 1, page_kb: int = 256):
+        arena_size = arena_mb * 1024 * 1024
+        page_size = page_kb * 1024
+        return pool_cls(agent_mock, arena_size=arena_size, page_size=page_size)
+
+    def test_register_memory_called_once_at_init(self, _patch_nixl) -> None:
+        from lmcache.v1.multiprocess.modules.nixl_transfer import _NixlBufferPool
+
+        agent = _make_nixl_agent_mock()
+        pool = self._make_pool(_NixlBufferPool, agent)
+        agent.register_memory.assert_called_once()
+        pool.close()
+
+    def test_acquire_returns_address_for_small_chunk(self, _patch_nixl) -> None:
+        from lmcache.v1.multiprocess.modules.nixl_transfer import _NixlBufferPool
+
+        agent = _make_nixl_agent_mock()
+        pool = self._make_pool(_NixlBufferPool, agent)
+        addr = pool.acquire(1024)
+        assert addr is not None
+        assert isinstance(addr, int)
+        pool.close()
+
+    def test_acquire_returns_none_for_oversized_chunk(self, _patch_nixl) -> None:
+        from lmcache.v1.multiprocess.modules.nixl_transfer import (
+            _NixlBufferPool,
+            _POOL_PAGE_SIZE,
+        )
+
+        agent = _make_nixl_agent_mock()
+        pool = self._make_pool(_NixlBufferPool, agent)
+        addr = pool.acquire(_POOL_PAGE_SIZE + 1)
+        assert addr is None
+        pool.close()
+
+    def test_release_returns_page_to_freelist(self, _patch_nixl) -> None:
+        from lmcache.v1.multiprocess.modules.nixl_transfer import _NixlBufferPool
+
+        agent = _make_nixl_agent_mock()
+        pool = self._make_pool(_NixlBufferPool, agent, arena_mb=1, page_kb=256)
+
+        num_pages = (1 * 1024 * 1024) // (256 * 1024)  # 4 pages in 1 MB
+        addrs = [pool.acquire(1024) for _ in range(num_pages)]
+        assert all(a is not None for a in addrs)
+
+        # Pool exhausted
+        assert pool.acquire(1024) is None
+
+        # Release one and re-acquire
+        pool.release(addrs[0])
+        recovered = pool.acquire(1024)
+        assert recovered == addrs[0]
+        pool.close()
+
+    def test_close_calls_deregister_memory(self, _patch_nixl) -> None:
+        from lmcache.v1.multiprocess.modules.nixl_transfer import _NixlBufferPool
+
+        agent = _make_nixl_agent_mock()
+        pool = self._make_pool(_NixlBufferPool, agent)
+        pool.close()
+        agent.deregister_memory.assert_called_once()
+
+    def test_arena_size_not_multiple_of_page_raises(self, _patch_nixl) -> None:
+        from lmcache.v1.multiprocess.modules.nixl_transfer import _NixlBufferPool
+
+        agent = _make_nixl_agent_mock()
+        with pytest.raises(ValueError, match="multiple of page_size"):
+            _NixlBufferPool(agent, arena_size=300, page_size=256)
+
+
+# ---------------------------------------------------------------------------
+# TestNixlTransferModulePool
+# ---------------------------------------------------------------------------
+
+
+class TestNixlTransferModulePool:
+    """_run_xfer pool hit vs fallback paths."""
+
+    @pytest.fixture()
+    def module_with_pool(self, mock_ctx: MagicMock, monkeypatch) -> "NixlTransferModule":
+        monkeypatch.setenv("LMCACHE_NIXL_POOL_SIZE_MB", "1")
+        from lmcache.v1.multiprocess.modules.nixl_transfer import NixlTransferModule
+
+        return NixlTransferModule(mock_ctx)
+
+    @pytest.fixture()
+    def module_no_pool(self, mock_ctx: MagicMock, monkeypatch) -> "NixlTransferModule":
+        monkeypatch.setenv("LMCACHE_NIXL_POOL_SIZE_MB", "0")
+        from lmcache.v1.multiprocess.modules.nixl_transfer import NixlTransferModule
+
+        return NixlTransferModule(mock_ctx)
+
+    def _setup_single_chunk(self, mock_ctx, length: int):
+        obj_key = _make_obj_key(0)
+        # Use a real tensor so data_ptr is valid for ctypes.memmove
+        t = torch.zeros(length // 4, dtype=torch.float32)
+        mem_obj = _make_mem_obj(t.data_ptr(), length)
+        mock_ctx.resolve_obj_keys.return_value = [[obj_key]]
+        mock_ctx.storage_manager.reserve_write.return_value = {obj_key: mem_obj}
+        return obj_key, t
+
+    def test_pool_hit_skips_register_memory(
+        self, module_with_pool, mock_ctx: MagicMock
+    ) -> None:
+        """Pool path should not call register_memory beyond the one-time arena init."""
+        length = 1024  # well below 256 KB page
+        _, _ = self._setup_single_chunk(mock_ctx, length)
+        descriptor = _make_nixl_wrapper_bytes(length)
+
+        # Pool init registers the arena once; reset before the transfer call.
+        module_with_pool._agent.register_memory.reset_mock()
+
+        module_with_pool.store(_make_ipc_key(), 1, [], descriptor)
+
+        module_with_pool._agent.register_memory.assert_not_called()
+
+    def test_no_pool_calls_register_memory(
+        self, module_no_pool, mock_ctx: MagicMock
+    ) -> None:
+        """Without pool, register_memory must be called once per chunk."""
+        length = 1024
+        _, _ = self._setup_single_chunk(mock_ctx, length)
+        descriptor = _make_nixl_wrapper_bytes(length)
+
+        module_no_pool.store(_make_ipc_key(), 1, [], descriptor)
+
+        module_no_pool._agent.register_memory.assert_called_once()
+
+    def test_pool_hit_calls_deregister_memory_zero_times(
+        self, module_with_pool, mock_ctx: MagicMock
+    ) -> None:
+        """Pool path must not call deregister_memory (pool page returned to freelist)."""
+        length = 1024
+        _, _ = self._setup_single_chunk(mock_ctx, length)
+        descriptor = _make_nixl_wrapper_bytes(length)
+
+        module_with_pool.store(_make_ipc_key(), 1, [], descriptor)
+
+        module_with_pool._agent.deregister_memory.assert_not_called()
+
+    def test_pool_close_deregisters_arena(
+        self, module_with_pool, mock_ctx: MagicMock
+    ) -> None:
+        """close() must release the pool arena exactly once."""
+        assert module_with_pool._pool is not None
+        module_with_pool.close()
+        module_with_pool._agent.deregister_memory.assert_called_once()
+        assert module_with_pool._pool is None
 
 
 # ---------------------------------------------------------------------------
