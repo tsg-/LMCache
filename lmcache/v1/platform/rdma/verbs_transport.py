@@ -16,6 +16,9 @@ import threading
 import time
 from pathlib import Path
 
+_POOL_DEFAULT_SIZE = 256 * 1024 * 1024  # 256 MB
+_POOL_PAGE_SIZE = 256 * 1024            # 256 KB
+
 from lmcache.logging import init_logger
 from lmcache.v1.platform.rdma.rdma_transport import (
     MrInfo,
@@ -94,6 +97,100 @@ def _gid_to_hex(gid: str | bytes) -> str:
     return gid.replace(":", "")
 
 
+class _MrBufferPool:
+    """Pre-registered DRAM arena for zero-registration RDMA buffers.
+
+    Allocates one large mmap arena, registers it as a single MR, then
+    services ``acquire()`` requests by carving 256 KB aligned pages from a
+    freelist.  ``release()`` returns pages to the freelist without any
+    kernel call.  Large requests (> page_size) bypass the pool entirely.
+
+    Thread-safe: a single lock guards the freelist.
+
+    Args:
+        pd: pyverbs PD to register the arena against.
+        arena_size: Total arena size in bytes (must be a multiple of
+            page_size). Defaults to ``_POOL_DEFAULT_SIZE``.
+        page_size: Granularity of pool pages in bytes. Defaults to
+            ``_POOL_PAGE_SIZE``.
+        access: ibverbs access flags for the arena MR.
+    """
+
+    def __init__(
+        self,
+        pd: object,
+        arena_size: int = _POOL_DEFAULT_SIZE,
+        page_size: int = _POOL_PAGE_SIZE,
+        access: int = 0,
+    ) -> None:
+        if arena_size % page_size != 0:
+            raise ValueError(
+                f"_MrBufferPool: arena_size={arena_size} must be a multiple "
+                f"of page_size={page_size}"
+            )
+        self._page_size = page_size
+        self._lock = threading.Lock()
+
+        self._backing = mmap.mmap(-1, arena_size)
+        self._base_addr = ctypes.addressof(
+            ctypes.c_char.from_buffer(self._backing)
+        )
+
+        self._mr = MR(pd, arena_size, access, address=self._base_addr)
+        self._rkey: int = self._mr.rkey
+        self._lkey: int = self._mr.lkey
+
+        num_pages = arena_size // page_size
+        self._freelist: list[int] = [
+            self._base_addr + i * page_size for i in range(num_pages)
+        ]
+        logger.info(
+            "MrBufferPool: arena=%d MB, page=%d KB, pages=%d",
+            arena_size // (1024 * 1024),
+            page_size // 1024,
+            num_pages,
+        )
+
+    def acquire(self, length: int) -> "RegisteredBuffer | None":
+        """Return a free pool page if ``length`` fits; otherwise ``None``."""
+        if length > self._page_size:
+            return None
+        with self._lock:
+            if not self._freelist:
+                return None
+            page_addr = self._freelist.pop()
+
+        mr_info = MrInfo(
+            rkey=self._rkey,
+            addr=page_addr,
+            length=self._page_size,
+            handle=self._mr,
+            deregister=None,
+        )
+        return RegisteredBuffer(
+            addr=page_addr,
+            length=self._page_size,
+            mr=mr_info,
+            backing=self,
+        )
+
+    def release(self, buf: "RegisteredBuffer") -> None:
+        """Return ``buf`` to the freelist. buf.backing must be this pool."""
+        with self._lock:
+            self._freelist.append(buf.addr)
+
+    def close(self) -> None:
+        """Deregister the arena MR and unmap backing memory."""
+        try:
+            self._mr.close()
+        except Exception as exc:
+            logger.warning("MrBufferPool: MR close failed: %s", exc)
+        try:
+            self._backing.close()
+        except Exception as exc:
+            logger.warning("MrBufferPool: mmap close failed: %s", exc)
+
+
 class VerbsRdmaTransport:
     """RdmaTransport implementation backed by libibverbs via pyverbs.
 
@@ -153,6 +250,22 @@ class VerbsRdmaTransport:
         gid = self._ctx.query_gid(port, gid_index)
         self._local_gid = _gid_to_hex(gid.gid)
         self._local_qpn = self._qp.qp_num
+
+        pool_size = int(os.environ.get("LMCACHE_RDMA_POOL_SIZE", _POOL_DEFAULT_SIZE))
+        pool_access = IBV_ACCESS_LOCAL_WRITE
+        if self._role == "initiator":
+            pool_access |= IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE
+        try:
+            self._pool: _MrBufferPool | None = _MrBufferPool(
+                self._pd, arena_size=pool_size, access=pool_access
+            )
+        except Exception as exc:
+            logger.warning(
+                "VerbsRdmaTransport: buffer pool init failed (%s) — "
+                "falling back to per-call registration",
+                exc,
+            )
+            self._pool = None
 
     @classmethod
     def from_env(cls) -> "VerbsRdmaTransport":
@@ -531,8 +644,106 @@ class VerbsRdmaTransport:
         finally:
             self._qp_lock.release()
 
+    def reconnect(self) -> None:
+        """Tear down the drained QP and establish a fresh RC connection.
+
+        Must be called while ``_qp_lock`` is held (typically immediately after
+        :meth:`drain_on_timeout` returns).  On return the lock is still held
+        and the transport is back in RTS state.
+
+        Only available in rendezvous mode (``_endpoint_file`` is set).
+        Env-var mode (no rendezvous file) cannot reconnect because there is no
+        channel to re-advertise the new QPN to the peer.
+
+        The PD, pool MR, and all caller-managed MRs survive unchanged — MRs
+        are PD-bound, not QP-bound, so no re-registration is needed.
+
+        Raises:
+            RuntimeError: If transport is closed or not in rendezvous mode.
+            TimeoutError: If the peer does not advertise within 30 s.
+        """
+        if self._closed:
+            raise RuntimeError("reconnect: transport is already closed")
+        if self._endpoint_file is None:
+            raise RuntimeError(
+                "reconnect: not in rendezvous mode — cannot re-advertise new QPN"
+            )
+
+        logger.info("VERBS_TRANSPORT: reconnecting QP (role=%s)", self._role)
+
+        # Destroy old QP; CQ can be reused (it is drained).
+        if self._qp is not None:
+            try:
+                self._qp.close()
+            except Exception as exc:
+                logger.warning("reconnect: old QP close failed: %s", exc)
+            self._qp = None
+
+        cap = QPCap(max_send_wr=64, max_recv_wr=1, max_send_sge=1, max_recv_sge=1)
+        init_attr = QPInitAttr(
+            qp_type=IBV_QPT_RC,
+            scq=self._cq,
+            rcq=self._cq,
+            cap=cap,
+            sq_sig_all=True,
+        )
+        self._qp = QP(self._pd, init_attr)
+        self._local_qpn = self._qp.qp_num
+        self._local_psn = random.randint(0, 0xFFFFFF)
+
+        self._modify_to_init()
+        self._inflight_future = None
+        self._drained = False
+
+        nonce = os.environ.get("LMCACHE_RDMA_NONCE")
+        if nonce is None:
+            raise RuntimeError(
+                "reconnect: LMCACHE_RDMA_NONCE not set — cannot re-advertise endpoint"
+            )
+
+        # Overwrite endpoint file with new QPN/PSN; peer must also reconnect.
+        self._write_endpoint_file(nonce)
+
+        peer_role = "initiator" if self._role == "target" else "target"
+        peer_path = Path(os.environ.get(
+            "LMCACHE_RDMA_PEER_ENDPOINT_FILE",
+            f"/tmp/lmcache_rdma_{peer_role}_{nonce}.json",
+        ))
+        # Remove stale peer file so _poll_peer_file waits for updated info.
+        peer_path.unlink(missing_ok=True)
+
+        peer_info = self._poll_peer_file(peer_path, nonce)
+        self.connect(
+            remote_qpn=peer_info["qpn"],
+            remote_psn=peer_info["psn"],
+            remote_gid=peer_info.get("gid", ""),
+            remote_lid=peer_info.get("lid", 0),
+        )
+        logger.info(
+            "VERBS_TRANSPORT: reconnect complete (role=%s new_qpn=%d)",
+            self._role, self._local_qpn,
+        )
+
     def allocate_buffer(self, length: int) -> RegisteredBuffer:
-        """Allocate page-aligned mmap buffer registered for RDMA."""
+        """Allocate a buffer registered for RDMA.
+
+        Requests that fit within the pool page size are served from the
+        pre-registered arena (zero kernel calls).  Larger requests fall back
+        to per-call mmap + ibv_reg_mr.
+
+        Args:
+            length: Minimum number of bytes required.
+
+        Returns:
+            A :class:`RegisteredBuffer` whose MR is valid for RDMA operations.
+        """
+        if self._pool is not None:
+            buf = self._pool.acquire(length)
+            if buf is not None:
+                self._allocated_buffers.add(buf)
+                return buf
+
+        # Fallback: per-call mmap + registration (length > pool page or pool full)
         aligned = (length + 4095) & ~4095
         backing = mmap.mmap(-1, aligned)
         addr = ctypes.addressof(ctypes.c_char.from_buffer(backing))
@@ -546,8 +757,19 @@ class VerbsRdmaTransport:
         self._allocated_buffers.discard(buf)
 
     def free_buffer(self, buf: RegisteredBuffer) -> None:
-        """Deregister MR and unmap backing memory."""
+        """Return ``buf`` to the pool freelist or release it via deregister+unmap.
+
+        Pool pages (``buf.backing`` is the :class:`_MrBufferPool`) are
+        returned to the freelist with no kernel interaction.  Non-pool
+        buffers are deregistered and unmapped as before.
+
+        Args:
+            buf: Buffer previously returned by :meth:`allocate_buffer`.
+        """
         self._allocated_buffers.discard(buf)
+        if isinstance(buf.backing, _MrBufferPool):
+            buf.backing.release(buf)
+            return
         if not self._closed:
             self.deregister_mr(buf.mr)
         if buf.backing is not None:
@@ -569,6 +791,10 @@ class VerbsRdmaTransport:
             if self._cq:
                 self._cq.close()
                 self._cq = None
+            # Pool MR must be deregistered before PD is closed.
+            if self._pool is not None:
+                self._pool.close()
+                self._pool = None
             if self._pd:
                 self._pd.close()
                 self._pd = None
