@@ -69,6 +69,7 @@ from lmcache.v1.multiprocess.protocols.base import RequestType
 from lmcache.v1.multiprocess.server import run_cache_server
 from lmcache.v1.platform.base_ipc_wrapper import DeviceIPCWrapper
 from lmcache.v1.platform.rdma.nixl_wrapper import NixlWrapper
+from lmcache.v1.platform.rdma.thin_client import RdmaThinClient
 
 SERVER_HOST = "localhost"
 SERVER_PORT = 5605
@@ -243,3 +244,85 @@ class TestNixlThinClientE2E:
         )
         _, ok = future.result(timeout=DEFAULT_TIMEOUT)
         assert ok is False
+
+
+# ---------------------------------------------------------------------------
+# RdmaThinClient(wrapper_cls=NixlWrapper) — validates LMCache-793
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def nixl_thin_client(
+    nixl_server_process: mp.Process, zmq_context: zmq.Context
+) -> Generator[RdmaThinClient, None, None]:
+    """Module-scoped RdmaThinClient wired to the NIXL server."""
+    c = RdmaThinClient(
+        server_url=SERVER_URL,
+        model_name="nixl-thin-client-test",
+        timeout=DEFAULT_TIMEOUT,
+        zmq_context=zmq_context,
+        wrapper_cls=NixlWrapper,
+    )
+    yield c
+    c.close()
+
+
+class TestRdmaThinClientWithNixl:
+    """RdmaThinClient with wrapper_cls=NixlWrapper — end-to-end store/retrieve."""
+
+    def test_store_via_thin_client(
+        self,
+        nixl_thin_client: RdmaThinClient,
+        nixl_server_process: mp.Process,
+    ) -> None:
+        """STORE via RdmaThinClient(wrapper_cls=NixlWrapper) succeeds."""
+        assert nixl_server_process.is_alive(), "Server subprocess died before test"
+        src = torch.arange(CHUNK_SIZE, dtype=torch.float32) + 100.0
+        ok = nixl_thin_client.store(
+            request_id="tc-store-0",
+            token_ids=list(range(200, 200 + CHUNK_SIZE)),
+            data=src,
+        )
+        assert nixl_server_process.is_alive(), "Server died after thin-client STORE"
+        assert ok is True
+
+    def test_store_retrieve_via_thin_client(
+        self,
+        nixl_thin_client: RdmaThinClient,
+        nixl_server_process: mp.Process,
+    ) -> None:
+        """Round-trip via RdmaThinClient(wrapper_cls=NixlWrapper) preserves data."""
+        assert nixl_server_process.is_alive(), "Server subprocess died before test"
+        src = torch.arange(CHUNK_SIZE, dtype=torch.float32) + 200.0
+        token_ids = list(range(300, 300 + CHUNK_SIZE))
+
+        ok = nixl_thin_client.store(
+            request_id="tc-store-retrieve-0",
+            token_ids=token_ids,
+            data=src,
+        )
+        assert ok is True
+
+        result = nixl_thin_client.retrieve(
+            request_id="tc-retrieve-0",
+            token_ids=token_ids,
+            numel=CHUNK_SIZE,
+            dtype=torch.float32,
+        )
+        assert result is not None
+        assert torch.allclose(result, src), f"Mismatch: {result} != {src}"
+
+    def test_retrieve_miss_via_thin_client(
+        self,
+        nixl_thin_client: RdmaThinClient,
+        nixl_server_process: mp.Process,
+    ) -> None:
+        """RETRIEVE miss via RdmaThinClient returns None."""
+        assert nixl_server_process.is_alive(), "Server subprocess died before test"
+        result = nixl_thin_client.retrieve(
+            request_id="tc-miss-0",
+            token_ids=list(range(9900, 9900 + CHUNK_SIZE)),
+            numel=CHUNK_SIZE,
+            dtype=torch.float32,
+        )
+        assert result is None
