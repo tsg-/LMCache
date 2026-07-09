@@ -1,0 +1,46 @@
+---
+title: "LMCache NIXL Bootstrap and Data Flow"
+---
+sequenceDiagram
+    participant I as Initiator (Worker)
+    participant S as Server (NixlTransferModule)
+
+    Note over I,S: Startup — each side creates its own nixl_agent
+
+    I->>I: nixl_agent("lmcache_worker_<pid>", UCX)
+    S->>S: nixl_agent("lmcache_server_<pid>_<id>", UCX,<br/>sync_mode=NIXL_THREAD_SYNC_STRICT)
+
+    Note over I,S: Per-request — initiator prepares descriptor and sends control message
+
+    I->>I: NixlWrapper.wrap(tensor)<br/>  _ensure_registered(tensor)<br/>  get_new_notifs()  ← flush UCX<br/>  agent_metadata = get_agent_metadata()
+
+    I->>S: ZMQ STORE/RETRIEVE<br/>[key, pid, [], pickle(NixlWrapper)]<br/>(agent_name, agent_metadata, base_addr,<br/> length, mem_type, device_id, shape, dtype)
+
+    Note right of S: idempotent — registers UCX endpoint<br/>once per (agent_name, process)
+    S->>S: add_remote_agent(wrapper.agent_name,<br/>                    wrapper.agent_metadata)
+
+    S->>S: register_memory(local_buf)<br/>  → local_dlist
+
+    S->>S: remote_dlist = get_xfer_descs(<br/>  [(base_addr + i*chunk_len, chunk_len, device_id)],<br/>  mem_type)
+
+    alt STORE — initiator sends KV to server
+        Note over I,S: Semantic: initiator STORES → server pulls<br/>NIXL direction: server does READ from initiator's buffer
+        S->>S: initialize_xfer("READ", local_dlist,<br/>                    remote_dlist, agent_name)
+        S->>S: transfer(xfer_handle)
+        S->>I: UCX/RoCEv2 RDMA READ<br/>(DRAM or VRAM per mem_type)
+        I-->>S: data transferred
+    else RETRIEVE — initiator requests KV from server
+        Note over I,S: Semantic: initiator RETRIEVES → server pushes<br/>NIXL direction: server does WRITE into initiator's buffer
+        S->>S: initialize_xfer("WRITE", local_dlist,<br/>                    remote_dlist, agent_name)
+        S->>S: transfer(xfer_handle)
+        S->>I: UCX/RoCEv2 RDMA WRITE<br/>(DRAM or VRAM per mem_type)
+        I-->>S: write complete
+    end
+
+    loop poll until DONE (100 µs interval, 15 s timeout)
+        S->>S: check_xfer_state(xfer_handle)
+    end
+
+    S->>S: release_xfer_handle(xfer_handle)<br/>deregister_memory(local_reg)
+
+    S->>I: ZMQ response: (b"", ok)
