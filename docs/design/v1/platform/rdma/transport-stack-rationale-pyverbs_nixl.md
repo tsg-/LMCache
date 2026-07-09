@@ -15,7 +15,7 @@ G1  TPU/GPU compute node         G2  Xeon DRAM KV-cache offload node
 │  HBM  (KV pages live │         │  Host DRAM  (L1 KV cache pool)   │
 │  here during decode) │         │  NVMe SSDs  (G3 spill)           │
 │                      │         │                                  │
-│  IPU (CX7/RoCEv2)   │◄──────► │  IPU (CX7/RoCEv2)               │
+│  IPU (CX7/RoCEv2)    │◄──────► │  IPU (CX7/RoCEv2)                │
 └──────────────────────┘         └──────────────────────────────────┘
   RDMA source / target              RDMA initiator (pull model)
 ```
