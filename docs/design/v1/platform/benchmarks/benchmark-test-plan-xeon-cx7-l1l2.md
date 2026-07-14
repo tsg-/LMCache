@@ -1,8 +1,73 @@
-# LMCache IPU PoC — Benchmark Test Plan
+# LMCache Storage-Owned Pull/Serve — CX7 Baseline Test Plan
 
 **Branch:** `ipu-poc`
 **Hardware:** bmg0 / bmg1, CX7 RoCEv2, 192.168.200 fabric (200Gbps)
-**Status:** Runbook ready; results TBD.
+**Status:** CX7 storage-owned pull/serve benchmark — first-order deliverable.
+
+## Scope note (2026-07-14)
+
+The target architecture is a Xeon **storage node** with RDMA NIC, L1 DRAM,
+and attached NVMe. GPU/TPU **inference nodes** register source memory but
+own no local NVMe role. The storage node owns admission, allocation,
+eviction, pull scheduling, and cache visibility.
+
+The property this plan proves is not "RDMA works." It is:
+
+> Source nodes announce available KV pages; the storage node decides
+> whether, when, and where to pull them. No payload reaches storage DRAM
+> unless target admission has succeeded.
+
+### Milestone ladder
+
+| M | Focus | Beads |
+|---|-------|-------|
+| M0 | Trustworthy harness — NUMA/provenance gate, generalized verification | LMCache-awi, LMCache-tj2 |
+| M1 | Raw CX7 verbs storage-owned READ + WRITE baselines (transport evidence) | LMCache-dz1, LMCache-y32 |
+| M2 | Integrated admission-gated store path + overload/fairness | LMCache-i5e, LMCache-8ey |
+| M2 gate | Admission invariants + fault matrix (blocks IPU + Falcon) | LMCache-e95 |
+| M3 | NVMe lifecycle — L1↔L2 eviction, staging, recovery, prefix continuity | LMCache-ymb |
+| M4 | IPU host-RDMA baseline (Falcon bypassed) — same-hardware A/B for Falcon | LMCache-bjy, LMCache-n7o |
+| M5-A | Falcon CQ-offload batch=1 acceptance + batching sweep | LMCache-6v7, LMCache-ao7 |
+| M5-B | Falcon-assisted admission/scheduling offload | LMCache-d2z |
+
+### Topology naming (avoid ambiguous headline numbers)
+
+- **CX7 baseline**: both endpoints on Mellanox CX7 (M1, M2, M3).
+- **Asymmetric**: source on CX7 or a GPU NIC, storage on IPU host-RDMA. Any
+  cross-fabric run must be labeled asymmetric — do NOT call it "IPU
+  latency."
+- **IPU-to-IPU**: reserved for the case where BOTH endpoints use an IPU
+  NIC. That is the only labeling permitted for headline IPU numbers (M4).
+- **Falcon-offload**: only when the completion / doorbell (M5-A) or the
+  admission scheduler (M5-B) actually runs on Falcon cores. Same-hardware
+  IPU host-RDMA (M4) is not a Falcon result.
+
+### Deliverable scoping
+
+Results collected on CX7 (M1):
+
+- ARE a legitimate CX7 storage-owned transport baseline in their own right,
+  with hardened verification.
+- Are NOT a full storage-cache demonstration — that is M2 (admission-gated
+  pull + overload) and M3 (NVMe lifecycle).
+- ARE NOT to be labeled as IPU-NIC latency or Falcon-offload latency —
+  those are M4 and M5.
+
+### BLAKE3 policy
+
+- **M1 (raw baselines)**: optional in headline timing runs. Require ONE
+  separate validation run per (page-size, QD) cell so timing is anchored
+  to a verified-correct transfer.
+- **M2 and beyond (admission-gated commit)**: mandatory on every committed
+  page — the commit gate depends on it.
+
+### NIXL P2P status
+
+The LMCache P2P integration path via NIXL is currently a **diagnostic
+path**, P2, out of the primary ladder (LMCache-szh: deterministic
+prepared-handle invalidation, working hypothesis `loadRemoteSections`
+rollback). Retained for eventual upstream NIXL filing and integration
+acceptance testing; not a source of headline CX7 / IPU / Falcon numbers.
 
 ---
 
@@ -41,27 +106,54 @@ Python venv: `.venv-ipu/bin/python3` (Python 3.12.3).
 
 ---
 
-## Run Isolation (prerequisite for all NVMe tests)
+## Run Isolation (prerequisite for all NVMe tests — M3)
 
-**Bead:** LMCache-qsw
+**Bead:** LMCache-qsw (isolation harness), LMCache-ymb (M3 lifecycle).
 
 FSConnector persists files after a run. Without isolation, a second run gets NVMe hits
 from prior data — warm retrieve measures local NVMe read latency instead of NIXL transfer
 latency, making numbers incomparable.
 
-**Pattern:** use a per-run subdirectory as the FSConnector `base_path`:
+> **NVMe run isolation is mandatory for M3.** If isolation setup fails, the
+> run fails closed — do NOT fall back to shared paths. The raw M1 verbs
+> baselines (LMCache-dz1 / LMCache-y32) do NOT depend on FSConnector or
+> this NIXL runner and are not gated on the isolation script; the M3
+> lifecycle bead is.
+
+> **`bench_run.sh --cleanup`** is currently broken: the trap fires
+> immediately and removes the subdirs before the benchmark can use them.
+> Fix (or remove `--cleanup` mode and replace with an owner process)
+> before M3 executes. Tracked under LMCache-ymb.
+
+**Pattern:** use `scripts/bench_run.sh` to create per-run subdirs and get their paths:
 
 ```bash
-BASE=/mnt/p2p_ext4
 RUN_LABEL=run_$(date +%Y%m%dT%H%M)
-RUN_DIR=$BASE/lmcache_bench/$RUN_LABEL
-mkdir -p $RUN_DIR
+
+# Single-NVMe run (Tests 1, 2, 4):
+RUN_DIR=$(scripts/bench_run.sh --label $RUN_LABEL --paths /mnt/p2p_ext4)
 # pass $RUN_DIR as FSConnector base_path
+
+# Dual-NVMe run (Test 3):
+readarray -t RUN_DIRS < <(scripts/bench_run.sh --label $RUN_LABEL \
+    --paths /mnt/p2p_ext4,/mnt/nvme5)
+# pass "${RUN_DIRS[0]},${RUN_DIRS[1]}" as FSConnector base_path
 ```
 
-**Cleanup flag (optional):** pass `--cleanup` to delete `$RUN_DIR` after the run.
+**Cleanup flag (optional):** add `--cleanup` to delete the subdirs on EXIT.
 Default is to retain files — useful for intentional warm-NVMe re-runs that measure
 NVMe read latency without any network transfer.
+
+```bash
+# Retain (default):
+RUN_DIR=$(scripts/bench_run.sh --label $RUN_LABEL --paths /mnt/p2p_ext4)
+
+# Auto-cleanup on Ctrl-C / script exit — run in background alongside the benchmark:
+scripts/bench_run.sh --label $RUN_LABEL --paths /mnt/p2p_ext4 --cleanup &
+BENCH_PID=$!
+# ... run benchmark ...
+kill $BENCH_PID   # triggers cleanup
+```
 
 ---
 
