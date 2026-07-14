@@ -91,8 +91,12 @@ _UCX_ENV_COMMON = (
 )
 
 def ucx_env(host: str) -> str:
-    """Return the UCX env string with the correct UCX_NET_DEVICES for *host*."""
-    dev = BMG1_UCX_NET_DEV if host == "bmg1" else BMG0_UCX_NET_DEV
+    """Return the UCX env string with the correct UCX_NET_DEVICES for *host*.
+
+    Matches on bmg1 IP or alias — handles both 'bmg1' and 'dev@192.168.200.4'.
+    """
+    is_bmg1 = host == "bmg1" or BMG1_IP in host
+    dev = BMG1_UCX_NET_DEV if is_bmg1 else BMG0_UCX_NET_DEV
     return f"UCX_NET_DEVICES={dev} " + _UCX_ENV_COMMON
 
 # Sequence range: 100–105 = 5 requests per token count
@@ -129,9 +133,17 @@ class BenchRun:
 
 
 def ssh_cmd(host: str, cmd: str, capture: bool = True) -> subprocess.Popen:
-    """Launch *cmd* on *host* via SSH.  Returns an open Popen object."""
+    """Launch *cmd* on *host* via SSH.  Returns an open Popen object.
+
+    ControlMaster/ControlPath are disabled to force a fresh TCP connection
+    per invocation.  SSH multiplexing reuse caused the sequential-token pull
+    bench to hang on bmg1: after one token-size run's SSH exits, its control
+    socket lingers in teardown and the next run's SSH stalls waiting on it.
+    """
     return subprocess.Popen(
-        ["ssh", "-o", "StrictHostKeyChecking=no", host, cmd],
+        ["ssh", "-o", "StrictHostKeyChecking=no",
+         "-o", "ControlMaster=no", "-o", "ControlPath=none",
+         host, cmd],
         stdout=subprocess.PIPE if capture else None,
         stderr=subprocess.STDOUT if capture else None,
         text=True,
@@ -430,9 +442,20 @@ def run_bench(args: argparse.Namespace) -> BenchRun:
         fs_paths=effective_fs_paths if args.test != "l1" else [],
     )
 
-    # Give servers time to bootstrap NIXL and register with coordinator
-    print("==> Waiting for servers to bootstrap (10s)...")
-    time.sleep(10.0)
+    # Poll ZMQ port on both nodes until ready (up to 60s).
+    print("==> Waiting for servers to bootstrap (up to 60s)...")
+    _bootstrap_timeout = 60.0
+    _start = time.monotonic()
+    for _host in [src_host, dst_host]:
+        while time.monotonic() - _start < _bootstrap_timeout:
+            rc, _ = ssh_run(_host, f"nc -z 127.0.0.1 {ZMQ_PORT}", timeout=3.0)
+            if rc == 0:
+                print(f"    {_host}:{ZMQ_PORT} ready")
+                break
+            time.sleep(1.0)
+        else:
+            print(f"WARNING: {_host}:{ZMQ_PORT} not ready after {_bootstrap_timeout}s")
+    time.sleep(1.0)  # brief settle after last port comes up
 
     # --- 6. Run benchmark for each token count ---
     token_list: list[int] = sorted(args.tokens)
@@ -541,8 +564,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="SSH alias for source/coordinator node (default: bmg0)",
     )
     parser.add_argument(
-        "--dst-host", default="bmg1",
-        help="SSH alias for puller/storage node (default: bmg1)",
+        "--dst-host", default="dev@192.168.200.4",
+        help=(
+            "SSH target for puller/storage node; use direct fabric IP to avoid "
+            "ProxyJump contention with the long-running server SSH session "
+            "(default: dev@192.168.200.4)"
+        ),
     )
     parser.add_argument(
         "--tokens",
