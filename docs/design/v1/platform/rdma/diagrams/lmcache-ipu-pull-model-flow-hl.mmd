@@ -1,17 +1,23 @@
+%%{init: {"theme": "default", "sequence": {"wrap": true, "noteAlign": "left", "noteMargin": 12, "actorMargin": 80, "messageMargin": 45}}}%%
 sequenceDiagram
     participant vLLM as vLLM / Bench
     participant LMC_I as LMCache<br/>(Initiator)
+    participant IPU_I as MMG-400<br/>(Initiator NIC)
+    participant IPU_T as MMG-400<br/>(KV Cache NIC)
     participant LMC_T as LMCache<br/>(KV Cache Node)
     participant SSD as NVMe (L2)
 
-    Note over vLLM,SSD: High-level target flow. See lmcache-ipu-pull-model-flow.mmd for wire-level detail<br/>(control frames, MR lifetime, two-phase eviction, lease and cancel semantics).
+    Note over vLLM,SSD: High-level target flow.<br/>See lmcache-ipu-pull-model-flow.mmd for wire-level detail:<br/>control frames, MR lifetime, two-phase eviction, lease and cancel semantics.
 
     Note over vLLM,SSD: === RETRIEVE ===
 
     vLLM->>LMC_I: retrieve(tokens)
     LMC_I->>LMC_T: request (keys + dst descriptor)
     alt HIT (L1 or L2)
-        LMC_T-->>LMC_I: RDMA Write into dst buffer
+        LMC_T->>IPU_T: post RDMA Write
+        IPU_T-->>IPU_I: RDMA Write over 400GbE
+        IPU_I-->>LMC_I: data landed in dst buffer
+        LMC_T-->>LMC_I: ACK
         LMC_I-->>vLLM: KV ready
     else MISS
         LMC_T-->>LMC_I: miss
@@ -24,7 +30,7 @@ sequenceDiagram
     LMC_I->>LMC_I: prepare source buffer + BLAKE3 digest D
     LMC_I->>LMC_T: write intent (key, digest D)
 
-    Note over LMC_T: Admission decision
+    Note over LMC_I,LMC_T: Admission decision
 
     alt ALREADY_PRESENT (dedup)
         LMC_T-->>LMC_I: ACK — idempotent success
@@ -43,14 +49,17 @@ sequenceDiagram
             LMC_I->>LMC_I: release source buffer
         end
     else ACCEPT (capacity available)
-        Note over LMC_T,LMC_I: Continue to pull path below
+        Note over LMC_I,LMC_T: Continue to pull path below
     end
 
-    Note over LMC_T,SSD: For an ACCEPT (immediate or post-queue), target owns the pull
+    Note over vLLM,SSD: On ACCEPT (immediate or post-queue), target owns the pull
 
-    LMC_T->>LMC_T: allocate L1 slot (evict LRU to L2 if L1 full)
-    LMC_T-->>LMC_I: RDMA Read from initiator's source buffer
-    LMC_T->>LMC_T: recompute BLAKE3 → validate against D
+    LMC_T->>LMC_T: allocate L1 slot<br/>(evict LRU to L2 if L1 full)
+    LMC_T->>IPU_T: post RDMA Read from initiator's source buffer
+    IPU_T-->>IPU_I: RDMA Read Request over 400GbE
+    IPU_I-->>IPU_T: RDMA Read Response (page data)
+    IPU_T-->>LMC_T: page landed at target
+    LMC_T->>LMC_T: recompute BLAKE3 and validate against D
 
     alt VALIDATE OK
         LMC_T->>LMC_T: commit — publish (key → page)
