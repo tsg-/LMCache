@@ -162,3 +162,6 @@ docs/source/locale/**/*.mo
 .beads/proxieddb/
 .claude/CLAUDE.md
 .DS_Store
+
+# checkpoint skill continuation prompt
+.checkpoint.md
