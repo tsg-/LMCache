@@ -50,7 +50,29 @@ sequenceDiagram
         else capacity available (dequeue → ACCEPT)
             LMC_T-->>LMC_I: ACCEPT
             Note over vLLM,SSD: Target owns the pull (post-queue admission)
-            LMC_T->>LMC_T: allocate L1 slot<br/>(if L1 full — flush LRU to L2 first, slot reserved only after<br/>durable eviction succeeds. On flush failure send capacity NACK, no RDMA)
+            alt L1 slot reserved (free slot, or durable eviction of LRU to L2 succeeded)
+                LMC_T->>IPU_T: post RDMA Read from initiator's source buffer
+                IPU_T-->>IPU_I: RDMA Read Request over 400GbE
+                IPU_I-->>IPU_T: RDMA Read Response (page data)
+                IPU_T-->>LMC_T: page landed at target
+                LMC_T->>LMC_T: recompute BLAKE3 and validate against D
+                alt VALIDATE OK
+                    LMC_T->>LMC_T: commit — publish (key → page)
+                    LMC_T-->>LMC_I: store ACK (terminal)
+                    LMC_I->>LMC_I: release source buffer
+                else VALIDATE FAIL
+                    LMC_T->>LMC_T: discard page (not published)
+                    LMC_T-->>LMC_I: NACK (integrity)
+                    LMC_I->>LMC_I: release source buffer
+                end
+            else L1 full and LRU flush to L2 failed — no reservation, no RDMA
+                LMC_T-->>LMC_I: NACK (capacity)
+                LMC_I->>LMC_I: release source buffer
+            end
+        end
+    else ACCEPT (capacity available immediately)
+        Note over vLLM,SSD: Target owns the pull
+        alt L1 slot reserved (free slot, or durable eviction of LRU to L2 succeeded)
             LMC_T->>IPU_T: post RDMA Read from initiator's source buffer
             IPU_T-->>IPU_I: RDMA Read Request over 400GbE
             IPU_I-->>IPU_T: RDMA Read Response (page data)
@@ -65,22 +87,8 @@ sequenceDiagram
                 LMC_T-->>LMC_I: NACK (integrity)
                 LMC_I->>LMC_I: release source buffer
             end
-        end
-    else ACCEPT (capacity available immediately)
-        Note over vLLM,SSD: Target owns the pull
-        LMC_T->>LMC_T: allocate L1 slot<br/>(if L1 full — flush LRU to L2 first, slot reserved only after<br/>durable eviction succeeds. On flush failure send capacity NACK, no RDMA)
-        LMC_T->>IPU_T: post RDMA Read from initiator's source buffer
-        IPU_T-->>IPU_I: RDMA Read Request over 400GbE
-        IPU_I-->>IPU_T: RDMA Read Response (page data)
-        IPU_T-->>LMC_T: page landed at target
-        LMC_T->>LMC_T: recompute BLAKE3 and validate against D
-        alt VALIDATE OK
-            LMC_T->>LMC_T: commit — publish (key → page)
-            LMC_T-->>LMC_I: store ACK (terminal)
-            LMC_I->>LMC_I: release source buffer
-        else VALIDATE FAIL
-            LMC_T->>LMC_T: discard page (not published)
-            LMC_T-->>LMC_I: NACK (integrity)
+        else L1 full and LRU flush to L2 failed — no reservation, no RDMA
+            LMC_T-->>LMC_I: NACK (capacity)
             LMC_I->>LMC_I: release source buffer
         end
     end
