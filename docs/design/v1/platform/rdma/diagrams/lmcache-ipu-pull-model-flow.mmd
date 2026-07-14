@@ -8,6 +8,8 @@ sequenceDiagram
     participant DRAM as Registered DRAM<br/>(L1)
     participant SSD as NVMe Gen5<br/>(L2)
 
+    Note over vLLM,SSD: Target flow (intended design).<br/>Page size P is a runner parameter (sweep: 72 / 128 / 144 / 256 KiB); all sizes below shown for P = 256 KiB.
+
     Note over vLLM,SSD: === RETRIEVE (Cache Lookup) ===
 
     vLLM->>LMC_I: retrieve(tokens)
@@ -45,7 +47,7 @@ sequenceDiagram
         WIRE->>LMC_I: ACK
         LMC_I-->>vLLM: KV ready → DMA to GPU HBM
 
-    else TOTAL MISS (not cached)
+    else TOTAL MISS (not in L1 or L2)
         DRAM-->>LMC_T: not found
         LMC_T->>WIRE: miss response [ZMQ control]
         WIRE->>LMC_I: miss
@@ -57,27 +59,116 @@ sequenceDiagram
     vLLM->>LMC_I: store(tokens, kv_tensor)
     LMC_I->>LMC_I: DMA from GPU HBM → host DRAM, fence
     LMC_I->>LMC_I: RdmaWrapper.wrap() → (rkey, addr, 256KB)
-    LMC_I->>WIRE: write intent (hash, rkey, addr, len) [ZMQ control, 128B]
+    LMC_I->>LMC_I: compute BLAKE3(page) → digest D<br/>hold source MR registered until terminal ACK
+    LMC_I->>WIRE: write intent (hash, rkey, addr, len, digest D, epoch) [ZMQ control, ~160B]
     WIRE->>LMC_T: write intent
 
-    Note over LMC_T: Target controls timing:<br/>1. Admission check (dedup?)<br/>2. DRAM full? → evict LRU to SSD<br/>3. Allocate page at addr Y
+    Note over LMC_T: Admission decision — four terminal or transitional states:<br/>ALREADY_PRESENT (dedup hit, idempotent success) · REJECT (over-quota / fenced epoch) ·<br/>QUEUE (no capacity, park under lease) · ACCEPT (capacity reserved, proceed to pull).
 
-    LMC_T->>SSD: async flush evicted page (io_uring, fire-and-forget)
-    LMC_T->>DRAM: allocate 256KB at addr Y
+    alt ALREADY_PRESENT (dedup — key already committed under matching digest)
+        LMC_T->>WIRE: ACK ALREADY_PRESENT (terminal, idempotent) [ZMQ control]
+        WIRE->>LMC_I: ACK ALREADY_PRESENT
+        LMC_I->>LMC_I: release source MR<br/>store treated as success (identical retries collapse to the same outcome)
+        Note over LMC_T,LMC_I: Terminal — flow ends here.
 
-    Note over LMC_T,IPU_T: Target pulls data at its own pace
+    else REJECT (over-quota / fenced epoch / malformed intent)
+        LMC_T->>WIRE: NACK (reason) [ZMQ control]
+        WIRE->>LMC_I: NACK
+        LMC_I->>LMC_I: release source MR<br/>surface reject to caller (retry policy owned by initiator)
+        Note over LMC_T,LMC_I: Terminal — flow ends here.
 
-    LMC_T->>IPU_T: post RDMA Read (src=initiator:addr, dst=Y, 256KB)
-    IPU_T->>WIRE: RDMA Read Request (64B)
-    WIRE->>IPU_I: RDMA Read Request
-    IPU_I->>LMC_I: DMA gather from registered DRAM
-    LMC_I-->>IPU_I: page data
-    IPU_I->>WIRE: RDMA Read Response (256KB)
-    WIRE->>IPU_T: data arrives
-    IPU_T->>DRAM: DMA scatter to addr Y (256KB)
+    else QUEUE (no capacity yet — intent parked under lease)
+        LMC_T->>WIRE: QUEUED (lease_id, lease_ttl) [ZMQ control]
+        WIRE->>LMC_I: QUEUED — initiator keeps source MR pinned until ACCEPT/EXPIRE/CANCEL
+        Note over LMC_T: Target holds intent in admission queue keyed by lease_id.
 
-    Note over LMC_T: Data landed → index
+        alt LEASE EXPIRED (ttl elapsed, no capacity freed)
+            LMC_T->>WIRE: EXPIRE (lease_id) [ZMQ control]
+            WIRE->>LMC_I: EXPIRE
+            LMC_I->>LMC_I: release source MR<br/>surface backpressure to caller
+            Note over LMC_T,LMC_I: Terminal — flow ends here.
+        else INITIATOR CANCEL
+            LMC_I->>WIRE: CANCEL (lease_id) [ZMQ control]
+            WIRE->>LMC_T: CANCEL
+            LMC_T->>WIRE: CANCEL ACK [ZMQ control]
+            WIRE->>LMC_I: CANCEL ACK
+            LMC_I->>LMC_I: release source MR
+            Note over LMC_T,LMC_I: Terminal — flow ends here.
+        else DEQUEUE → capacity available
+            LMC_T->>LMC_T: revalidate (epoch not fenced, digest D still bound, initiator alive)
+            Note over LMC_T,LMC_I: Continues into the shared ADMITTED-PULL block below (same behavior as immediate ACCEPT).
 
-    LMC_T->>DRAM: update hash table (key → addr Y)
-    LMC_T->>WIRE: store complete [ZMQ control]
-    WIRE->>LMC_I: ACK
+            Note over LMC_T: Eviction — two-phase reservation.<br/>Evicted slot stays UNAVAILABLE until L2 flush completes; on failure the LRU page is restored.
+            LMC_T->>SSD: flush evicted LRU page (io_uring) — slot pending
+            SSD-->>LMC_T: flush completion (success | failure)
+
+            alt FLUSH OK — proceed to pull, validate, commit
+                LMC_T->>DRAM: release evicted slot; allocate 256KB at addr Y (reservation held)
+                Note over LMC_T,IPU_T: Target pulls at its own pace — initiator MR still pinned
+                LMC_T->>IPU_T: post RDMA Read (src=initiator:addr, dst=Y, 256KB)
+                IPU_T->>WIRE: RDMA Read Request (64B)
+                WIRE->>IPU_I: RDMA Read Request
+                IPU_I->>LMC_I: DMA gather from registered DRAM
+                LMC_I-->>IPU_I: page data
+                IPU_I->>WIRE: RDMA Read Response (256KB)
+                WIRE->>IPU_T: data arrives
+                IPU_T->>DRAM: DMA scatter to addr Y (256KB)
+                Note over LMC_T: Data landed — validate BEFORE commit
+                LMC_T->>LMC_T: recompute BLAKE3(addr Y, 256KB) → D'<br/>compare against intent digest D
+                alt VALIDATE OK (D == D')
+                    LMC_T->>DRAM: commit — publish (key → addr Y) in hash table
+                    LMC_T->>WIRE: store complete ACK (terminal) [ZMQ control]
+                    WIRE->>LMC_I: ACK
+                    LMC_I->>LMC_I: release source MR<br/>page committed and visible in L1 at target (L2 persistence is a separate lifecycle event)
+                else VALIDATE FAIL (D != D' / read error)
+                    LMC_T->>DRAM: discard addr Y (do NOT publish)
+                    LMC_T->>WIRE: NACK (integrity) [ZMQ control]
+                    WIRE->>LMC_I: NACK
+                    LMC_I->>LMC_I: release source MR<br/>surface integrity failure (no retry from same MR)
+                end
+            else FLUSH FAIL — abort admission, no RDMA posted
+                LMC_T->>DRAM: restore LRU page (still resident, still indexed)
+                LMC_T->>WIRE: NACK (capacity — flush failure) [ZMQ control]
+                WIRE->>LMC_I: NACK
+                LMC_I->>LMC_I: release source MR
+                Note over LMC_T,LMC_I: Terminal — addr Y was never allocated, no data loss.
+            end
+        end
+
+    else ACCEPT (capacity reserved immediately)
+        Note over LMC_T: Eviction — two-phase reservation.<br/>Evicted slot stays UNAVAILABLE until L2 flush completes; on failure the LRU page is restored.
+        LMC_T->>SSD: flush evicted LRU page (io_uring) — slot pending
+        SSD-->>LMC_T: flush completion (success | failure)
+
+        alt FLUSH OK — proceed to pull, validate, commit
+            LMC_T->>DRAM: release evicted slot; allocate 256KB at addr Y (reservation held)
+            Note over LMC_T,IPU_T: Target pulls at its own pace — initiator MR still pinned
+            LMC_T->>IPU_T: post RDMA Read (src=initiator:addr, dst=Y, 256KB)
+            IPU_T->>WIRE: RDMA Read Request (64B)
+            WIRE->>IPU_I: RDMA Read Request
+            IPU_I->>LMC_I: DMA gather from registered DRAM
+            LMC_I-->>IPU_I: page data
+            IPU_I->>WIRE: RDMA Read Response (256KB)
+            WIRE->>IPU_T: data arrives
+            IPU_T->>DRAM: DMA scatter to addr Y (256KB)
+            Note over LMC_T: Data landed — validate BEFORE commit
+            LMC_T->>LMC_T: recompute BLAKE3(addr Y, 256KB) → D'<br/>compare against intent digest D
+            alt VALIDATE OK (D == D')
+                LMC_T->>DRAM: commit — publish (key → addr Y) in hash table
+                LMC_T->>WIRE: store complete ACK (terminal) [ZMQ control]
+                WIRE->>LMC_I: ACK
+                LMC_I->>LMC_I: release source MR<br/>page committed and visible in L1 at target (L2 persistence is a separate lifecycle event)
+            else VALIDATE FAIL (D != D' / read error)
+                LMC_T->>DRAM: discard addr Y (do NOT publish)
+                LMC_T->>WIRE: NACK (integrity) [ZMQ control]
+                WIRE->>LMC_I: NACK
+                LMC_I->>LMC_I: release source MR<br/>surface integrity failure (no retry from same MR)
+            end
+        else FLUSH FAIL — abort admission, no RDMA posted
+            LMC_T->>DRAM: restore LRU page (still resident, still indexed)
+            LMC_T->>WIRE: NACK (capacity — flush failure) [ZMQ control]
+            WIRE->>LMC_I: NACK
+            LMC_I->>LMC_I: release source MR
+            Note over LMC_T,LMC_I: Terminal — addr Y was never allocated, no data loss.
+        end
+    end
