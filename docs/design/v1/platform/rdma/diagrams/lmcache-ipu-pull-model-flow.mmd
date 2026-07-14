@@ -8,7 +8,7 @@ sequenceDiagram
     participant DRAM as Registered DRAM<br/>(L1)
     participant SSD as NVMe Gen5<br/>(L2)
 
-    Note over vLLM,SSD: Target flow (intended design).<br/>Page size P is a runner parameter (sweep: 72 / 128 / 144 / 256 KiB); all sizes below shown for P = 256 KiB.
+    Note over vLLM,SSD: Target flow (intended design).<br/>Page size P is a runner parameter (sweep 72 / 128 / 144 / 256 KiB) — all sizes below shown for P = 256 KiB.
 
     Note over vLLM,SSD: === RETRIEVE (Cache Lookup) ===
 
@@ -97,17 +97,17 @@ sequenceDiagram
         else DEQUEUE → capacity available (post-queue admission)
             LMC_T->>LMC_T: revalidate (epoch not fenced, digest D still bound, initiator alive)
             LMC_T->>WIRE: ACCEPT (lease_id) [ZMQ control — transition]
-            WIRE->>LMC_I: ACCEPT (lease_id) — initiator keeps source MR pinned; proceed
+            WIRE->>LMC_I: ACCEPT (lease_id) — initiator keeps source MR pinned, proceed
             Note over LMC_T,LMC_I: Continues into the shared ALLOCATE + PULL + VALIDATE + COMMIT block below (identical to immediate ACCEPT).
 
             alt L1 HAS FREE SLOT — no eviction needed
                 LMC_T->>DRAM: allocate 256KB at addr Y (reservation held)
             else L1 FULL — evict LRU under two-phase reservation
-                Note over LMC_T: Evicted slot stays UNAVAILABLE until L2 flush completes; on failure the LRU page is restored.
+                Note over LMC_T: Evicted slot stays UNAVAILABLE until L2 flush completes — on failure the LRU page is restored.
                 LMC_T->>SSD: flush evicted LRU page (io_uring) — slot pending
                 SSD-->>LMC_T: flush completion (success | failure)
                 alt FLUSH OK
-                    LMC_T->>DRAM: release evicted slot; allocate 256KB at addr Y (reservation held)
+                    LMC_T->>DRAM: release evicted slot then allocate 256KB at addr Y (reservation held)
                 else FLUSH FAIL — abort admission, no RDMA posted
                     LMC_T->>DRAM: restore LRU page (still resident, still indexed)
                     LMC_T->>WIRE: NACK (capacity — flush failure) [ZMQ control]
@@ -145,11 +145,11 @@ sequenceDiagram
         alt L1 HAS FREE SLOT — no eviction needed
             LMC_T->>DRAM: allocate 256KB at addr Y (reservation held)
         else L1 FULL — evict LRU under two-phase reservation
-            Note over LMC_T: Evicted slot stays UNAVAILABLE until L2 flush completes; on failure the LRU page is restored.
+            Note over LMC_T: Evicted slot stays UNAVAILABLE until L2 flush completes — on failure the LRU page is restored.
             LMC_T->>SSD: flush evicted LRU page (io_uring) — slot pending
             SSD-->>LMC_T: flush completion (success | failure)
             alt FLUSH OK
-                LMC_T->>DRAM: release evicted slot; allocate 256KB at addr Y (reservation held)
+                LMC_T->>DRAM: release evicted slot then allocate 256KB at addr Y (reservation held)
             else FLUSH FAIL — abort admission, no RDMA posted
                 LMC_T->>DRAM: restore LRU page (still resident, still indexed)
                 LMC_T->>WIRE: NACK (capacity — flush failure) [ZMQ control]
