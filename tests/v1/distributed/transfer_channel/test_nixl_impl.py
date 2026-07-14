@@ -28,7 +28,15 @@ import time
 import pytest
 import torch
 
-nixl = pytest.importorskip("nixl")
+nixl = None
+for _nixl_modname in ("nixl", "nixl_cu12", "nixl_cu13"):
+    try:
+        nixl = pytest.importorskip(_nixl_modname)
+        break
+    except pytest.skip.Exception:
+        continue
+if nixl is None:
+    pytest.skip("nixl is not available", allow_module_level=True)
 
 # First Party
 from lmcache.v1.distributed.internal_api import L1MemoryDesc  # noqa: E402
