@@ -3,6 +3,7 @@
 
 # Standard
 import subprocess
+import time
 from pathlib import Path
 
 # Third Party
@@ -36,6 +37,9 @@ def test_cleanup_owner_preserves_then_removes_run_dirs(
     try:
         assert process.stdout is not None
         run_dirs = [Path(process.stdout.readline().strip()) for _ in base_paths]
+        assert all(run_dir.is_dir() for run_dir in run_dirs)
+        time.sleep(0.1)
+        assert process.poll() is None
         assert all(run_dir.is_dir() for run_dir in run_dirs)
 
         process.terminate()
