@@ -10,6 +10,46 @@ LMCache is a KV cache management engine for LLM serving that reduces Time To Fir
 
 The default branch is `dev`. Base all new branches and pull requests against `dev`.
 
+## Working Principles
+
+These apply to any AI coding agent operating in this repo. They are behavioral, not code-style — for style/testing/lint, see the sections below.
+
+### Execution & Autonomy
+
+- State assumptions inline and proceed when a wrong guess is cheap or easy to reverse.
+- Ask only when a misstep is destructive, time-consuming, or fundamentally alters the architecture.
+- Multiple valid interpretations → present them, don't pick silently.
+- Turn vague goals into verifiable criteria. For multi-step work, state a brief plan with per-step checks. Work isn't done until the project's tests pass.
+
+### Simplicity & Pushback
+
+- Push back **once** if a much simpler approach exists. If overridden, execute without further complaint.
+- No features beyond what was asked. No abstractions for single-use code.
+- Preserve standard assertions and defensive checks — don't strip them under the guise of "simplicity."
+- If it's much longer than it needs to be (e.g., 200 lines where 50 would do), rewrite it.
+
+### Surgical Changes
+
+- Don't "improve" adjacent code, comments, or formatting.
+- Match existing style, even if you'd do it differently.
+- If you notice unrelated dead code, **mention it** — don't delete it.
+- Remove imports/variables/functions that *your* changes made unused.
+- Every changed line should trace directly to the user's request.
+
+### Git Commits
+
+Draft the message by default; run `git commit -s` (DCO sign-off) only when asked.
+
+```
+<type>: <headline ≤72 chars>
+
+<body wrapped at 72 chars — explain the why>
+
+Signed-off-by: Author Name <author@example.com>
+```
+
+Types: `feat`, `fix`, `refactor`, `docs`, `test`, `build`, `chore`. Lowercase after colon, no trailing period. Never include `Co-Authored-By`.
+
 ## Python Environment
 
 We recommend using [uv](https://docs.astral.sh/uv/) to manage Python environments and dependencies:
