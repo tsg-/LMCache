@@ -1,0 +1,6 @@
+hca_id: mlx5_1
+        transport:                      InfiniBand (0)
+        fw_ver:                         20.43.1014
+        state:                          PORT_ACTIVE (4)
+        active_mtu:                     4096 (5)
+        link_layer:                     Ethernet

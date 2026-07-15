@@ -339,6 +339,33 @@ def cleanup_run_dirs(host: str, run_dirs: list[str]) -> None:
         ssh_run(host, f"rm -rf {d}", timeout=10.0)
 
 
+def create_manifest(
+    host: str,
+    label: str,
+    role: str,
+    nic: str,
+    numa_node: int,
+) -> str:
+    """Run the fail-closed provenance preflight on one benchmark host."""
+    output = f"/tmp/lmcache_manifest_{label}_{role}.json"
+    command = (
+        f"cd {REPO} && env {ucx_env(host)} "
+        f"{VENV}/python scripts/bench_manifest.py "
+        f"--run-label {shlex.quote(label)} --role {shlex.quote(role)} "
+        f"--numa-node {numa_node} --nic {shlex.quote(nic)} --gid-index 3 "
+        "--require-env LMCACHE_RDMA_GID_INDEX "
+        "--require-env NIXL_NET_BACKEND "
+        f"--alloc-region l1_pool:4096 --output {shlex.quote(output)}"
+    )
+    rc, manifest = ssh_run(host, command, timeout=30.0)
+    if rc != 0:
+        raise RuntimeError(
+            f"benchmark manifest failed on {host}; benchmark not started: "
+            f"{manifest.strip()}"
+        )
+    return output
+
+
 # ---------------------------------------------------------------------------
 # Single-token bench run
 # ---------------------------------------------------------------------------
@@ -414,6 +441,26 @@ def run_bench(args: argparse.Namespace) -> BenchRun:
     fs_paths = [p.strip() for p in args.fs_paths.split(",") if p.strip()] if args.fs_paths else []
 
     run = BenchRun(test=args.test, l1_size_gb=args.l1_size_gb, fs_paths=fs_paths)
+    run_label = f"run_{int(time.time())}"
+
+    # Preflight both hosts before changing port state or starting any process.
+    print("==> Collecting fail-closed benchmark manifests...")
+    source_manifest = create_manifest(
+        src_host,
+        run_label,
+        "source",
+        BMG0_UCX_NET_DEV.split(":")[0],
+        args.src_numa_node,
+    )
+    storage_manifest = create_manifest(
+        dst_host,
+        run_label,
+        "storage",
+        BMG1_UCX_NET_DEV.split(":")[0],
+        args.dst_numa_node,
+    )
+    print(f"    source manifest: {source_manifest}")
+    print(f"    storage manifest: {storage_manifest}")
 
     # --- 1. Clear ports ---
     print("==> Clearing ports on both nodes...")
@@ -422,7 +469,6 @@ def run_bench(args: argparse.Namespace) -> BenchRun:
     time.sleep(1.0)
 
     # --- 2. Create run-isolation dirs on dst (NVMe tests only) ---
-    run_label = f"run_{int(time.time())}"
     run_dirs: list[str] = []
     effective_fs_paths: list[str] = fs_paths  # may be replaced with isolated subdirs
 
@@ -588,6 +634,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             "(default: dev@192.168.200.4)"
         ),
     )
+    parser.add_argument("--src-numa-node", type=int, required=True)
+    parser.add_argument("--dst-numa-node", type=int, required=True)
     parser.add_argument(
         "--tokens",
         type=int,
