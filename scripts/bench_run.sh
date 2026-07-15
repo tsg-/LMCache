@@ -13,7 +13,8 @@
 #   /mnt/nvme5/lmcache_bench/run_20260709T0300
 #
 # Pass these paths as FSConnector base_path in the lmcache server config.
-# With --cleanup the directories are removed on EXIT (trap).
+# With --cleanup the process remains alive as a cleanup owner. Send it SIGINT
+# or SIGTERM after the benchmark exits to remove the directories.
 
 set -euo pipefail
 
@@ -50,15 +51,27 @@ for base in "${BASE_PATHS[@]}"; do
 done
 
 if [[ $CLEANUP -eq 1 ]]; then
+    CLEANED_UP=0
+
     cleanup() {
+        if [[ $CLEANED_UP -eq 1 ]]; then
+            return
+        fi
+        CLEANED_UP=1
+
         for d in "${RUN_DIRS[@]}"; do
             rm -rf "$d"
             echo "bench_run: cleaned up $d" >&2
         done
     }
+
     trap cleanup EXIT
-    # Block until SIGINT/SIGTERM so the caller can background this script while
-    # the benchmark runs, then Ctrl-C to trigger cleanup.
+    trap 'exit 0' INT TERM
     echo "bench_run: cleanup armed — send SIGINT (Ctrl-C) or SIGTERM to clean up" >&2
-    wait
+
+    # Keep the owner alive without a child that can outlive the shell and retain
+    # a caller's output pipes after the cleanup trap exits.
+    while true; do
+        sleep 1
+    done
 fi

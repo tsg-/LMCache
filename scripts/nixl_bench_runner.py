@@ -41,6 +41,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shlex
 import subprocess
 import sys
 import threading
@@ -299,18 +300,38 @@ def _percentile(sorted_vals: list[float], pct: float) -> float:
 
 
 def create_run_dirs(host: str, label: str, paths: list[str]) -> list[str]:
-    """Create per-run subdirs on *host*; return their absolute paths."""
+    """Create isolated benchmark directories on a remote host.
+
+    Args:
+        host: SSH host on which to create the directories.
+        label: Per-run directory label.
+        paths: Base FSConnector paths to isolate.
+
+    Returns:
+        One isolated directory for each input base path.
+
+    Raises:
+        RuntimeError: If the helper fails or returns an incomplete path list.
+    """
     if not paths:
         return []
     paths_csv = ",".join(paths)
     rc, out = ssh_run(
         host,
-        f"bash {REPO}/scripts/bench_run.sh --label {label} --paths {paths_csv}",
+        (
+            f"bash {REPO}/scripts/bench_run.sh "
+            f"--label {shlex.quote(label)} --paths {shlex.quote(paths_csv)}"
+        ),
         timeout=10.0,
     )
     if rc != 0:
         raise RuntimeError(f"bench_run.sh failed on {host}: {out.strip()}")
-    return [line.strip() for line in out.splitlines() if line.strip()]
+    run_dirs = [line.strip() for line in out.splitlines() if line.strip()]
+    if len(run_dirs) != len(paths):
+        raise RuntimeError(
+            f"bench_run.sh returned {len(run_dirs)} paths for {len(paths)} base paths"
+        )
+    return run_dirs
 
 
 def cleanup_run_dirs(host: str, run_dirs: list[str]) -> None:
@@ -407,13 +428,9 @@ def run_bench(args: argparse.Namespace) -> BenchRun:
 
     if fs_paths:
         print(f"==> Creating run isolation dirs on {dst_host} (label={run_label})...")
-        try:
-            run_dirs = create_run_dirs(dst_host, run_label, fs_paths)
-            effective_fs_paths = run_dirs
-            print(f"    isolated paths: {run_dirs}")
-        except RuntimeError as e:
-            print(f"WARNING: run isolation failed ({e}); using base paths directly", file=sys.stderr)
-            effective_fs_paths = fs_paths
+        run_dirs = create_run_dirs(dst_host, run_label, fs_paths)
+        effective_fs_paths = run_dirs
+        print(f"    isolated paths: {run_dirs}")
 
     # --- 3. Start coordinator (bmg0) ---
     print(f"==> Starting coordinator on {src_host}:{COORDINATOR_PORT}...")
