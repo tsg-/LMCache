@@ -120,11 +120,6 @@ latency, making numbers incomparable.
 > this NIXL runner and are not gated on the isolation script; the M3
 > lifecycle bead is.
 
-> **`bench_run.sh --cleanup`** is currently broken: the trap fires
-> immediately and removes the subdirs before the benchmark can use them.
-> Fix (or remove `--cleanup` mode and replace with an owner process)
-> before M3 executes. Tracked under LMCache-ymb.
-
 **Pattern:** use `scripts/bench_run.sh` to create per-run subdirs and get their paths:
 
 ```bash
@@ -140,19 +135,22 @@ readarray -t RUN_DIRS < <(scripts/bench_run.sh --label $RUN_LABEL \
 # pass "${RUN_DIRS[0]},${RUN_DIRS[1]}" as FSConnector base_path
 ```
 
-**Cleanup flag (optional):** add `--cleanup` to delete the subdirs on EXIT.
-Default is to retain files — useful for intentional warm-NVMe re-runs that measure
-NVMe read latency without any network transfer.
+**Cleanup flag (optional):** `--cleanup` starts a cleanup owner process. It
+prints the directories, keeps them available while the benchmark runs, and deletes
+them exactly once when its driver sends `SIGINT` or `SIGTERM`. Default setup mode
+retains files, which is useful for intentional warm-NVMe re-runs that measure NVMe
+read latency without any network transfer.
 
 ```bash
 # Retain (default):
 RUN_DIR=$(scripts/bench_run.sh --label $RUN_LABEL --paths /mnt/p2p_ext4)
 
-# Auto-cleanup on Ctrl-C / script exit — run in background alongside the benchmark:
+# Start an owner before the benchmark and stop it after the benchmark exits:
 scripts/bench_run.sh --label $RUN_LABEL --paths /mnt/p2p_ext4 --cleanup &
-BENCH_PID=$!
+CLEANUP_PID=$!
 # ... run benchmark ...
-kill $BENCH_PID   # triggers cleanup
+kill -TERM $CLEANUP_PID
+wait $CLEANUP_PID
 ```
 
 ---
