@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Two-node benchmark runner: lmcache server (target/bmg1) + bench client (initiator/bmg0).
+"""Two-node benchmark runner with target server and initiator bench client.
 
 Starts the server and bench client simultaneously over SSH, relays RDMA
 endpoint files for QP rendezvous, and waits for the bench to complete.
@@ -21,11 +21,11 @@ from __future__ import annotations
 
 import argparse
 import secrets
+import shlex
 import subprocess
 import sys
 import threading
 import time
-from pathlib import Path
 
 ENDPOINT_DIR = "/tmp"
 POLL_INTERVAL = 0.5
@@ -36,6 +36,38 @@ SERVER_ZMQ_PORT = 5555
 
 def endpoint_path(role: str, nonce: str) -> str:
     return f"{ENDPOINT_DIR}/lmcache_rdma_{role}_{nonce}.json"
+
+
+def create_manifest(
+    host: str,
+    label: str,
+    role: str,
+    nic: str,
+    numa_node: int,
+    environment: str,
+) -> str:
+    """Run the fail-closed provenance preflight on one benchmark host."""
+    repo = "~/tsg/LMCache"
+    venv = f"{repo}/.venv-ipu/bin"
+    output = f"/tmp/lmcache_manifest_{label}_{role}.json"
+    command = (
+        f"cd {repo} && env {environment} "
+        f"{venv}/python scripts/bench_manifest.py "
+        f"--run-label {shlex.quote(label)} --role {shlex.quote(role)} "
+        f"--numa-node {numa_node} --nic {shlex.quote(nic)} --gid-index 3 "
+        "--require-env LMCACHE_RDMA_GID_INDEX "
+        "--require-env LMCACHE_RDMA_TRANSPORT "
+        f"--alloc-region l1_pool:4096 --output {shlex.quote(output)}"
+    )
+    result = subprocess.run(
+        ["ssh", host, command], capture_output=True, check=False, text=True
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"benchmark manifest failed on {host}; benchmark not started: "
+            f"{result.stdout.strip()} {result.stderr.strip()}"
+        )
+    return output
 
 
 def relay_file(src_host: str, src_path: str, dst_host: str, dst_path: str) -> bool:
@@ -77,6 +109,8 @@ def run_bench(
     timeout: float,
     l1_size_gb: int,
     interval: float,
+    server_numa_node: int,
+    client_numa_node: int,
 ) -> int:
     venv = "~/tsg/LMCache/.venv-ipu/bin"
     repo = "~/tsg/LMCache"
@@ -124,6 +158,27 @@ def run_bench(
         f"--interval {interval} "
         f"2>&1"
     )
+
+    # Collect both manifests before launching any benchmark process.
+    print("==> Collecting fail-closed benchmark manifests...")
+    server_manifest = create_manifest(
+        server_host,
+        nonce,
+        "storage",
+        "rocep153s0f1",
+        server_numa_node,
+        server_env,
+    )
+    client_manifest = create_manifest(
+        client_host,
+        nonce,
+        "source",
+        "mlx5_0",
+        client_numa_node,
+        client_env,
+    )
+    print(f"    storage manifest: {server_manifest}")
+    print(f"    source manifest: {client_manifest}")
 
     print(f"nonce: {nonce}")
     print(f"server ({server_host}): {server_cmd}")
@@ -240,6 +295,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--timeout", type=float, default=120.0)
     parser.add_argument("--l1-size-gb", type=int, default=4)
     parser.add_argument("--interval", type=float, default=0.5)
+    parser.add_argument("--server-numa-node", type=int, required=True)
+    parser.add_argument("--client-numa-node", type=int, required=True)
     return parser.parse_args(argv)
 
 
@@ -256,6 +313,8 @@ def main(argv: list[str]) -> int:
         timeout=args.timeout,
         l1_size_gb=args.l1_size_gb,
         interval=args.interval,
+        server_numa_node=args.server_numa_node,
+        client_numa_node=args.client_numa_node,
     )
 
 
