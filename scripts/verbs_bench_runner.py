@@ -163,6 +163,7 @@ def create_manifest(
     output = f"/tmp/lmcache_verbs_manifest_{label}_{role}.json"
     command = (
         f"cd {REPO} && "
+        f"numactl --cpunodebind={numa_node} --membind={numa_node} "
         f"{VENV}/python scripts/bench_manifest.py "
         f"--run-label {shlex.quote(label)} --role {shlex.quote(role)} "
         f"--numa-node {numa_node} --nic {shlex.quote(nic)} "
@@ -200,6 +201,7 @@ def snapshot_nic(host: str, interface: str) -> CounterSnapshot:
 def _verbs_cmd(
     role: str,
     direction: str,
+    numa_node: int,
     iterations: int,
     bytes_per_iter: int,
     qd: int,
@@ -208,6 +210,7 @@ def _verbs_cmd(
 ) -> str:
     return (
         f"cd {REPO} && "
+        f"numactl --cpunodebind={numa_node} --membind={numa_node} "
         f"{VENV}/python scripts/bench_verbs.py "
         f"--role {shlex.quote(role)} --direction {shlex.quote(direction)} "
         f"--device {RDMA_DEVICE} --port {RDMA_PORT} --gid-index {GID_INDEX} "
@@ -294,6 +297,8 @@ def run_one_size(
     src_host: str,
     dst_host: str,
     dst_bootstrap_ip: str,
+    src_numa_node: int,
+    dst_numa_node: int,
     direction: str,
     iterations: int,
     bytes_per_iter: int,
@@ -309,6 +314,7 @@ def run_one_size(
     storage_cmd = _verbs_cmd(
         role="storage",
         direction=direction,
+        numa_node=dst_numa_node,
         iterations=iterations,
         bytes_per_iter=bytes_per_iter,
         qd=qd,
@@ -318,6 +324,7 @@ def run_one_size(
     source_cmd = _verbs_cmd(
         role="source",
         direction=direction,
+        numa_node=src_numa_node,
         iterations=iterations,
         bytes_per_iter=bytes_per_iter,
         qd=qd,
@@ -589,6 +596,8 @@ def run_bench(args: argparse.Namespace) -> BenchRun:
                 src_host=src_host,
                 dst_host=dst_host,
                 dst_bootstrap_ip=dst_bootstrap_ip,
+                src_numa_node=args.src_numa_node,
+                dst_numa_node=args.dst_numa_node,
                 direction=args.direction,
                 iterations=args.iterations,
                 bytes_per_iter=bytes_per_iter,

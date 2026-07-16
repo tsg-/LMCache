@@ -81,6 +81,22 @@ def test_control_ms_from_records_skips_malformed() -> None:
     assert runner._control_ms_from_records(records) == [3.0]
 
 
+def test_verbs_command_binds_requested_numa_node() -> None:
+    """The benchmark process must use the NUMA node validated by its manifest."""
+    command = runner._verbs_cmd(
+        role="source",
+        direction="read",
+        numa_node=1,
+        iterations=4,
+        bytes_per_iter=4096,
+        qd=1,
+        nonce="test-nonce",
+        bootstrap_flag="--bootstrap-connect 192.168.200.4:9600",
+    )
+
+    assert "numactl --cpunodebind=1 --membind=1" in command
+
+
 # ---------------------------------------------------------------------------
 # build_size_result: RX endpoint selection + persisted provenance
 # ---------------------------------------------------------------------------
