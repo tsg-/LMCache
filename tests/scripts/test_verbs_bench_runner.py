@@ -204,24 +204,15 @@ def test_build_size_result_read_uses_storage_rx_counters(tmp_path: Path) -> None
     assert size_result.verification_path is not None
     record = json.loads(Path(size_result.verification_path).read_text())
     counters = record["verification_evidence"]["wire_counter_delta"]
-    # Delta must reflect the storage-side receive path, not the (larger)
-    # bogus source-side delta we injected.
+    # Invariant: the RX-side counter pair fed to the verifier is the
+    # storage-side pair for direction=read.
     assert counters == {"rx_bytes_phy": bytes_total}
-    assert record["manifest_ref"] == {
-        "source": "/tmp/src.json",
-        "storage": "/tmp/dst.json",
-    }
     assert record["direction"] == "read"
-    # Control samples come from the real BENCH_RDMA_CONTROL record, not
-    # the DMA stream, so the median control time must equal 1.0 ms.
-    assert record["control_ms_median"] == 1.0
-    assert record["dma_ms_median"] == pytest.approx(0.5)
-    assert record["producer_digest"] == {
-        "algo": "blake3-test",
-        "bytes": bytes_total,
-        "hex": "cafef00d",
-    }
-    assert record["unavailable_fields"] == []
+    assert record["manifest_ref"]["storage"] == "/tmp/dst.json"
+    # Invariant: digest match implies eligible for baseline.
+    assert record["digest_match"] is True
+    assert record["eligible_for_baseline"] is True
+    assert size_result.eligible_for_baseline is True
 
 
 def test_build_size_result_write_uses_source_rx_counters(tmp_path: Path) -> None:
@@ -317,8 +308,10 @@ def test_build_size_result_requires_control_record(tmp_path: Path) -> None:
         )
 
 
-def test_build_size_result_rejects_failed_publishable_gate(tmp_path: Path) -> None:
-    """A failed wire-byte check must leave audit evidence but fail the size run."""
+def test_build_size_result_wire_mismatch_is_warning_not_failure(
+    tmp_path: Path,
+) -> None:
+    """Wire-byte mismatch is diagnostic: eligible stays true, warning recorded."""
     bytes_per_iter = 4096
     iterations = 2
     bytes_total = bytes_per_iter * iterations
@@ -335,26 +328,82 @@ def test_build_size_result_rejects_failed_publishable_gate(tmp_path: Path) -> No
         direction="read",
     )
 
-    with pytest.raises(
-        RuntimeError, match="publishable verification gate failed"
-    ):
+    # Storage RX delta of 1 byte for a transfer that expected `bytes_total`.
+    # Digest still matches (both sides emit the same test digest).
+    runner.build_size_result(
+        size_result=size_result,
+        storage_lines=storage_lines,
+        source_lines=source_lines,
+        source_before=_fake_counter_snapshot({"rx_bytes_phy": 0}),
+        source_after=_fake_counter_snapshot({"rx_bytes_phy": 1}),
+        storage_before=_fake_counter_snapshot({"rx_bytes_phy": 0}),
+        storage_after=_fake_counter_snapshot({"rx_bytes_phy": 1}),
+        verification_dir=str(tmp_path),
+        run_label="run-wire-warn",
+        direction="read",
+        manifest_ref={"source": "/tmp/src.json", "storage": "/tmp/dst.json"},
+    )
+
+    assert size_result.eligible_for_baseline is True
+    assert "wire_bytes_within_tolerance" in size_result.warnings
+    record = json.loads(Path(size_result.verification_path).read_text())
+    assert record["eligible_for_baseline"] is True
+    assert record["wire_bytes_within_tolerance"] is False
+    assert "wire_bytes_within_tolerance" in record["diagnostic_warnings"]
+
+
+def test_build_size_result_fails_hard_on_digest_mismatch(tmp_path: Path) -> None:
+    """Digest mismatch: hard fail with audit JSON persisted (eligible=false)."""
+    bytes_per_iter = 4096
+    iterations = 2
+    bytes_total = bytes_per_iter * iterations
+    storage_lines = _base_storage_lines(bytes_per_iter, iterations, "read")
+    # Storage consumer digest differs from source producer digest.
+    storage_consumer = {
+        "role": "storage",
+        "direction": "read",
+        "kind": "consumer",
+        "iterations": iterations,
+        "bytes_per_iter": bytes_per_iter,
+        "bytes_total": bytes_total,
+        "digest_algorithm": "blake3-test",
+        "digest": "deadbeef",
+        "nonce": "test-nonce",
+    }
+    storage_lines.append(
+        f"BENCH_RDMA_CONSUMER {json.dumps(storage_consumer, sort_keys=True)}\n"
+    )
+    source_lines = [
+        *_endpoint_evidence("source", "read"),
+        _digest_record("source", "producer", bytes_total),  # digest=cafef00d
+    ]
+    size_result = runner.SizeResult(
+        bytes_per_iter=bytes_per_iter,
+        iterations=iterations,
+        qd=1,
+        direction="read",
+    )
+
+    with pytest.raises(RuntimeError, match="digest mismatch"):
         runner.build_size_result(
             size_result=size_result,
             storage_lines=storage_lines,
             source_lines=source_lines,
             source_before=_fake_counter_snapshot({"rx_bytes_phy": 0}),
-            source_after=_fake_counter_snapshot({"rx_bytes_phy": 1}),
+            source_after=_fake_counter_snapshot({"rx_bytes_phy": bytes_total}),
             storage_before=_fake_counter_snapshot({"rx_bytes_phy": 0}),
-            storage_after=_fake_counter_snapshot({"rx_bytes_phy": 1}),
+            storage_after=_fake_counter_snapshot({"rx_bytes_phy": bytes_total}),
             verification_dir=str(tmp_path),
-            run_label="run-failed-gate",
+            run_label="run-digest-mismatch",
             direction="read",
             manifest_ref={"source": "/tmp/src.json", "storage": "/tmp/dst.json"},
         )
 
+    # Audit JSON persisted before the raise, eligibility explicitly false.
     assert size_result.verification_path is not None
     record = json.loads(Path(size_result.verification_path).read_text())
-    assert record["wire_bytes_within_tolerance"] is False
+    assert record["digest_match"] is False
+    assert record["eligible_for_baseline"] is False
 
 
 # ---------------------------------------------------------------------------

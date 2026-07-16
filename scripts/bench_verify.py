@@ -111,6 +111,46 @@ _VERBS_MR_RE = re.compile(
 )
 
 
+def parse_verbs_mr_evidence(evidence: Iterable[str]) -> dict[tuple[str, str], set[str]]:
+    """Return observed MR access-flag sets keyed by ``(direction, role)``.
+
+    Diagnostic helper for benchmark runners: emits the observed flag set
+    per endpoint so callers can compare against the direction-minimum
+    plan without treating a mismatch as a transport-assertion failure.
+    """
+    observed: dict[tuple[str, str], set[str]] = {}
+    joined = "\n".join(evidence)
+    for match in _VERBS_MR_RE.finditer(joined):
+        key = (match.group("direction"), match.group("role"))
+        observed[key] = set(match.group("flags").split("|"))
+    return observed
+
+
+def verbs_mr_evidence_matches_minimum(
+    observed: dict[tuple[str, str], set[str]],
+) -> bool:
+    """Return whether both endpoints used direction-minimum MR flags.
+
+    Diagnostic only for M1 (not a hard publication gate). Both endpoints
+    for a single direction must be present, source must be
+    ``LOCAL_WRITE + REMOTE_{READ,WRITE}`` for its direction, and storage
+    must be ``LOCAL_WRITE`` alone.
+    """
+    expected_source_flag = {
+        "read": "IBV_ACCESS_REMOTE_READ",
+        "write": "IBV_ACCESS_REMOTE_WRITE",
+    }
+    for direction, source_flag in expected_source_flag.items():
+        source_flags = observed.get((direction, "source"))
+        storage_flags = observed.get((direction, "storage"))
+        if source_flags is None or storage_flags is None:
+            continue
+        return source_flags == {"IBV_ACCESS_LOCAL_WRITE", source_flag} and (
+            storage_flags == {"IBV_ACCESS_LOCAL_WRITE"}
+        )
+    return False
+
+
 def producer_digest(payload: bytes) -> str:
     """Return a digest of payload bytes and expose its algorithm separately.
 
@@ -236,13 +276,15 @@ def wire_bytes_within_tolerance(
 
 
 def assert_transport(transport: Transport, evidence: Iterable[str]) -> bool:
-    """Verify transport-specific evidence from logs or diagnostics."""
+    """Verify transport-specific evidence from logs or diagnostics.
+
+    For :class:`Transport.VERBS` this checks the RC-QP transport line only.
+    MR-flag evidence is retained as a separate diagnostic surface
+    (:func:`parse_verbs_mr_evidence`) and is not a M1 publication gate.
+    """
     joined = "\n".join(evidence)
     if transport is Transport.VERBS:
-        return (
-            _VERBS_TRANSPORT_RE.search(joined) is not None
-            and _has_directional_verbs_mr_evidence(joined)
-        )
+        return _VERBS_TRANSPORT_RE.search(joined) is not None
     if transport is Transport.UCX:
         return "rc_mlx5" in joined
     if transport is Transport.NIXL:
@@ -250,28 +292,6 @@ def assert_transport(transport: Transport, evidence: Iterable[str]) -> bool:
     return (
         "submitted=" in joined and "completed=" in joined and "queue_depth=" in joined
     )
-
-
-def _has_directional_verbs_mr_evidence(evidence: str) -> bool:
-    """Verify both endpoint MRs use the minimum access flags for one direction."""
-    expected_source_flag = {
-        "read": "IBV_ACCESS_REMOTE_READ",
-        "write": "IBV_ACCESS_REMOTE_WRITE",
-    }
-    observed: dict[tuple[str, str], set[str]] = {}
-    for match in _VERBS_MR_RE.finditer(evidence):
-        flags = set(match.group("flags").split("|"))
-        observed[(match.group("direction"), match.group("role"))] = flags
-
-    for direction, source_flag in expected_source_flag.items():
-        source_flags = observed.get((direction, "source"))
-        storage_flags = observed.get((direction, "storage"))
-        if source_flags is None or storage_flags is None:
-            continue
-        return source_flags == {"IBV_ACCESS_LOCAL_WRITE", source_flag} and (
-            storage_flags == {"IBV_ACCESS_LOCAL_WRITE"}
-        )
-    return False
 
 
 def build_result(

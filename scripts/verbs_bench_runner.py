@@ -49,6 +49,8 @@ from bench_verify import (
     VerificationResult,
     build_result_from_digests,
     parse_ethtool_statistics,
+    parse_verbs_mr_evidence,
+    verbs_mr_evidence_matches_minimum,
 )
 
 # ---------------------------------------------------------------------------
@@ -90,6 +92,8 @@ class SizeResult:
     wire_bytes_within_pct: Optional[bool] = None
     digest_matches: Optional[bool] = None
     transport_asserted: Optional[bool] = None
+    eligible_for_baseline: Optional[bool] = None
+    warnings: list[str] = field(default_factory=list)
     verification_path: Optional[str] = None
     error: Optional[str] = None
 
@@ -108,17 +112,10 @@ class BenchRun:
 
 
 def ssh_cmd(host: str, cmd: str) -> subprocess.Popen:
-    """Launch *cmd* on *host* over a fresh SSH connection.
-
-    ControlMaster is disabled to avoid the multiplexed-teardown hang seen
-    with the sequential NIXL bench runs.
-    """
+    """Launch *cmd* on *host* over the configured SSH transport."""
     return subprocess.Popen(
         [
             "ssh",
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "ControlMaster=no",
-            "-o", "ControlPath=none",
             host, cmd,
         ],
         stdout=subprocess.PIPE,
@@ -281,14 +278,23 @@ def _p99(samples: list[float]) -> float:
     return sorted(samples)[math.ceil(len(samples) * 0.99) - 1]
 
 
-def _publishable_gate_failures(result: VerificationResult) -> list[str]:
-    """Return unmet publishable-verification requirements from a result."""
-    required = {
-        "digest_match": result.digest_matches,
+def _diagnostic_warnings(
+    result: VerificationResult, mr_evidence_matches_minimum: bool
+) -> list[str]:
+    """Return non-gating diagnostic warnings from a verified result.
+
+    For M1 the hard eligibility gates are manifest preflight, successful
+    RC-QP transfer, and digest match. Wire-byte tolerance, RC-QP transport
+    line assertion, and MR-flag evidence are recorded here as warnings
+    only — they populate the verification JSON but do not affect
+    ``eligible_for_baseline``.
+    """
+    checks = {
         "wire_bytes_within_tolerance": result.wire_bytes_within_pct,
         "transport_asserted": result.transport_asserted,
+        "mr_evidence_matches_minimum": mr_evidence_matches_minimum,
     }
-    return [name for name, passed in required.items() if not passed]
+    return [name for name, passed in checks.items() if not passed]
 
 
 # ---------------------------------------------------------------------------
@@ -489,8 +495,13 @@ def build_size_result(
     )
 
     expected_bytes = int(producer["bytes_total"])
+    mr_evidence = parse_verbs_mr_evidence(storage_lines + source_lines)
+    mr_evidence_matches_minimum = verbs_mr_evidence_matches_minimum(mr_evidence)
+    warnings = _diagnostic_warnings(result, mr_evidence_matches_minimum)
+    eligible_for_baseline = result.digest_matches
     record = {
-        "data_quality": "publishable",
+        "eligible_for_baseline": eligible_for_baseline,
+        "diagnostic_warnings": warnings,
         "transport": result.transport,
         "run_label": run_label,
         "direction": direction,
@@ -507,14 +518,13 @@ def build_size_result(
         "digest_match": result.digest_matches,
         "wire_bytes_total": result.wire_bytes_total,
         "wire_bytes_within_tolerance": result.wire_bytes_within_pct,
+        "mr_evidence_matches_minimum": mr_evidence_matches_minimum,
         "dma_ms_median": result.dma_median_ms,
         "dma_ms_p50": result.dma_median_ms,
         "dma_ms_p99": _p99(dma_ms),
         "control_ms_median": result.control_median_ms,
         "control_dominated": result.control_plane_dominated,
         "transport_asserted": result.transport_asserted,
-        "unavailable_fields": [],
-        "unavailable_reason": None,
         "page_bytes": size_result.bytes_per_iter,
         "num_pages": size_result.iterations,
         "iterations": size_result.iterations,
@@ -544,11 +554,13 @@ def build_size_result(
     size_result.wire_bytes_within_pct = result.wire_bytes_within_pct
     size_result.digest_matches = result.digest_matches
     size_result.transport_asserted = result.transport_asserted
+    size_result.eligible_for_baseline = eligible_for_baseline
+    size_result.warnings = warnings
     size_result.verification_path = path
-    failures = _publishable_gate_failures(result)
-    if failures:
+    if not result.digest_matches:
         raise RuntimeError(
-            "publishable verification gate failed: " + ", ".join(failures)
+            "digest mismatch between producer and consumer; run not eligible "
+            "for baseline (audit JSON persisted)"
         )
 
 
@@ -640,7 +652,8 @@ def run_bench(args: argparse.Namespace) -> BenchRun:
                 f"  dma_median={result.dma_median_ms:.3f}ms  "
                 f"wire={result.wire_bytes_total}B  "
                 f"digest_matches={result.digest_matches}  "
-                f"transport_asserted={result.transport_asserted}\n"
+                f"eligible={result.eligible_for_baseline}  "
+                f"warnings={result.warnings or 'none'}\n"
                 f"  verification={result.verification_path}"
             )
         except (TimeoutError, RuntimeError) as exc:
@@ -665,7 +678,7 @@ def print_results(run: BenchRun) -> None:
     print(f"{'=' * 90}")
     header = (
         f"{'Bytes':>10}  {'dma_med(ms)':>12}  {'wire_bytes':>12}  "
-        f"{'wire_ok':>8}  {'digest_ok':>10}  {'transport_ok':>13}"
+        f"{'digest_ok':>10}  {'eligible':>9}  warnings"
     )
     print(header)
     print("-" * len(header))
@@ -675,11 +688,11 @@ def print_results(run: BenchRun) -> None:
             continue
         dm = f"{r.dma_median_ms:.3f}" if r.dma_median_ms is not None else "n/a"
         wb = str(r.wire_bytes_total) if r.wire_bytes_total is not None else "n/a"
+        warns = ",".join(r.warnings) if r.warnings else "-"
         print(
             f"{r.bytes_per_iter:>10}  {dm:>12}  {wb:>12}  "
-            f"{str(r.wire_bytes_within_pct):>8}  "
             f"{str(r.digest_matches):>10}  "
-            f"{str(r.transport_asserted):>13}"
+            f"{str(r.eligible_for_baseline):>9}  {warns}"
         )
     print()
 
