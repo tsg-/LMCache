@@ -106,17 +106,7 @@ def test_build_result_marks_control_dominated_and_requires_verbs_evidence() -> N
         before,
         after,
         module.Transport.VERBS,
-        [
-            "TRANSPORT verbs rc_mlx5 device=mlx5_1 qp_num=7 gid_index=3",
-            (
-                "TRANSPORT_MR flags=IBV_ACCESS_LOCAL_WRITE|"
-                "IBV_ACCESS_REMOTE_READ direction=read role=source"
-            ),
-            (
-                "TRANSPORT_MR flags=IBV_ACCESS_LOCAL_WRITE "
-                "direction=read role=storage"
-            ),
-        ],
+        ["TRANSPORT verbs rc_mlx5 device=mlx5_1 qp_num=7 gid_index=3"],
         [3.0, 5.0],
         [1.0, 2.0],
     )
@@ -129,33 +119,39 @@ def test_build_result_marks_control_dominated_and_requires_verbs_evidence() -> N
     assert result.control_plane_dominated is True
 
 
-def test_verbs_transport_requires_directional_minimum_mr_evidence() -> None:
-    """Verbs evidence must prove both endpoints used minimum MR permissions."""
+def test_verbs_mr_evidence_is_diagnostic_not_transport_gate() -> None:
+    """MR-flag evidence is a diagnostic surface for M1, not an assert gate."""
     module = _load_module()
     transport = "TRANSPORT verbs rc_mlx5 device=mlx5_1 qp_num=7 gid_index=3"
-    source = (
+    source_minimum = (
         "TRANSPORT_MR flags=IBV_ACCESS_LOCAL_WRITE|IBV_ACCESS_REMOTE_READ "
         "direction=read role=source"
     )
-    storage = (
+    storage_minimum = (
         "TRANSPORT_MR flags=IBV_ACCESS_LOCAL_WRITE "
         "direction=read role=storage"
     )
-
-    assert module.assert_transport(module.Transport.VERBS, [transport, source, storage])
-    assert not module.assert_transport(module.Transport.VERBS, [transport, source])
-    assert not module.assert_transport(
-        module.Transport.VERBS,
-        [
-            transport,
-            (
-                "TRANSPORT_MR flags=IBV_ACCESS_LOCAL_WRITE|"
-                "IBV_ACCESS_REMOTE_READ|IBV_ACCESS_REMOTE_WRITE "
-                "direction=read role=source"
-            ),
-            storage,
-        ],
+    over_permissive_source = (
+        "TRANSPORT_MR flags=IBV_ACCESS_LOCAL_WRITE|"
+        "IBV_ACCESS_REMOTE_READ|IBV_ACCESS_REMOTE_WRITE "
+        "direction=read role=source"
     )
+
+    # assert_transport passes on the RC-QP line alone; MR flags do not gate.
+    assert module.assert_transport(module.Transport.VERBS, [transport])
+    assert module.assert_transport(
+        module.Transport.VERBS, [transport, over_permissive_source, storage_minimum]
+    )
+
+    # But the diagnostic helper surfaces the mismatch.
+    minimum_observed = module.parse_verbs_mr_evidence(
+        [transport, source_minimum, storage_minimum]
+    )
+    over_observed = module.parse_verbs_mr_evidence(
+        [transport, over_permissive_source, storage_minimum]
+    )
+    assert module.verbs_mr_evidence_matches_minimum(minimum_observed) is True
+    assert module.verbs_mr_evidence_matches_minimum(over_observed) is False
 
 
 def test_build_result_from_digests_matches_bytes_path() -> None:
@@ -164,17 +160,7 @@ def test_build_result_from_digests_matches_bytes_path() -> None:
     payload = b"producer"
     before = module.parse_ethtool_statistics("tx_bytes: 10\n")
     after = module.parse_ethtool_statistics("tx_bytes: 18\n")
-    evidence = [
-        "TRANSPORT verbs rc_mlx5 device=mlx5_1 qp_num=7 gid_index=3",
-        (
-            "TRANSPORT_MR flags=IBV_ACCESS_LOCAL_WRITE|"
-            "IBV_ACCESS_REMOTE_READ direction=read role=source"
-        ),
-        (
-            "TRANSPORT_MR flags=IBV_ACCESS_LOCAL_WRITE "
-            "direction=read role=storage"
-        ),
-    ]
+    evidence = ["TRANSPORT verbs rc_mlx5 device=mlx5_1 qp_num=7 gid_index=3"]
 
     from_bytes = module.build_result(
         payload,
