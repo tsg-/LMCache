@@ -86,6 +86,7 @@ def test_verbs_command_binds_requested_numa_node() -> None:
     command = runner._verbs_cmd(
         role="source",
         direction="read",
+        device="mlx5_1",
         numa_node=1,
         iterations=4,
         bytes_per_iter=4096,
