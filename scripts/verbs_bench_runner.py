@@ -62,7 +62,8 @@ BMG0_IP = "192.168.200.3"
 BMG1_IP = "192.168.200.4"
 
 BOOTSTRAP_PORT = 9600
-RDMA_DEVICE = "mlx5_1"
+BMG0_RDMA_DEVICE = "mlx5_1"
+BMG1_RDMA_DEVICE = "rocep153s0f1"
 RDMA_PORT = 1
 GID_INDEX = 3
 
@@ -201,6 +202,7 @@ def snapshot_nic(host: str, interface: str) -> CounterSnapshot:
 def _verbs_cmd(
     role: str,
     direction: str,
+    device: str,
     numa_node: int,
     iterations: int,
     bytes_per_iter: int,
@@ -213,7 +215,8 @@ def _verbs_cmd(
         f"numactl --cpunodebind={numa_node} --membind={numa_node} "
         f"{VENV}/python scripts/bench_verbs.py "
         f"--role {shlex.quote(role)} --direction {shlex.quote(direction)} "
-        f"--device {RDMA_DEVICE} --port {RDMA_PORT} --gid-index {GID_INDEX} "
+        f"--device {shlex.quote(device)} --port {RDMA_PORT} "
+        f"--gid-index {GID_INDEX} "
         f"--iterations {iterations} --bytes-per-iter {bytes_per_iter} --qd {qd} "
         f"--nonce {shlex.quote(nonce)} {bootstrap_flag} "
         f"2>&1"
@@ -314,6 +317,7 @@ def run_one_size(
     storage_cmd = _verbs_cmd(
         role="storage",
         direction=direction,
+        device=BMG1_RDMA_DEVICE,
         numa_node=dst_numa_node,
         iterations=iterations,
         bytes_per_iter=bytes_per_iter,
@@ -324,6 +328,7 @@ def run_one_size(
     source_cmd = _verbs_cmd(
         role="source",
         direction=direction,
+        device=BMG0_RDMA_DEVICE,
         numa_node=src_numa_node,
         iterations=iterations,
         bytes_per_iter=bytes_per_iter,
@@ -567,10 +572,20 @@ def run_bench(args: argparse.Namespace) -> BenchRun:
     # --- 1. Fail-closed manifest on both hosts, aborts on any failure ---
     print("==> Collecting fail-closed benchmark manifests (both hosts)...")
     source_manifest = create_manifest(
-        src_host, run_label, "source", RDMA_DEVICE, args.src_numa_node, total_bytes
+        src_host,
+        run_label,
+        "source",
+        BMG0_RDMA_DEVICE,
+        args.src_numa_node,
+        total_bytes,
     )
     storage_manifest = create_manifest(
-        dst_host, run_label, "storage", RDMA_DEVICE, args.dst_numa_node, total_bytes
+        dst_host,
+        run_label,
+        "storage",
+        BMG1_RDMA_DEVICE,
+        args.dst_numa_node,
+        total_bytes,
     )
     print(f"    source manifest:  {source_manifest}")
     print(f"    storage manifest: {storage_manifest}")
