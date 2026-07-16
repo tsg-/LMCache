@@ -680,6 +680,7 @@ def run(
         print(endpoint.transport_line(), file=output)
         print(endpoint.mr_evidence_line(), file=output)
 
+        control_start_ns = time.monotonic_ns()
         channel.send(BOOTSTRAP_TAG_QP, endpoint.local_qp_info())
         peer = channel.recv(BOOTSTRAP_TAG_QP)
 
@@ -695,6 +696,19 @@ def run(
         endpoint.connect(peer)
         channel.send(BOOTSTRAP_TAG_READY, {"role": role})
         channel.recv(BOOTSTRAP_TAG_READY)
+        control_end_ns = time.monotonic_ns()
+
+        if endpoint.is_poster():
+            control_record = {
+                "phase": "qp_setup",
+                "role": role,
+                "start_ns": control_start_ns,
+                "end_ns": control_end_ns,
+            }
+            print(
+                f"BENCH_RDMA_CONTROL {json.dumps(control_record, sort_keys=True)}",
+                file=output,
+            )
 
         if endpoint.is_producer():
             producer_record = endpoint.digest_record("producer")

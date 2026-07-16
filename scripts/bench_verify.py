@@ -104,6 +104,11 @@ _DMA_RECORD_RE = re.compile(
 _VERBS_TRANSPORT_RE = re.compile(
     r"TRANSPORT verbs rc_mlx5 device=\S+ qp_num=\d+ gid_index=\d+"
 )
+_VERBS_MR_RE = re.compile(
+    r"^TRANSPORT_MR flags=(?P<flags>\S+) direction=(?P<direction>read|write) "
+    r"role=(?P<role>source|storage)\b",
+    re.MULTILINE,
+)
 
 
 def producer_digest(payload: bytes) -> str:
@@ -234,7 +239,10 @@ def assert_transport(transport: Transport, evidence: Iterable[str]) -> bool:
     """Verify transport-specific evidence from logs or diagnostics."""
     joined = "\n".join(evidence)
     if transport is Transport.VERBS:
-        return _VERBS_TRANSPORT_RE.search(joined) is not None
+        return (
+            _VERBS_TRANSPORT_RE.search(joined) is not None
+            and _has_directional_verbs_mr_evidence(joined)
+        )
     if transport is Transport.UCX:
         return "rc_mlx5" in joined
     if transport is Transport.NIXL:
@@ -242,6 +250,28 @@ def assert_transport(transport: Transport, evidence: Iterable[str]) -> bool:
     return (
         "submitted=" in joined and "completed=" in joined and "queue_depth=" in joined
     )
+
+
+def _has_directional_verbs_mr_evidence(evidence: str) -> bool:
+    """Verify both endpoint MRs use the minimum access flags for one direction."""
+    expected_source_flag = {
+        "read": "IBV_ACCESS_REMOTE_READ",
+        "write": "IBV_ACCESS_REMOTE_WRITE",
+    }
+    observed: dict[tuple[str, str], set[str]] = {}
+    for match in _VERBS_MR_RE.finditer(evidence):
+        flags = set(match.group("flags").split("|"))
+        observed[(match.group("direction"), match.group("role"))] = flags
+
+    for direction, source_flag in expected_source_flag.items():
+        source_flags = observed.get((direction, "source"))
+        storage_flags = observed.get((direction, "storage"))
+        if source_flags is None or storage_flags is None:
+            continue
+        return source_flags == {"IBV_ACCESS_LOCAL_WRITE", source_flag} and (
+            storage_flags == {"IBV_ACCESS_LOCAL_WRITE"}
+        )
+    return False
 
 
 def build_result(

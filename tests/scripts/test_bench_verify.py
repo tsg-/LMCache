@@ -106,7 +106,17 @@ def test_build_result_marks_control_dominated_and_requires_verbs_evidence() -> N
         before,
         after,
         module.Transport.VERBS,
-        ["TRANSPORT verbs rc_mlx5 device=mlx5_1 qp_num=7 gid_index=3"],
+        [
+            "TRANSPORT verbs rc_mlx5 device=mlx5_1 qp_num=7 gid_index=3",
+            (
+                "TRANSPORT_MR flags=IBV_ACCESS_LOCAL_WRITE|"
+                "IBV_ACCESS_REMOTE_READ direction=read role=source"
+            ),
+            (
+                "TRANSPORT_MR flags=IBV_ACCESS_LOCAL_WRITE "
+                "direction=read role=storage"
+            ),
+        ],
         [3.0, 5.0],
         [1.0, 2.0],
     )
@@ -119,13 +129,52 @@ def test_build_result_marks_control_dominated_and_requires_verbs_evidence() -> N
     assert result.control_plane_dominated is True
 
 
+def test_verbs_transport_requires_directional_minimum_mr_evidence() -> None:
+    """Verbs evidence must prove both endpoints used minimum MR permissions."""
+    module = _load_module()
+    transport = "TRANSPORT verbs rc_mlx5 device=mlx5_1 qp_num=7 gid_index=3"
+    source = (
+        "TRANSPORT_MR flags=IBV_ACCESS_LOCAL_WRITE|IBV_ACCESS_REMOTE_READ "
+        "direction=read role=source"
+    )
+    storage = (
+        "TRANSPORT_MR flags=IBV_ACCESS_LOCAL_WRITE "
+        "direction=read role=storage"
+    )
+
+    assert module.assert_transport(module.Transport.VERBS, [transport, source, storage])
+    assert not module.assert_transport(module.Transport.VERBS, [transport, source])
+    assert not module.assert_transport(
+        module.Transport.VERBS,
+        [
+            transport,
+            (
+                "TRANSPORT_MR flags=IBV_ACCESS_LOCAL_WRITE|"
+                "IBV_ACCESS_REMOTE_READ|IBV_ACCESS_REMOTE_WRITE "
+                "direction=read role=source"
+            ),
+            storage,
+        ],
+    )
+
+
 def test_build_result_from_digests_matches_bytes_path() -> None:
     """Endpoint digest records produce the same record as raw payload bytes."""
     module = _load_module()
     payload = b"producer"
     before = module.parse_ethtool_statistics("tx_bytes: 10\n")
     after = module.parse_ethtool_statistics("tx_bytes: 18\n")
-    evidence = ["TRANSPORT verbs rc_mlx5 device=mlx5_1 qp_num=7 gid_index=3"]
+    evidence = [
+        "TRANSPORT verbs rc_mlx5 device=mlx5_1 qp_num=7 gid_index=3",
+        (
+            "TRANSPORT_MR flags=IBV_ACCESS_LOCAL_WRITE|"
+            "IBV_ACCESS_REMOTE_READ direction=read role=source"
+        ),
+        (
+            "TRANSPORT_MR flags=IBV_ACCESS_LOCAL_WRITE "
+            "direction=read role=storage"
+        ),
+    ]
 
     from_bytes = module.build_result(
         payload,
