@@ -524,3 +524,44 @@ def test_run_bench_persists_manifest_ref_from_both_hosts(tmp_path: Path) -> None
     assert verification_path is not None
     record = json.loads(Path(verification_path).read_text())
     assert record["manifest_ref"] == manifests
+
+
+def test_run_bench_persists_failure_audit_before_reraising(tmp_path: Path) -> None:
+    """A subprocess failure must leave an ineligible audit record behind."""
+    args = _args_for_run(tmp_path)
+    manifests = {
+        "source": "/tmp/manifest_src.json",
+        "storage": "/tmp/manifest_dst.json",
+    }
+
+    with mock.patch.object(
+        runner, "create_manifest", side_effect=lambda *_args: manifests[_args[2]]
+    ), mock.patch.object(
+        runner,
+        "snapshot_nic",
+        return_value=runner.CounterSnapshot(counters={"rx_bytes_phy": 0}),
+    ), mock.patch.object(
+        runner,
+        "run_one_size",
+        side_effect=runner.BenchRunError(
+            "simulated verbs subprocess failure",
+            ["storage failure output\n"],
+            ["source failure output\n"],
+        ),
+    ), mock.patch.object(runner, "kill_port"):
+        with pytest.raises(RuntimeError, match="simulated verbs subprocess failure"):
+            runner.run_bench(args)
+
+    records = list(tmp_path.glob("verification_*.json"))
+    assert len(records) == 1
+    record = json.loads(records[0].read_text())
+    assert record["eligible_for_baseline"] is False
+    assert record["manifest_ref"] == manifests
+    assert record["direction"] == "read"
+    assert record["page_bytes"] == 4096
+    assert record["iterations"] == 4
+    assert record["error"] == "simulated verbs subprocess failure"
+    assert record["logs"] == {
+        "storage": "storage failure output\n",
+        "source": "source failure output\n",
+    }
