@@ -106,6 +106,20 @@ class BenchRun:
     results: list[SizeResult] = field(default_factory=list)
 
 
+class BenchRunError(RuntimeError):
+    """Raised when a benchmark subprocess fails, retaining captured logs."""
+
+    def __init__(
+        self,
+        message: str,
+        storage_lines: list[str],
+        source_lines: list[str],
+    ) -> None:
+        super().__init__(message)
+        self.storage_lines = storage_lines
+        self.source_lines = source_lines
+
+
 # ---------------------------------------------------------------------------
 # SSH helpers (kept in sync with nixl_bench_runner.py)
 # ---------------------------------------------------------------------------
@@ -381,9 +395,13 @@ def run_one_size(
         source_done.wait(timeout=5.0)
 
     if storage_proc.returncode != 0 or source_proc.returncode != 0:
-        raise RuntimeError(
-            f"bench_verbs failed (storage rc={storage_proc.returncode}, "
-            f"source rc={source_proc.returncode}); check logs above"
+        raise BenchRunError(
+            (
+                f"bench_verbs failed (storage rc={storage_proc.returncode}, "
+                f"source rc={source_proc.returncode}); check logs above"
+            ),
+            storage_lines,
+            source_lines,
         )
     return storage_lines, source_lines
 
@@ -400,6 +418,33 @@ def write_verification(
         json.dump(result_dict, handle, indent=2, sort_keys=True)
         handle.write("\n")
     return path
+
+
+def write_failed_verification(
+    output_dir: str,
+    label: str,
+    size_result: SizeResult,
+    manifest_ref: dict[str, str],
+    error: RuntimeError,
+) -> str:
+    """Persist an ineligible verification record for a failed bench cell."""
+    storage_lines = getattr(error, "storage_lines", [])
+    source_lines = getattr(error, "source_lines", [])
+    record = {
+        "eligible_for_baseline": False,
+        "run_label": label,
+        "direction": size_result.direction,
+        "page_bytes": size_result.bytes_per_iter,
+        "iterations": size_result.iterations,
+        "qd": size_result.qd,
+        "manifest_ref": dict(manifest_ref),
+        "error": str(error),
+        "logs": {
+            "storage": "".join(storage_lines),
+            "source": "".join(source_lines),
+        },
+    }
+    return write_verification(output_dir, label, size_result.bytes_per_iter, record)
 
 
 # ---------------------------------------------------------------------------
@@ -616,23 +661,39 @@ def run_bench(args: argparse.Namespace) -> BenchRun:
             qd=args.qd,
             direction=args.direction,
         )
+        launch_failure_persisted = False
         try:
             source_before = snapshot_nic(src_host, BMG0_ETHTOOL_IFACE)
             storage_before = snapshot_nic(dst_host, BMG1_ETHTOOL_IFACE)
-            storage_lines, source_lines = run_one_size(
-                src_host=src_host,
-                dst_host=dst_host,
-                dst_bootstrap_ip=dst_bootstrap_ip,
-                src_numa_node=args.src_numa_node,
-                dst_numa_node=args.dst_numa_node,
-                direction=args.direction,
-                iterations=args.iterations,
-                bytes_per_iter=bytes_per_iter,
-                qd=args.qd,
-                nonce=f"{run_label}_{bytes_per_iter}",
-                launch_timeout=args.timeout,
-                verbose=args.verbose,
-            )
+            try:
+                storage_lines, source_lines = run_one_size(
+                    src_host=src_host,
+                    dst_host=dst_host,
+                    dst_bootstrap_ip=dst_bootstrap_ip,
+                    src_numa_node=args.src_numa_node,
+                    dst_numa_node=args.dst_numa_node,
+                    direction=args.direction,
+                    iterations=args.iterations,
+                    bytes_per_iter=bytes_per_iter,
+                    qd=args.qd,
+                    nonce=f"{run_label}_{bytes_per_iter}",
+                    launch_timeout=args.timeout,
+                    verbose=args.verbose,
+                )
+            except RuntimeError as exc:
+                result.error = str(exc)
+                result.eligible_for_baseline = False
+                result.verification_path = write_failed_verification(
+                    args.verification_dir,
+                    run_label,
+                    result,
+                    manifest_ref,
+                    exc,
+                )
+                launch_failure_persisted = True
+                run.results.append(result)
+                kill_port(dst_host, BOOTSTRAP_PORT)
+                raise
             source_after = snapshot_nic(src_host, BMG0_ETHTOOL_IFACE)
             storage_after = snapshot_nic(dst_host, BMG1_ETHTOOL_IFACE)
             build_size_result(
@@ -659,6 +720,8 @@ def run_bench(args: argparse.Namespace) -> BenchRun:
         except (TimeoutError, RuntimeError) as exc:
             result.error = str(exc)
             print(f"  ERROR: {exc}", file=sys.stderr)
+            if launch_failure_persisted:
+                raise
         run.results.append(result)
 
     kill_port(dst_host, BOOTSTRAP_PORT)
