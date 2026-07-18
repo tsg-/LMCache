@@ -1,11 +1,11 @@
 %%{init: {"theme": "default", "sequence": {"wrap": true, "noteAlign": "left", "noteMargin": 12, "actorMargin": 80, "messageMargin": 45}}}%%
 sequenceDiagram
-    participant vLLM as vLLM / Bench
-    participant LMC_I as LMCache<br/>(Initiator)
-    participant IPU_I as MMG-400<br/>(Initiator NIC)
-    participant IPU_T as MMG-400<br/>(KV Cache NIC)
-    participant LMC_T as LMCache<br/>(KV Cache Node)
-    participant SSD as NVMe (L2)
+    participant vLLM as Xeon GNR-SP<br/>(vLLM / Bench)
+    participant LMC_I as Xeon GNR-SP<br/>(LMCache: minimal)
+    participant IPU_I as MMG-400 Falcon<br/>(Passive responder)
+    participant IPU_T as MMG-400 Falcon<br/>(Active data mover)
+    participant LMC_T as Xeon GNR-SP<br/>(LMCache control plane)
+    participant SSD as NVMe Gen5<br/>(L2)
 
     Note over vLLM,SSD: High-level target flow.<br/>See lmcache-ipu-pull-model-flow.mmd for wire-level detail:<br/>control frames, MR lifetime, two-phase eviction, lease and cancel semantics.
 
