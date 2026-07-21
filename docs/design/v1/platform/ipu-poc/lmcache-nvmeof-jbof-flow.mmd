@@ -17,7 +17,9 @@ sequenceDiagram
     vLLM->>CE: retrieve(tokens)
     CE->>CE: TokenDatabase: hash tokens → chunk keys (BLAKE3)
     CE->>SM: batched_contains(keys)
-    SM->>L1: batched_contains(keys)
+    SM->>L1: batched_contains(keys, exclude_pending=true)
+
+    Note over SM,L1: L1 entries in PENDING state (not yet map-published) are<br/>invisible to batched_contains and get. They become visible atomically<br/>with map publication in the STORE flow below.
 
     alt L1 HIT (page in DRAM)
         L1-->>SM: hit_chunks = N
@@ -60,9 +62,9 @@ sequenceDiagram
     CE->>GPU: GPU HBM → DMA to host DRAM
     CE->>CE: hash tokens → chunk keys, compute per-page BLAKE3 digest D
     CE->>SM: put(keys, memory_objs, digests)
-    SM->>L1: put(keys, data) → pinned in DRAM (L1)
+    SM->>L1: put(keys, data, state=PENDING) → pinned in DRAM, NOT lookup-visible
 
-    Note over SM,TX: Initiator-side durable commit begins here.<br/>Order of the four steps below is what makes the commit crash-safe.
+    Note over SM,TX: Initiator-side durable commit begins here.<br/>L1 buffer holds data but stays PENDING until step 4 succeeds.<br/>Concurrent retrieve cannot see PENDING entries.
 
     SM->>TX: 1. append intent { key, LBA_range, D } to WAL (or reserve new COW generation)
     TX->>K: fsync/FLUSH intent log
@@ -79,10 +81,13 @@ sequenceDiagram
     K->>JBOF: NVMe Write (FUA) → durable checksum
     JBOF-->>K: completion
 
-    TX->>TX: 4. publish key→LBA map atomically<br/>(WAL commit record OR COW generation-pointer flip)
+    TX->>TX: 4. atomic publish: flip L1 state PENDING→VISIBLE and publish key→LBA map together<br/>(single WAL commit record OR COW generation-pointer flip covers both)
     TX->>K: fsync/FLUSH map publication
     K->>JBOF: NVMe FLUSH → durable
+    TX->>L1: mark keys VISIBLE (atomic with map publish)
     TX-->>SM: store ACK (terminal, cache-visible)
+
+    Note over SM,L1: If any step fails or the process crashes before step 4 the PENDING L1 entry is dropped on restart. It was never lookup-visible so no concurrent retrieve observed a torn or unacked value.
 
     Note over vLLM,JBOF: === RECOVERY (restart / nvme reconnect) ===
 
@@ -92,6 +97,7 @@ sequenceDiagram
     JBOF-->>K: log + checksum blocks
     K-->>TX: bytes
     TX->>TX: reconstruct key-to-LBA map from committed WAL records only<br/>uncommitted intents become GC candidates<br/>committed records with missing or bad checksum are discarded<br/>unreferenced blocks are freed on next GC pass
+    TX->>L1: initialize L1 as empty (or repopulate from durable state)<br/>no PENDING entries survive a restart — they were never lookup-visible
     TX-->>CE: map ready
     CE-->>vLLM: cache online
 

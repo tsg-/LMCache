@@ -95,7 +95,13 @@ Rules:
 - metadata region reserved on the same device
 - periodic checkpointing
 - optional checkpoint load on startup
-- optional verification on load
+- **structural** verification on load — `meta_verify_on_load=true` invokes
+  `_validate_loaded_entries` at `lmcache/v1/storage_backend/raw_block/core.py:1877`,
+  which compares each recovered entry's slot-header identity and
+  payload_len against the checkpoint metadata and drops mismatches. This
+  is a slot-provenance check, NOT a payload-content integrity check;
+  there is no per-page checksum stored with the payload and no BLAKE3 or
+  CRC comparison against the payload bytes on load.
 - recovery by loading the latest durable checkpoint and rebuilding the in-memory
   index
 
@@ -128,13 +134,20 @@ payload write and the next checkpoint can expose (a) an unrecoverable
 payload whose index entry is lost, or (b) after checkpoint restore, an
 index entry whose payload was torn or never fully landed.
 
-This is acceptable for the current storage-owned deployment where the
-target-side LMCache agent re-verifies BLAKE3 on read and the storage node
-is the durable authority. It is **not** acceptable for the initiator-owned
-+ remote-NVMe-oF-L2 alternative (see
+This has been acceptable so far for the storage-owned deployment because
+the storage node is the durable authority and the cache surface is
+recreated by re-fetch on miss. It is NOT acceptable for the
+initiator-owned + remote-NVMe-oF-L2 alternative (see
 `docs/design/v1/platform/ipu-poc/nvmeof-initiator-only-alternative.md`),
-which requires a WAL or COW-generation commit protocol before it can claim
-durable cache correctness across restart or reconnect.
+where the durable authority sits behind an NVMe-oF fabric with a
+different failure surface and there is no target-side LMCache agent to
+re-fetch or re-derive dropped keys. The alternative requires a WAL or
+COW-generation commit protocol AND a payload-side digest (recomputed on
+read) before it can claim durable cache correctness across restart or
+reconnect. Neither exists in `RawBlockCore` today — payload BLAKE3
+appears only in the M1 verbs bench verifier (`scripts/bench_verify.py`)
+and in token-key hashing (`lmcache/v1/multiprocess/token_hasher.py`),
+not on the raw-block store or load path.
 
 ### Deployment modes
 

@@ -99,13 +99,15 @@ payload write and the next checkpoint can drop an index entry or, after
 checkpoint restore, leave a stale index entry pointing at a torn or
 absent payload.
 
-That is safe for the current storage-owned deployment where the target
-LMCache agent re-verifies BLAKE3 on read. It is **not** safe for the
-initiator-owned + remote-NVMe-oF-L2 alternative, which requires a WAL or
-copy-on-write generation protocol on top of ``raw_block`` before it can
-claim durable cache correctness across restart or reconnect. See
-``docs/design/v1/distributed/l2_adapters/raw_block.md`` and
-``docs/design/v1/platform/ipu-poc/nvmeof-initiator-only-alternative.md``.
+That has been acceptable so far for the storage-owned deployment because
+the storage node is the durable authority and dropped keys are recreated
+by re-fetch on miss; there is no general on-read payload-integrity check
+in ``RawBlockCore`` today. It is **not** safe for the initiator-owned +
+remote-NVMe-oF-L2 alternative, which requires both a WAL or copy-on-write
+generation commit protocol AND a payload-side digest recomputed on read
+before it can claim durable cache correctness across restart or
+reconnect. See ``docs/design/v1/distributed/l2_adapters/raw_block.md``
+and ``docs/design/v1/platform/ipu-poc/nvmeof-initiator-only-alternative.md``.
 
 **Configuration examples:**
 

@@ -103,26 +103,21 @@ variant_a:
 
 variant_b:
   name: nvme_of_pull
-  transport: nvme_rdma
-  tool: storage_backend_io
-  command: |
-    python benchmarks/storage_backend_io/storage_backend_io_benchmark.py \
-      --backend rust_raw_block \
-      --num-ops {num_ops} \
-      --concurrency {nvme_queue_depth} \
-      --chunk-size {chunk_size} \
-      --shape {shape} \
-      --dtype {dtype} \
-      --write-only
+  disabled: true
+  deprecated_reason: >
+    Removed 2026-07-21. The NVMe-oF path is not a variant of the storage-
+    owned pull model; it is a different architecture measured in scenario
+    10 (see 10_write_nvmeof_initiator.yaml and
+    docs/design/v1/platform/ipu-poc/nvmeof-initiator-only-alternative.md).
+    No command, metrics, or pass criteria are defined here.
 
+  # Wire framing retained purely for cross-reference; not runnable.
   wire_model:
     per_page:
-      - {phase: "nvme_write_cmd", dir: "rx", bytes: 72, note: "command capsule (no inline data)"}
-      - {phase: "target_allocate", dir: "internal", bytes: 0, latency_us: "evict_or_alloc", note: "LMCache decision"}
-      - {phase: "rdma_read_pull", dir: "tx", bytes: 64, note: "RDMA Read WR posted by target"}
-      - {phase: "rdma_read_data", dir: "rx", bytes: "${model.page_size_bytes}", note: "data arrives"}
-      - {phase: "nvme_cqe", dir: "tx", bytes: 16, note: "completion to initiator"}
-    # Extra overhead vs raw RDMA: NVMe cmd parsing + CQE = ~72 + 16 = 88 bytes + processing time
+      - {phase: "nvme_write_cmd",   dir: "rx", bytes: 72, note: "command capsule (no inline data)"}
+      - {phase: "rdma_read_pull",   dir: "tx", bytes: 64, note: "target-side data pull"}
+      - {phase: "rdma_read_data",   dir: "rx", bytes: "${model.page_size_bytes}", note: "data arrives"}
+      - {phase: "nvme_cqe",         dir: "tx", bytes: 16, note: "completion to initiator"}
 
 # =============================================================================
 # PARAMETERS (shared across variants)
@@ -136,12 +131,6 @@ parameters:
   write_queue_depth: 400  # outstanding write intents queued (target drains these)
   iters: 100
   warmup: 10
-  # For NVMe variant:
-  chunk_size: 128
-  shape: "[2, 8, 128, 128]"
-  dtype: "float8_e4m3fn"
-  num_ops: 1000
-  nvme_queue_depth: 64  # NVMe SQ depth (concurrent commands)
 
 # =============================================================================
 # WHAT THIS VALIDATES FOR IPU
@@ -175,13 +164,11 @@ metrics:
   derived:
     - allocation_time_us: "pull_latency_avg_us - rdma_read_rtt_us"  # just the alloc decision
     - backlog_depth: "write_intent_arrival_rate / queue_drain_rate"  # steady-state queue
-    - variant_overhead_us: "variant_b_latency - variant_a_latency"  # NVMe-oF cost
 
 pass_criteria:
   pull_throughput_gbps: ">= 8.0"    # writes are 1/6 of bandwidth at 5:1 ratio
   allocation_time_us: "<= 10"       # buffer alloc must not bottleneck
   backlog_depth: "<= 100"           # queue should not grow unbounded
-  variant_overhead_us: "<= 15"      # NVMe-oF adds acceptable overhead vs raw
 
 # =============================================================================
 # ARCHITECTURAL SCOPE

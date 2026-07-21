@@ -12,11 +12,19 @@ variant of the current storage-owned pull design.
 
 ## Summary
 
-The current *pull* model does not survive this change. It is a
-storage-owned cache design: the target-side LMCache owns semantic
-admission, BLAKE3 verification on commit, MR leases, and the two-phase
-L1/L2 eviction/flush contract. Removing the target agent eliminates those
-cache-level semantics.
+The *pull* model, as designed on the storage-owned track, does not
+survive this change. That design places semantic admission, BLAKE3
+verification on commit (M2 admission-gated store — see
+`benchmark-test-plan-xeon-cx7-l1l2.md`, LMCache-i5e), MR leases, and the
+two-phase L1/L2 eviction/flush contract on a target-side LMCache agent.
+Removing the target agent eliminates the surface those cache-level
+semantics attach to.
+
+Note: as of 2026-07-21 the storage-owned track has landed only the M1
+raw-verbs baselines (LMCache-dz1 READ, LMCache-y32 WRITE). The commit
+gate itself (BLAKE3-on-commit, MR-lease enforcement, admission
+invariants) is M2 work and is not yet in `main`. The comparison in this
+doc is between the two designs, not between two live implementations.
 
 What remains is a perfectly workable — but architecturally different —
 initiator-owned tiered cache in which LMCache manages DRAM/HBM as L1 and a

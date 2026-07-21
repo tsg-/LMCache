@@ -114,17 +114,32 @@ Its numbers are not interchangeable with scenarios 1–9.
 
 ## Scenarios
 
+**Track 1: storage-owned pull architecture (scenarios 1–9).** LMCache
+runs on both compute and storage nodes; storage-side agent owns
+admission, MR leases, BLAKE3-on-commit.
+
 | # | Scenario | Transport | Benchmark Tool | Key Metric |
 |---|----------|-----------|----------------|------------|
 | 1 | L1 DRAM hit, RDMA serve | RDMA (NIXL/UCX) | transfer_channel_benchmark | TX throughput (GB/s) |
 | 2 | L1 DRAM hit, NVMe/TCP serve | NVMe/TCP | storage_backend_io | TX throughput + TSO efficiency |
 | 3 | L1 miss → SSD fetch → DRAM → RDMA serve | RDMA | storage_backend_io + transfer_channel | Miss penalty latency |
 | 4 | L1 miss → SSD fetch → DRAM → NVMe/TCP serve | NVMe/TCP | storage_backend_io | End-to-end miss latency |
-| 5 | Write path (pull model, both variants) | RDMA raw + NVMe-oF | transfer_channel + storage_backend_io | Allocation latency, pull throughput |
+| 5 | Write path (storage-owned raw RDMA pull) | RDMA raw | transfer_channel_benchmark | Allocation latency, pull throughput |
 | 6 | Write path NVMe/TCP (R2T pull) | NVMe/TCP | storage_backend_io | R2T overhead vs raw RDMA |
 | 7 | Mixed read/write (5:1 ratio) | RDMA | transfer_channel_benchmark | Sustained bandwidth under churn |
 | 8 | Eviction pipeline under full DRAM | LMCache allocator | controller + storage_backend_io + transfer_channel | Pipeline latency (evict→alloc→pull) |
 | 9 | Multi-initiator write flood | RDMA | transfer_channel_benchmark (multi-peer) | Admission control, backlog bound |
+
+**Track 2: initiator-owned + remote NVMe-oF L2 alternative (scenarios 10–12).**
+LMCache runs only on the compute node; storage node exports NVMe SSDs via
+`nvmet-rdma` with no target-side agent. Different architecture; numbers
+are NOT interchangeable with track 1.
+
+| # | Scenario | Transport | Benchmark Tool | Key Metric |
+|---|----------|-----------|----------------|------------|
+| 10 | Initiator-owned NVMe-oF write (WAL/COW durable commit) | NVMe-oF/RDMA (nvmet-rdma) | nvmeof_bench_runner (unbuilt; LMCache-msm.3) | End-to-end write latency, per-step commit cost |
+| 11 | WAL replay after crash-cutpoint | NVMe-oF/RDMA | nvmeof_fault_driver (unbuilt; LMCache-msm.2) | keys_lost/torn at each cutpoint; replay time |
+| 12 | NVMe-oF reconnect cutpoint | NVMe-oF/RDMA | nvmeof_fault_driver (unbuilt; LMCache-msm.2) | reconnect time; io_error surfaced (no hangs) |
 
 ## Diagrams
 
@@ -141,11 +156,14 @@ docs/design/tools/ipu_traffic_benchmarks/
 │   ├── 02_l1_hit_nvme_tcp.yaml       Read: hot path, NVMe/TCP + TSO
 │   ├── 03_l1_miss_rdma.yaml          Read: cold path, SSD→DRAM→RDMA
 │   ├── 04_l1_miss_nvme_tcp.yaml      Read: cold path, SSD→DRAM→NVMe/TCP
-│   ├── 05_write_rdma.yaml            Write: pull model (raw RDMA + NVMe-oF variants)
+│   ├── 05_write_rdma.yaml            Write: storage-owned raw RDMA pull (variant B deprecated)
 │   ├── 06_write_nvme_tcp.yaml        Write: NVMe/TCP R2T pull
 │   ├── 07_mixed_rdma.yaml            Steady-state: 5:1 read:write mix
 │   ├── 08_eviction_pressure.yaml     Pipeline: evict→alloc→pull under full DRAM
-│   └── 09_write_flood_admission.yaml Multi-initiator: admission control validation
+│   ├── 09_write_flood_admission.yaml Multi-initiator: admission control validation
+│   ├── 10_write_nvmeof_initiator.yaml   Alt track: initiator-owned NVMe-oF write with durable commit
+│   ├── 11_recovery_wal_replay.yaml      Alt track: crash-cutpoint recovery
+│   └── 12_reconnect_cutpoint.yaml       Alt track: NVMe-oF fabric-loss handling
 ├── diagrams.md                        Mermaid sequence diagrams for all scenarios
 ├── models/
 │   ├── llama3_8b_fp8.yaml

@@ -389,7 +389,7 @@ Same as Scenario 3 but served over NVMe/TCP. Measures additional protocol overhe
 
 - NVMe/TCP overhead vs RDMA < 20 us
 
-## Scenario 5: Write Path -- Pull Model (Both Variants)
+## Scenario 5: Write Path -- Storage-Owned Raw RDMA Pull
 
 **What it validates:** The core architectural property -- target controls write
 admission. Two variants benchmarked:
@@ -509,6 +509,28 @@ Total: 320 intents queued = 40KB of control messages (NOT 80MB of data).
 - Backlog drain time <= 100ms
 
 
+## Alt-track scenarios 10-12: initiator-owned + remote NVMe-oF L2
+
+Scenarios 10, 11, and 12 belong to a **different architecture** — the
+initiator-owned + remote-NVMe-oF-L2 alternative in which LMCache runs
+only on the compute node and the storage node exports NVMe SSDs via
+`nvmet-rdma` with no target-side agent. Their metrics measure a
+durable-commit transaction (WAL/COW intent + payload FUA + checksum FUA
++ map publish) and its recovery/reconnect behavior, not the
+storage-owned pull model.
+
+Do not cross-compare numbers between scenarios 1–9 and 10–12; the two
+sets measure different systems.
+
+- **Scenario 10** — write path with WAL/COW durable commit.
+- **Scenario 11** — crash-cutpoint recovery via WAL replay.
+- **Scenario 12** — NVMe-oF fabric-loss (disconnect / reconnect) handling.
+
+See `docs/design/v1/platform/ipu-poc/nvmeof-initiator-only-alternative.md`
+for the architecture doc and the individual scenario YAML files under
+`scenarios/` for parameters and pass criteria.
+
+
 # Metrics
 
 ## Primary Metrics
@@ -542,7 +564,7 @@ Total: 320 intents queued = 40KB of control messages (NOT 80MB of data).
 | 01 (Hit, RDMA) | throughput_gbps | 40-50 GB/s | < 35 |
 | 02 (Hit, NVMe/TCP) | cpu_utilization | < 10% | > 20% |
 | 03 (Miss, RDMA) | latency_avg_us | 50-100 | > 200 |
-| 05 (Write) | allocation_time_us | < 10 | > 50 |
+| 05 (Write, storage-owned raw RDMA) | allocation_time_us | < 10 | > 50 |
 | 07 (Mixed) | tx_rx_ratio | 4-6 | < 3 |
 | 08 (Eviction) | pipeline_throughput | > 50K/s | < 25K/s |
 | 09 (Flood) | zero_drops | true | false |
@@ -624,27 +646,31 @@ throughput >= 40 GB/s?
                         Check: ethtool -k <iface> | grep tso
 ```
 
-## Transport Selection Decision
+## Transport Selection Decision (within the storage-owned track)
 
-After running RDMA and NVMe/TCP variants side-by-side:
+After running RDMA and NVMe/TCP variants side-by-side on the
+storage-owned path (target-side LMCache agent present):
 
 | If... | Then... |
 |-------|---------|
 | NVMe/TCP within 20% of RDMA throughput, CPU < 10% | NVMe/TCP acceptable -- use for operational simplicity |
 | NVMe/TCP > 30% slower or CPU > 20% | NVMe/TCP overhead too high -- use RDMA |
-| NVMe-oF write overhead < 15 us vs raw RDMA | NVMe-oF acceptable for writes |
-| NVMe-oF write overhead > 15 us | Use raw RDMA for write path |
 
-## Write Path Variant Decision
+These rows evaluate transport substitution for the same architecture
+(target-side LMCache with cache-level admission). They are NOT a
+storage-owned vs initiator-owned architecture comparison. For that, see
+`docs/design/v1/platform/ipu-poc/nvmeof-initiator-only-alternative.md`
+and scenarios 10-12; do not treat "NVMe-oF write overhead vs raw RDMA"
+as an interchangeable transport-swap decision.
 
-Scenario 5 Variant A vs Variant B answers:
-**Should we use NVMe-oF or raw RDMA for the pull model?**
+## Write Path — Scenario 5 scope
 
-- Variant A (raw RDMA): minimal overhead, LMCache posts RDMA Reads directly
-- Variant B (NVMe-oF): standard storage semantics, SPDK in the path
-
-Measure `variant_b_latency - variant_a_latency`. If < 5 us, use NVMe-oF
-for operational benefits. If > 15 us, use raw RDMA.
+Scenario 5 is the storage-owned raw RDMA pull only (Variant A). The
+previous Variant B ("NVMe-oF wraps the same pull semantics") is
+deprecated -- a stock NVMe-oF target has no cache-level admission, MR
+leases, or per-key semantics, so it cannot substitute for a target-side
+LMCache agent. The initiator-owned + remote-NVMe-oF-L2 alternative is
+measured on its own track in scenarios 10-12.
 
 ## Eviction Analysis
 
