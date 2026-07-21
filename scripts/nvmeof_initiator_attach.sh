@@ -86,12 +86,20 @@ ensure_nvme_prereqs() {
 }
 
 require_fabric_plane_ip() {
+    # Fail-closed: only 192.168.200 fabric IPs are accepted unless the caller
+    # explicitly opts in with --allow-non-fabric-ip. Management-plane IPs get
+    # a specific error for logging.
     local ip="$1"
+    local allow_non_fabric="$2"
     if [[ "$ip" == ${MGMT_PLANE_PREFIX}* ]]; then
         die "refusing to connect to management-plane target IP $ip" 3
     fi
     if [[ "$ip" != ${FABRIC_PLANE_PREFIX}* ]]; then
-        log "WARNING: target IP $ip is not on the expected 192.168.200 fabric"
+        if (( allow_non_fabric )); then
+            log "WARNING: --allow-non-fabric-ip set; connecting to off-fabric target IP $ip"
+        else
+            die "refusing to connect to non-fabric target IP $ip (expected ${FABRIC_PLANE_PREFIX}x; pass --allow-non-fabric-ip to override)" 3
+        fi
     fi
 }
 
@@ -104,27 +112,22 @@ require_fabric_plane_ip() {
 find_controller_for_nqn() {
     local nqn="$1"
     (( DRY_RUN )) && { echo "/dev/nvmeX"; return 0; }
-    # `nvme list-subsys` shows subsystems and their controllers.
+
+    # Locate scripts/nvmeof_util.py relative to this script so it works from
+    # any CWD.
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    local helper="${script_dir}/nvmeof_util.py"
+    if [[ ! -f "$helper" ]]; then
+        die "helper missing: $helper" 2
+    fi
+
+    # `nvme list-subsys` shape varies across nvme-cli 1.x and 2.x; the helper
+    # handles both. nvme list-subsys does not require root but we run under
+    # sudo in the caller anyway; call it directly here.
     local ctrl
-    ctrl=$(nvme list-subsys -o json 2>/dev/null | python3 -c '
-import json, sys
-target = sys.argv[1]
-data = json.load(sys.stdin)
-subsystems = data if isinstance(data, list) else data.get("Subsystems", [])
-for entry in subsystems:
-    subs = entry.get("Subsystems") if isinstance(entry, dict) else None
-    candidates = subs if subs is not None else [entry]
-    for sub in candidates:
-        if not isinstance(sub, dict):
-            continue
-        if sub.get("NQN") == target or sub.get("Subsystem NQN") == target:
-            for ctrl in sub.get("Controllers", []):
-                name = ctrl.get("Controller") if isinstance(ctrl, dict) else None
-                if name:
-                    print(name)
-                    sys.exit(0)
-sys.exit(1)
-' "$nqn" || true)
+    ctrl="$(nvme list-subsys -o json 2>/dev/null \
+        | python3 "$helper" find-controller --nqn "$nqn" || true)"
     if [[ -z "$ctrl" ]]; then
         return 1
     fi
@@ -167,18 +170,20 @@ subcmd_connect() {
     local host_nqn="" ctrl_loss_tmo="$DEFAULT_CTRL_LOSS_TMO"
     local reconnect_delay="$DEFAULT_RECONNECT_DELAY"
     local wait_secs="$DEFAULT_WAIT_SECS" namespace="1"
+    local allow_non_fabric=0
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --target-ip)       target_ip="$2"; shift 2 ;;
-            --target-port)     target_port="$2"; shift 2 ;;
-            --nqn)             nqn="$2"; shift 2 ;;
-            --host-nqn)        host_nqn="$2"; shift 2 ;;
-            --ctrl-loss-tmo)   ctrl_loss_tmo="$2"; shift 2 ;;
-            --reconnect-delay) reconnect_delay="$2"; shift 2 ;;
-            --wait-secs)       wait_secs="$2"; shift 2 ;;
-            --namespace)       namespace="$2"; shift 2 ;;
-            --dry-run)         DRY_RUN=1; shift ;;
+            --target-ip)            target_ip="$2"; shift 2 ;;
+            --target-port)          target_port="$2"; shift 2 ;;
+            --nqn)                  nqn="$2"; shift 2 ;;
+            --host-nqn)             host_nqn="$2"; shift 2 ;;
+            --ctrl-loss-tmo)        ctrl_loss_tmo="$2"; shift 2 ;;
+            --reconnect-delay)      reconnect_delay="$2"; shift 2 ;;
+            --wait-secs)            wait_secs="$2"; shift 2 ;;
+            --namespace)            namespace="$2"; shift 2 ;;
+            --allow-non-fabric-ip)  allow_non_fabric=1; shift ;;
+            --dry-run)              DRY_RUN=1; shift ;;
             *) die "unknown option: $1" 1 ;;
         esac
     done
@@ -186,7 +191,7 @@ subcmd_connect() {
     [[ -n "$target_ip" ]] || die "--target-ip required" 1
     [[ -n "$nqn" ]]       || die "--nqn required" 1
 
-    require_fabric_plane_ip "$target_ip"
+    require_fabric_plane_ip "$target_ip" "$allow_non_fabric"
     ensure_root_or_sudo
     ensure_nvme_prereqs
 

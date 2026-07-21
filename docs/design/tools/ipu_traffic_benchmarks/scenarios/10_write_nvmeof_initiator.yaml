@@ -62,32 +62,63 @@ prerequisites:
     - 192.168.200 RoCEv2, MTU >= 4096 verified end-to-end (see LMCache-awi)
 
 # =============================================================================
-# COMMAND (placeholder — no runner exists yet; see LMCache-msm.3)
+# COMMAND (placeholder — nvmeof_bench_runner.py is not yet implemented;
+# see LMCache-msm.3. The provision/attach/disconnect calls below use the
+# current interfaces of scripts/nvmeof_target_provision.sh and
+# scripts/nvmeof_initiator_attach.sh so that when the runner lands, the
+# glue is already correct.)
 # =============================================================================
 tool: nvmeof_bench_runner   # scripts/nvmeof_bench_runner.py — greenfield
 command: |
-  # Provision + attach + benchmark, then always disconnect on exit.
-  # NOTE: this runner is not yet implemented. Filed as LMCache-msm.3.
-  ./scripts/nvmeof_target_provision.sh --nqn ${target_nqn} --namespace ${namespace}
-  ./scripts/nvmeof_initiator_attach.sh --target-ip ${target_ip} --nqn ${target_nqn}
+  # Target side (bmg1): create the subsystem, backed by the pre-nominated
+  # namespace device, listening on the 192.168.200 fabric with an explicit
+  # host-NQN ACL. No --allow-any-host, no --allow-non-fabric-ip.
+  ssh ${target_host} "cd ${remote_repo} && \
+    ./scripts/nvmeof_target_provision.sh setup \
+      --nqn ${target_nqn} \
+      --namespace-device ${namespace_device} \
+      --listen-ip ${target_ip} \
+      --host-nqn ${host_nqn}"
+
+  # Initiator side: attach, capture the stable /dev/disk/by-id path.
+  BY_ID=$(./scripts/nvmeof_initiator_attach.sh connect \
+    --target-ip ${target_ip} \
+    --nqn ${target_nqn} \
+    --host-nqn ${host_nqn} | tail -1)
+
+  # Benchmark. --device gets the stable by-id path from `connect`.
   python scripts/nvmeof_bench_runner.py \
-    --device /dev/disk/by-id/nvme-${eui} \
+    --device "${BY_ID}" \
     --page-size ${page_size} \
     --iterations ${iters} \
     --queue-depth ${queue_depth} \
     --commit-protocol ${commit_protocol} \
     --verify-recovery
-  ./scripts/nvmeof_initiator_attach.sh --detach
+
+  # Teardown -- always disconnect the initiator; target teardown is caller-driven.
+  ./scripts/nvmeof_initiator_attach.sh disconnect --nqn ${target_nqn}
+  ssh ${target_host} "cd ${remote_repo} && \
+    ./scripts/nvmeof_target_provision.sh teardown \
+      --nqn ${target_nqn} --listen-ip ${target_ip}"
 
 # =============================================================================
 # WIRE MODEL (per page, best case, single initiator)
+#
+# Direction is measured from the INITIATOR's point of view:
+#   tx = bytes leaving the initiator NIC
+#   rx = bytes arriving at the initiator NIC
+#
+# For an NVMe Write flow, the *initiator* posts commands, and the *target*
+# posts an RDMA Read against the initiator's registered data buffer to
+# pull the payload -- so the payload data phase is INITIATOR-TX (bytes
+# leave the initiator), not INITIATOR-RX. (Finding #5.)
 # =============================================================================
 wire_model:
   per_page:
-    - {phase: "wal_intent_write", dir: "tx", bytes: 128, note: "durable intent record (key, LBA, D)"}
-    - {phase: "wal_intent_flush", dir: "rx", bytes: 16,  note: "NVMe FLUSH completion"}
-    - {phase: "payload_nvme_cmd", dir: "tx", bytes: 72,  note: "NVMe Write command capsule (FUA)"}
-    - {phase: "payload_rdma_read", dir: "rx", bytes: "${model.page_size_bytes}", note: "target pulls payload via RDMA Read"}
+    - {phase: "wal_intent_write",  dir: "tx", bytes: 128, note: "durable intent record (key, LBA, D)"}
+    - {phase: "wal_intent_flush",  dir: "rx", bytes: 16,  note: "NVMe FLUSH completion"}
+    - {phase: "payload_nvme_cmd",  dir: "tx", bytes: 72,  note: "NVMe Write command capsule (FUA)"}
+    - {phase: "payload_rdma_read", dir: "tx", bytes: "${model.page_size_bytes}", note: "target pulls payload via RDMA Read; bytes LEAVE the initiator"}
     - {phase: "payload_cqe",       dir: "rx", bytes: 16,  note: "durable NVMe completion"}
     - {phase: "checksum_write",    dir: "tx", bytes: 64,  note: "BLAKE3 record with FUA"}
     - {phase: "checksum_cqe",      dir: "rx", bytes: 16,  note: "durable NVMe completion"}
@@ -108,10 +139,12 @@ parameters:
   warmup: 10
   queue_depth: 16              # NVMe SQ depth on the initiator side
   commit_protocol: wal         # or "cow_generation" — pick one; must be defined
-  target_nqn: "nqn.2026-07.io.lmcache.alt:${target_hostname}"
-  namespace: 1
-  target_ip: "192.168.200.4"
-  eui: "<namespace WWN, filled in by attach script>"
+  target_host: bmg1            # SSH alias for the nvmet-rdma target
+  remote_repo: "~/tsg/LMCache" # LMCache checkout on the target host
+  target_nqn: "nqn.2026-07.io.lmcache.alt:bmg1"
+  target_ip: "192.168.200.4"   # 192.168.200 fabric IP; NEVER 192.168.100.x
+  host_nqn: "nqn.2026-07.io.lmcache.alt:bmg0"  # initiator NQN; used as ACL
+  namespace_device: "<opt-in via env / operator; refuses mounted / partitioned devices>"
 
 # =============================================================================
 # METRICS

@@ -120,6 +120,8 @@ def test_setup_refuses_management_plane_ip(mgmt_ip):
         "--nqn", "nqn.2026-07.io.lmcache.alt:bmg1",
         "--namespace-device", "/dev/nvme6n1",
         "--listen-ip", mgmt_ip,
+        # Otherwise-valid args: the mgmt-plane guardrail must still refuse.
+        "--host-nqn", "nqn.2026-07.io.lmcache.alt:bmg0",
     )
     assert result.returncode == 3, (
         f"management-plane guardrail must exit 3 for {mgmt_ip}, "
@@ -130,13 +132,30 @@ def test_setup_refuses_management_plane_ip(mgmt_ip):
     assert "DRY-RUN:" not in result.stdout
 
 
-def test_setup_off_fabric_ip_warns_but_proceeds():
-    """An IP outside both 192.168.100 and 192.168.200 warns; setup continues."""
+@pytest.mark.parametrize("off_fabric_ip", ["10.0.0.5", "127.0.0.1", "1.2.3.4"])
+def test_setup_refuses_off_fabric_ip_by_default(off_fabric_ip):
+    """Off-fabric IPs are fail-closed (finding #2); only opt-in unlocks them."""
+    result = _run(
+        "setup", "--dry-run",
+        "--nqn", "nqn.2026-07.io.lmcache.alt:bmg1",
+        "--namespace-device", "/dev/nvme6n1",
+        "--listen-ip", off_fabric_ip,
+        "--host-nqn", "nqn.2026-07.io.lmcache.alt:bmg0",
+    )
+    assert result.returncode == 3
+    assert "non-fabric" in result.stderr.lower()
+    assert "DRY-RUN:" not in result.stdout
+
+
+def test_setup_off_fabric_ip_allowed_with_explicit_flag():
+    """--allow-non-fabric-ip permits off-fabric IPs but still warns."""
     result = _run(
         "setup", "--dry-run",
         "--nqn", "nqn.2026-07.io.lmcache.alt:bmg1",
         "--namespace-device", "/dev/nvme6n1",
         "--listen-ip", "10.0.0.5",
+        "--host-nqn", "nqn.2026-07.io.lmcache.alt:bmg0",
+        "--allow-non-fabric-ip",
     )
     assert result.returncode == 0
     assert "WARNING" in result.stderr
@@ -199,15 +218,29 @@ def test_setup_with_host_nqn_disallows_open_access(setup_dry_run):
     assert "allowed_hosts/nqn.2026-07.io.lmcache.alt:bmg0" in stdout
 
 
-def test_setup_without_host_nqn_falls_back_to_open_access():
+def test_setup_without_host_nqn_and_without_allow_any_host_is_refused():
+    """Finding #2: open access must be an explicit opt-in, not the default."""
     result = _run(
         "setup", "--dry-run",
         "--nqn", "nqn.2026-07.io.lmcache.alt:bmg1",
         "--namespace-device", "/dev/nvme6n1",
         "--listen-ip", "192.168.200.4",
     )
+    assert result.returncode == 1
+    assert "--host-nqn" in result.stderr
+    assert "--allow-any-host" in result.stderr
+
+
+def test_setup_allow_any_host_enables_open_access():
+    """--allow-any-host is the explicit opt-in for lab use with no ACLs."""
+    result = _run(
+        "setup", "--dry-run",
+        "--nqn", "nqn.2026-07.io.lmcache.alt:bmg1",
+        "--namespace-device", "/dev/nvme6n1",
+        "--listen-ip", "192.168.200.4",
+        "--allow-any-host",
+    )
     assert result.returncode == 0
-    assert "echo 1" in result.stdout
     assert "attr_allow_any_host" in result.stdout
     # No allowed_hosts symlink when the caller supplies no --host-nqn.
     assert "allowed_hosts/" not in result.stdout
@@ -233,6 +266,7 @@ def test_setup_defaults_listen_port_to_4420():
         "--nqn", "nqn.2026-07.io.lmcache.alt:bmg1",
         "--namespace-device", "/dev/nvme6n1",
         "--listen-ip", "192.168.200.4",
+        "--host-nqn", "nqn.2026-07.io.lmcache.alt:bmg0",
     )
     assert result.returncode == 0
     assert "echo 4420" in result.stdout
@@ -240,11 +274,41 @@ def test_setup_defaults_listen_port_to_4420():
 
 
 def test_setup_links_port_to_subsystem(setup_dry_run):
-    """Symlink from ports/1/subsystems/<nqn> to subsystems/<nqn>."""
+    """Symlink from ports/<index>/subsystems/<nqn> to subsystems/<nqn>."""
     stdout = setup_dry_run.stdout
+    # Port index defaults to 1 in dry-run since configfs is not present.
     assert (
-        "ports/1/subsystems/nqn.2026-07.io.lmcache.alt:bmg1" in stdout
+        "subsystems/nqn.2026-07.io.lmcache.alt:bmg1" in stdout
     )
+    # Verify a numeric port index is present in the ports path.
+    import re
+    assert re.search(r"ports/\d+/subsystems/", stdout), stdout
+
+
+def test_setup_rejects_non_numeric_port_index():
+    result = _run(
+        "setup", "--dry-run",
+        "--nqn", "nqn.2026-07.io.lmcache.alt:bmg1",
+        "--namespace-device", "/dev/nvme6n1",
+        "--listen-ip", "192.168.200.4",
+        "--host-nqn", "nqn.2026-07.io.lmcache.alt:bmg0",
+        "--listen-port-index", "abc",
+    )
+    assert result.returncode == 1
+    assert "must be numeric" in result.stderr
+
+
+def test_setup_accepts_explicit_port_index():
+    result = _run(
+        "setup", "--dry-run",
+        "--nqn", "nqn.2026-07.io.lmcache.alt:bmg1",
+        "--namespace-device", "/dev/nvme6n1",
+        "--listen-ip", "192.168.200.4",
+        "--host-nqn", "nqn.2026-07.io.lmcache.alt:bmg0",
+        "--listen-port-index", "7",
+    )
+    assert result.returncode == 0
+    assert "ports/7/subsystems/" in result.stdout
 
 
 # ---------------------------------------------------------------------------
@@ -297,12 +361,16 @@ def test_status_reports_absent_for_missing_nqn():
 # ---------------------------------------------------------------------------
 
 _HW_MARKER_ENV = "LMCACHE_NVMEOF_HW_TEST"
+_HW_NAMESPACE_ENV = "LMCACHE_NVMEOF_HW_NAMESPACE_DEVICE"
 _HW_NQN = "nqn.2026-07.io.lmcache.alt:bmg1-integration-test"
 _HW_LISTEN_IP = "192.168.200.4"
 _HW_TARGET_HOST = "bmg1"
 _HW_INITIATOR_HOST = "bmg0"
 _HW_HOST_NQN = "nqn.2026-07.io.lmcache.alt:bmg0-integration-test"
-_HW_NAMESPACE_DEVICE = "/dev/nvme6n1"
+# Finding #1: the exported namespace device is opt-in via env var so that
+# no test can silently clobber /dev/nvme4n1p2 (mounted for FSConnector) or
+# any other device that the operator did not explicitly nominate.
+_HW_NAMESPACE_DEVICE_DEFAULT = ""
 _HW_REMOTE_REPO = "~/tsg/LMCache"
 
 
@@ -316,6 +384,8 @@ def _ssh_run(host: str, cmd: str, check: bool = True) -> subprocess.CompletedPro
 
 def _hw_available() -> bool:
     if os.environ.get(_HW_MARKER_ENV) != "1":
+        return False
+    if not os.environ.get(_HW_NAMESPACE_ENV):
         return False
     # Both SSH aliases must resolve to a working shell.
     for host in (_HW_TARGET_HOST, _HW_INITIATOR_HOST):
@@ -351,8 +421,9 @@ def hw_cleanup():
 @pytest.mark.skipif(
     not _hw_available(),
     reason=(
-        f"hardware integration requires {_HW_MARKER_ENV}=1 and working SSH "
-        f"aliases {_HW_INITIATOR_HOST}/{_HW_TARGET_HOST}"
+        f"hardware integration requires {_HW_MARKER_ENV}=1, "
+        f"{_HW_NAMESPACE_ENV} pointing at a whole namespace to export, "
+        f"and working SSH aliases {_HW_INITIATOR_HOST}/{_HW_TARGET_HOST}"
     ),
 )
 def test_hw_attach_write_detach_reattach_cycle(hw_cleanup):
@@ -360,14 +431,17 @@ def test_hw_attach_write_detach_reattach_cycle(hw_cleanup):
 
     Verifies the acceptance criterion for LMCache-msm.1 -- a fresh cycle
     completes with a stable /dev/disk/by-id path and leaves no residue on
-    either host. Uses /dev/nvme6n1 on bmg1 as the exported namespace.
+    either host. The exported namespace comes from
+    LMCACHE_NVMEOF_HW_NAMESPACE_DEVICE so no test can silently clobber
+    an FSConnector-owned device.
     """
+    ns_device = os.environ[_HW_NAMESPACE_ENV]
     # 1. Provision the subsystem on bmg1.
     provision = _ssh_run(
         _HW_TARGET_HOST,
         f"cd {_HW_REMOTE_REPO} && ./scripts/nvmeof_target_provision.sh setup "
         f"--nqn {_HW_NQN} "
-        f"--namespace-device {_HW_NAMESPACE_DEVICE} "
+        f"--namespace-device {ns_device} "
         f"--listen-ip {_HW_LISTEN_IP} "
         f"--host-nqn {_HW_HOST_NQN}",
     )

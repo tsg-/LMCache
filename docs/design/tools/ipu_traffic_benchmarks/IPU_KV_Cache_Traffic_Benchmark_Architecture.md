@@ -392,7 +392,7 @@ Same as Scenario 3 but served over NVMe/TCP. Measures additional protocol overhe
 ## Scenario 5: Write Path -- Storage-Owned Raw RDMA Pull
 
 **What it validates:** The core architectural property -- target controls write
-admission. Two variants benchmarked:
+admission -- measured via a single raw-RDMA-pull variant:
 
 **Variant A: Raw RDMA pull**
 

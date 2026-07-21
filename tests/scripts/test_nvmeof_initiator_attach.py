@@ -95,14 +95,30 @@ def test_connect_refuses_management_plane_ip(mgmt_ip):
     assert "nvme connect" not in result.stdout
 
 
-def test_connect_off_fabric_ip_warns_but_proceeds():
+@pytest.mark.parametrize("off_fabric_ip", ["10.0.0.5", "127.0.0.1", "1.2.3.4"])
+def test_connect_refuses_off_fabric_ip_by_default(off_fabric_ip):
+    """Finding #2: off-fabric IPs must be fail-closed on the initiator too."""
+    result = _run(
+        "connect", "--dry-run",
+        "--target-ip", off_fabric_ip,
+        "--nqn", "nqn.2026-07.io.lmcache.alt:bmg1",
+    )
+    assert result.returncode == 3
+    assert "non-fabric" in result.stderr.lower()
+    assert "nvme connect" not in result.stdout
+
+
+def test_connect_off_fabric_ip_allowed_with_explicit_flag():
+    """--allow-non-fabric-ip permits off-fabric targets but still warns."""
     result = _run(
         "connect", "--dry-run",
         "--target-ip", "10.0.0.5",
         "--nqn", "nqn.2026-07.io.lmcache.alt:bmg1",
+        "--allow-non-fabric-ip",
     )
     assert result.returncode == 0
     assert "WARNING" in result.stderr
+    assert "nvme connect" in result.stdout
 
 
 # ---------------------------------------------------------------------------
