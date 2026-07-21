@@ -13,18 +13,18 @@ Usage::
     # 128 KiB payload, qd=1, RDMA READ, storage-owned pull
     python scripts/verbs_bench_runner.py \\
         --bytes-per-iter 131072 --iterations 128 --qd 1 \\
-        --src-numa-node 0 --dst-numa-node 0
+        --src-numa-node 1 --dst-numa-node 1
 
     # M1 canonical sweep
     python scripts/verbs_bench_runner.py \\
         --bytes-per-iter 73728 147456 131072 262144 --iterations 256 \\
-        --src-numa-node 0 --dst-numa-node 0
+        --src-numa-node 1 --dst-numa-node 1
 
 Topology::
 
-    bmg0 (source)  --  192.168.200.3  --  mlx5_1 (RoCEv2, GID 3)
-    bmg1 (storage) --  192.168.200.4  --  mlx5_1 (RoCEv2, GID 3)
-    Cross-wire: bmg0:mlx5_1 ↔ bmg1:mlx5_1
+    bmg0 (source)  --  192.168.200.3  --  mlx5_1 (RoCEv2, GID 4)
+    bmg1 (storage) --  192.168.200.4  --  rocep153s0f0 (RoCEv2, GID 5)
+    Cross-wire: bmg0:mlx5_1 ↔ bmg1:rocep153s0f0
 
 SSH aliases ``bmg0`` / ``bmg1`` must resolve without a password.
 """
@@ -65,12 +65,13 @@ BMG1_IP = "192.168.200.4"
 
 BOOTSTRAP_PORT = 9600
 BMG0_RDMA_DEVICE = "mlx5_1"
-BMG1_RDMA_DEVICE = "rocep153s0f1"
+BMG1_RDMA_DEVICE = "rocep153s0f0"
 RDMA_PORT = 1
-GID_INDEX = 3
+BMG0_GID_INDEX = 4
+BMG1_GID_INDEX = 5
 
 BMG0_ETHTOOL_IFACE = "ens1f1np1"
-BMG1_ETHTOOL_IFACE = "ens1f1np1"
+BMG1_ETHTOOL_IFACE = "ens1f0np0"
 
 _MIN_MEMLOCK_BYTES = 8 * 1024**3
 
@@ -164,6 +165,7 @@ def create_manifest(
     label: str,
     role: str,
     nic: str,
+    gid_index: int,
     numa_node: int,
     total_bytes: int,
 ) -> str:
@@ -179,7 +181,7 @@ def create_manifest(
         f"{VENV}/python scripts/bench_manifest.py "
         f"--run-label {shlex.quote(label)} --role {shlex.quote(role)} "
         f"--numa-node {numa_node} --nic {shlex.quote(nic)} "
-        f"--gid-index {GID_INDEX} "
+        f"--gid-index {gid_index} "
         f"--min-memlock-bytes {_MIN_MEMLOCK_BYTES} "
         f"--alloc-region verbs_buffer:{total_bytes} "
         f"--output {shlex.quote(output)}"
@@ -214,6 +216,7 @@ def _verbs_cmd(
     role: str,
     direction: str,
     device: str,
+    gid_index: int,
     numa_node: int,
     iterations: int,
     bytes_per_iter: int,
@@ -227,7 +230,7 @@ def _verbs_cmd(
         f"{VENV}/python scripts/bench_verbs.py "
         f"--role {shlex.quote(role)} --direction {shlex.quote(direction)} "
         f"--device {shlex.quote(device)} --port {RDMA_PORT} "
-        f"--gid-index {GID_INDEX} "
+        f"--gid-index {gid_index} "
         f"--iterations {iterations} --bytes-per-iter {bytes_per_iter} --qd {qd} "
         f"--nonce {shlex.quote(nonce)} {bootstrap_flag} "
         f"2>&1"
@@ -338,6 +341,7 @@ def run_one_size(
         role="storage",
         direction=direction,
         device=BMG1_RDMA_DEVICE,
+        gid_index=BMG1_GID_INDEX,
         numa_node=dst_numa_node,
         iterations=iterations,
         bytes_per_iter=bytes_per_iter,
@@ -349,6 +353,7 @@ def run_one_size(
         role="source",
         direction=direction,
         device=BMG0_RDMA_DEVICE,
+        gid_index=BMG0_GID_INDEX,
         numa_node=src_numa_node,
         iterations=iterations,
         bytes_per_iter=bytes_per_iter,
@@ -633,6 +638,7 @@ def run_bench(args: argparse.Namespace) -> BenchRun:
         run_label,
         "source",
         BMG0_RDMA_DEVICE,
+        BMG0_GID_INDEX,
         args.src_numa_node,
         total_bytes,
     )
@@ -641,6 +647,7 @@ def run_bench(args: argparse.Namespace) -> BenchRun:
         run_label,
         "storage",
         BMG1_RDMA_DEVICE,
+        BMG1_GID_INDEX,
         args.dst_numa_node,
         total_bytes,
     )
