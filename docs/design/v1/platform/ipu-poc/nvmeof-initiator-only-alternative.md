@@ -108,6 +108,33 @@ L2 before completing the write) is preserved conceptually. What changes:
 - Wear-leveling and SSD-internal GC remain the drive's / target's
   concern and are invisible to LMCache, as they are today.
 
+#### Storage-node DRAM is not an LMCache tier in this design
+
+In the storage-owned architecture, the target-side LMCache agent manages
+a large registered DRAM pool as **L1**; that DRAM is a first-class LMCache
+tier with hash-indexed pages, admission, and eviction.
+
+In this alternative there is **no** LMCache agent on the storage node,
+therefore no code path to allocate, index, admit, or evict pages from
+storage-node DRAM. What lives there is opaque to LMCache:
+
+- The `nvmet-rdma` target driver's data buffers used to stage RDMA
+  Read/Write payloads while an NVMe command is in flight.
+- The kernel block layer / page cache, if the target exposes a
+  filesystem-backed namespace (not applicable for raw namespaces).
+- The SSD's own DMA staging and internal write buffer.
+
+None of that is addressable, sizeable, or evictable by LMCache. Trying
+to treat storage-node DRAM as a tier here would require adding an agent
+back on the storage side — which is exactly the design point this
+alternative removes. The initiator sees only two LMCache tiers: L1
+(initiator DRAM/HBM) and L2 (remote NVMe namespace over NVMe-oF/RDMA,
+addressed via LBAs).
+
+Implication: capacity planning on the storage node is about payload
+staging headroom for `nvmet-rdma`, not about cache footprint. That is a
+different sizing exercise from the storage-owned track.
+
 ### 5. Cache-level lease / QUEUE / CANCEL semantics are gone
 
 Transport-level flow control does not disappear: NVMe-oF SQ/CQ

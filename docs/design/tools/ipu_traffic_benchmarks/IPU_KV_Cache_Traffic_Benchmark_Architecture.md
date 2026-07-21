@@ -409,19 +409,26 @@ Initiator                    Target CPU              Target IPU
     |                           |-- Index page          |
 ```
 
-**Variant B: NVMe-oF pull (command capsule then RDMA Read)**
+**Variant B: NVMe-oF wire framing — reference only, not a variant of the pull model**
 
-Same pull semantics, wrapped in NVMe-oF command/completion exchange.
-Adds ~88 bytes overhead + command parsing time.
+An NVMe-oF write command capsule + RDMA Read is not the storage-owned pull
+model with different framing. The storage-owned pull requires a target-side
+LMCache agent to own semantic admission, MR leases, and BLAKE3 verification.
+A stock NVMe-oF target exposes block namespaces and has no per-key or
+per-tenant admission semantics. Layering an LMCache agent inside SPDK to
+recover those semantics is possible but is a different architecture, not a
+variant of scenario 5.
 
-**Pass criteria:**
+The initiator-owned + remote-NVMe-oF-L2 alternative (no target-side LMCache
+agent, cache metadata authority on the initiator, WAL/COW durability) is
+tracked separately in
+`docs/design/v1/platform/ipu-poc/nvmeof-initiator-only-alternative.md` and
+measured in scenario 10+. Its numbers are not comparable to Variant A.
+
+**Pass criteria (Variant A only):**
 
 - Allocation latency (intent to RDMA Read posted) <= 10 us
 - Pull throughput >= 8 GB/s (writes are 1/6 of bandwidth)
-- Variant B overhead vs Variant A <= 15 us
-
-**Open question:** Which variant does Pat's team implement? Benchmark both;
-the overhead delta answers whether NVMe-oF operational benefits justify its cost.
 
 ## Scenario 6: Write Path -- NVMe/TCP (R2T)
 

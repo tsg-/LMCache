@@ -142,36 +142,23 @@ sequenceDiagram
     Note over CPU,IPU: Key: target chose WHEN to pull (flow control)<br/>and WHERE to store (buffer management)<br/>Initiator had no say in timing
 ```
 
-## Scenario 5B: Write — NVMe-oF Pull Model
+## Scenario 5B: DEPRECATED — NVMe-oF is NOT a wrapper for the storage-owned pull
 
-```mermaid
-sequenceDiagram
-    participant I as Initiator
-    participant N as 400G Network
-    participant IPU as Target IPU
-    participant DRAM as Target DRAM<br/>(LMCache)
-    participant SPDK as Target SPDK<br/>(NVMe-oF target)
+The prior "Scenario 5B" diagram claimed NVMe-oF preserves the same pull
+semantics as 5A with extra framing overhead. That is incorrect: a stock
+NVMe-oF target has no cache-level admission, MR leases, or per-key
+semantics — those live on a target-side LMCache agent, which does not exist
+in an NVMe-oF-only deployment.
 
-    Note over I: NVMe Write command (data NOT inline)
-    I->>N: NVMe Write Cmd Capsule (72B, control only)
-    N->>SPDK: Command: "write 256KB"
+The initiator-owned + remote-NVMe-oF-L2 alternative is a **different
+architecture** with its own diagram, its own metrics, and its own pass
+criteria. See:
 
-    Note over SPDK: SPDK decides when and where:
-    SPDK->>DRAM: LMCache allocate buffer at addr Y
-    Note over SPDK: Post RDMA Read to pull data
-    SPDK->>IPU: RDMA Read (src=initiator:X, dst=Y, len=256KB)
+- `docs/design/v1/platform/ipu-poc/nvmeof-initiator-only-alternative.md`
+- Scenario 10 (initiator-owned NVMe-oF write path) in `scenarios/10_write_nvmeof_initiator.yaml`
 
-    IPU->>N: RDMA Read to initiator (64B)
-    I-->>N: RDMA Read Response (256KB)
-    N->>IPU: Data
-    IPU->>DRAM: DMA Write to addr Y
-
-    SPDK->>DRAM: Index page (LMCache)
-    SPDK->>N: NVMe CQE (16B, completion)
-    N->>I: Write complete
-
-    Note over SPDK,IPU: Same pull semantics as 5A<br/>Extra overhead: NVMe cmd parse + CQE = ~88B + processing<br/>Benefit: standard NVMe-oF storage interface
-```
+Its wire diagram is intentionally not placed here alongside 5A to avoid
+implying they are interchangeable variants.
 
 ## Scenario 6: Write — NVMe/TCP Pull (R2T)
 

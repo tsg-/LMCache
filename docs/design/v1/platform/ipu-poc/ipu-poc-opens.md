@@ -177,24 +177,42 @@ July 2026
 ---
 <!-- _footer: "IPU KV Cache PoC" -->
 
-# Confirm with Nima
+# Scope questions (superseded 2026-07-21)
 
-- Is NVMe-on-initiator a hard requirement, or open to direct RDMA?
-- Is Phase 1 scope = bandwidth/offload proof over NVMe-oF?
-- Or do they want to see the full cache serving model (dedup, admission)?
+The following questions were raised early in scoping and have since been
+answered by the two-track split. Retained here as historical context.
+
+- Is NVMe-on-initiator a hard requirement, or open to direct RDMA? → Both
+  tracks are now measured independently. See
+  [nvmeof-initiator-only-alternative.md](nvmeof-initiator-only-alternative.md)
+  for the initiator-only + remote NVMe-oF path.
+- Is Phase 1 scope = bandwidth/offload proof over NVMe-oF? → No.
+  Phase 1 = storage-owned RDMA baselines (M1 verbs, done). The
+  NVMe-oF alternative is a parallel track with its own durability +
+  recovery gate before any headline number is claimed.
+- Or do they want to see the full cache serving model (dedup, admission)? →
+  Full cache serving lives on the storage-owned track (M2+).
 
 ---
 <!-- _footer: "IPU KV Cache PoC" -->
 
-# Architecture A vs B
+# Architecture A vs B (2026-07-21 update)
 
-| | A: NVMe-oF raw block | B: RDMA + LMCache server |
+| | A: Initiator-owned + remote NVMe-oF L2 | B: Storage-owned RDMA + LMCache server (primary) |
 |---|---|---|
-| Storage role | Passive block pool | Smart cache (hash, admission, eviction) |
-| Initiator role | Fat (all intelligence) | Thin (expose MR, request by hash) |
-| Code readiness | Works today (raw_block, io_uring_cmd) | Needs new RDMA transport |
-| Multi-initiator dedup | No (each manages own LBA space) | Yes (global hash index on server) |
-| NVMe framing | Yes (command capsules) | No (raw RDMA verbs) |
+| Storage role | Passive NVMe-oF namespace | Smart cache (hash, admission, eviction) |
+| Initiator role | Owns cache metadata + WAL/COW durability | Thin (expose MR, request by hash) |
+| Code readiness | Raw-block I/O exists; NVMe-oF target provisioning, initiator attach/reconnect, atomic durable commits, and crash recovery are all **unbuilt** | M1 verbs baseline done; M2 admission gating in progress |
+| Multi-initiator dedup | Requires shared allocator + mapping authority (deferred) | Yes (global hash index on server) |
+| NVMe framing | Yes (command capsules + nvmet-rdma) | No (raw RDMA verbs) |
+| Cache-level admission / lease / BLAKE3-on-commit | Gone — no target agent | Present |
+| Track status | Alt track (`ipu-poc-nvmeof-alt` branch, `LMCache-msm` epic) | Primary track (`ipu-poc` branch) |
+
+**Do not read Architecture A as "works today."** The `raw_block` L2 adapter
+publishes its in-memory index immediately after writing header + payload;
+durable metadata is a periodic mirrored checkpoint with no fsync/FLUSH/FUA
+ordering against payload writes. That path cannot claim durable cache
+correctness across a crash without new WAL/COW machinery.
 
 ---
 <!-- _footer: "IPU KV Cache PoC" -->

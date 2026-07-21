@@ -4,6 +4,18 @@
 **Hardware:** bmg0 / bmg1, CX7 RoCEv2, 192.168.200 fabric (200Gbps)
 **Status:** CX7 storage-owned pull/serve benchmark — first-order deliverable.
 
+## Scope
+
+This plan measures the **storage-owned pull architecture only** (LMCache
+runs on both compute and storage nodes; storage node owns admission,
+BLAKE3 verification on commit, MR leases, and L1/L2 eviction).
+
+The **initiator-owned + remote-NVMe-oF-L2 alternative** (no target-side
+LMCache agent) is a different architecture and is measured on a separate
+track. Its plan lives with the alt-branch scenarios (10+); its numbers
+are not interchangeable with the M1/M2 verbs baselines here.
+See [../ipu-poc/nvmeof-initiator-only-alternative.md](../ipu-poc/nvmeof-initiator-only-alternative.md).
+
 ## Scope note (2026-07-14)
 
 The target architecture is a Xeon **storage node** with RDMA NIC, L1 DRAM,
@@ -76,9 +88,12 @@ acceptance testing; not a source of headline CX7 / IPU / Falcon numbers.
 | Node | Role | NIC | Interface | IP |
 |------|------|-----|-----------|-----|
 | bmg0 | Source | CX7 mlx5_1 | ens1f1np1 | 192.168.200.3 |
-| bmg1 | Puller / storage | CX7 mlx5_1 | ens1f1np1 | 192.168.200.4 |
+| bmg1 | Puller / storage | CX7 rocep153s0f0 | ens1f0np0 | 192.168.200.4 |
 
-Cross-wire: bmg0:mlx5_1 ↔ bmg1:mlx5_1, RoCEv2 GID index 3.
+Cross-wire (post-2026-07-21 fabric repair):
+bmg0:mlx5_1 ↔ bmg1:rocep153s0f0, RoCEv2. GID indices are per-host —
+bmg0 uses GID 4 (`mlx5_1` -> 192.168.200.3), bmg1 uses GID 5
+(`rocep153s0f0` -> 192.168.200.4).
 Effective bandwidth ceiling: ~23–24 GB/s (200Gbps link, RoCEv2).
 
 NVMe devices on bmg1 (SOLIDIGM SB5PH27X019T Gen5, ~12 GB/s write / ~14 GB/s read):
@@ -94,9 +109,12 @@ NVMe devices on bmg1 (SOLIDIGM SB5PH27X019T Gen5, ~12 GB/s write / ~14 GB/s read
 
 ```bash
 export UCX_TLS=rc,sm
+# NOTE: UCX_NET_DEVICES / LMCACHE_RDMA_GID_INDEX are per-host post-repair.
+# bmg0: UCX_NET_DEVICES=mlx5_1:1        LMCACHE_RDMA_GID_INDEX=4
+# bmg1: UCX_NET_DEVICES=rocep153s0f0:1  LMCACHE_RDMA_GID_INDEX=5
 export UCX_NET_DEVICES=mlx5_1:1
 export UCX_MEMTYPE_CACHE=n
-export LMCACHE_RDMA_GID_INDEX=3
+export LMCACHE_RDMA_GID_INDEX=4
 export NIXL_NET_BACKEND=UCX
 export NIXL_PLUGIN_DIR=$HOME/install/nixl/lib/x86_64-linux-gnu/plugins
 export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu/nvidia:$HOME/install/ucx/lib:$HOME/install/nixl/lib

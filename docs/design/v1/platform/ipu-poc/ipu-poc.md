@@ -3,6 +3,21 @@
 Proof-of-concept for IPU-accelerated KV cache transfer between a GPU Node
 and a KV Cache Node over MMG-400 RDMA at 400 Gb/s.
 
+## Scope boundary
+
+This document describes the **storage-owned pull architecture**: LMCache
+runs on both the compute node and the storage node, and the storage-side
+LMCache agent owns semantic admission, target-side BLAKE3 verification, MR
+leases, and the two-phase L1/L2 eviction contract.
+
+An alternative architecture in which LMCache runs **only on the compute
+(initiator) side** and the storage node exports NVMe SSDs over NVMe-oF/RDMA
+(no target-side LMCache agent) is under evaluation as a separate track. It
+is a different design, not a variant of the storage-owned pull model. See
+[nvmeof-initiator-only-alternative.md](nvmeof-initiator-only-alternative.md)
+for the impact analysis. Do not conflate its numbers or design decisions
+with those in this doc.
+
 ## Goals
 
 1. **Wire-speed proof**: Demonstrate sustained ~400 Gb/s (50 GB/s) for

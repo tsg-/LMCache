@@ -101,9 +101,16 @@ Why this matters at 400G:
 LMCache IS the admission controller. The write path and eviction policy are the
 same decision loop: receive intent → evict if needed → allocate → post RDMA Read → index.
 
-**Open question for Pat's team:** Is the pull implemented at the NVMe-oF layer
-(command capsule → RDMA Read) or raw RDMA (app control msg → RDMA Read)?
-Scenarios 5 and 6 benchmark both variants.
+**Scope note (2026-07-21):** The pull model described above requires an
+LMCache agent on the target/storage node. It cannot be layered on top of a
+plain NVMe-oF namespace, because an NVMe-oF target has no cache-level
+admission, MR leases, or per-key semantics — it exposes block namespaces
+only. Scenarios 1–9 assume the storage-owned pull architecture.
+
+The alternative architecture (initiator-owned LMCache + remote NVMe-oF L2,
+no target-side agent) is measured separately in scenario 10+ and documented
+at [../../v1/platform/ipu-poc/nvmeof-initiator-only-alternative.md](../../v1/platform/ipu-poc/nvmeof-initiator-only-alternative.md).
+Its numbers are not interchangeable with scenarios 1–9.
 
 ## Scenarios
 

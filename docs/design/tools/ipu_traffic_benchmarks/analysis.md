@@ -84,21 +84,21 @@ The write path is NOT bandwidth-limited — it's latency-sensitive:
 # Writes are cheap in bandwidth. The bottleneck is the allocation pipeline.
 ```
 
-**Pull model validation (scenario 5 variant comparison):**
+**Pull model validation (scenario 5 variant A):**
 ```
 variant_a_latency (raw RDMA):   control msg → alloc → RDMA Read → done
-variant_b_latency (NVMe-oF):    NVMe cmd → alloc → RDMA Read → CQE → done
-overhead = variant_b - variant_a
-
-IF overhead > 15 us:
-    → NVMe command parsing cost is significant
-    → Consider raw RDMA path (skip NVMe layer entirely)
-    → This answers the open question for Pat's team
-
-IF overhead < 5 us:
-    → NVMe-oF adds negligible cost
-    → Use NVMe-oF for operational benefits (standard storage semantics)
 ```
+
+Scenario 5 measures the storage-owned pull model only. The previous
+"variant B" comparison against NVMe-oF was invalid because NVMe-oF is not a
+transport-framing variant of the pull model — a stock NVMe-oF target has no
+target-side LMCache agent and therefore no cache-level admission, MR
+leases, or per-key semantics.
+
+The initiator-owned + remote-NVMe-oF-L2 alternative is a different
+architecture; its cost/benefit analysis lives with scenario 10 and is not
+directly comparable to variant A above. See
+`docs/design/v1/platform/ipu-poc/nvmeof-initiator-only-alternative.md`.
 
 **Admission control under flood (scenario 9):**
 ```

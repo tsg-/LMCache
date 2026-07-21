@@ -1,0 +1,94 @@
+# Scenario 12: NVMe-oF Reconnect Cutpoint (alt architecture)
+#
+# ARCHITECTURAL SCOPE
+#
+# Initiator-owned + remote NVMe-oF L2 alternative only. Validates that a
+# transient NVMe-oF fabric loss between the initiator and the nvmet-rdma
+# target is handled without exposing torn or stale cache entries, and
+# that reconnect returns the L2 device path in a working state.
+#
+# The storage-owned scenarios (1-9) do not encounter this failure surface
+# because there is no NVMe-oF between compute and storage there.
+
+scenario: reconnect_cutpoint_alt
+description: >
+  Inject nvme disconnect at each of the four durable-commit cutpoints and
+  during idle. Verify the initiator LMCache surfaces I/O errors (not
+  hangs), reconnects with a stable device path, replays or discards
+  in-flight commits correctly, and serves the cache consistently after
+  reconnect.
+
+architecture: initiator_owned_nvmeof_l2
+
+# =============================================================================
+# CUTPOINTS
+# =============================================================================
+cutpoints:
+  - id: r0_idle
+    description: disconnect while no commit is in flight
+    expected: reconnect with no state change; existing keys unchanged
+  - id: r1_during_wal_intent
+    description: disconnect while WAL intent write is in flight
+    expected: intent either durable or absent; no key published; no dangling LBAs
+  - id: r2_during_payload
+    description: disconnect while payload FUA write is in flight
+    expected: no key published; payload either fully durable or absent; GC candidate
+  - id: r3_during_checksum
+    description: disconnect while checksum FUA write is in flight
+    expected: no key published; checksum either durable or absent
+  - id: r4_during_map_publish
+    description: disconnect while map-publication write is in flight
+    expected: key visibility is all-or-nothing; publication succeeds fully or is retried after reconnect
+
+# =============================================================================
+# COMMAND (placeholder — greenfield; see LMCache-msm.1 and LMCache-msm.2)
+# =============================================================================
+tool: nvmeof_fault_driver
+command: |
+  # For each cutpoint: initiate write, inject nvme disconnect, wait for reconnect,
+  # verify cache state.
+  for cp in ${cutpoints}; do
+    python scripts/nvmeof_fault_driver.py \
+      --device /dev/disk/by-id/nvme-${eui} \
+      --commit-protocol ${commit_protocol} \
+      --fault reconnect \
+      --cutpoint ${cp} \
+      --ctrl-loss-tmo ${ctrl_loss_tmo} \
+      --reconnect-delay ${reconnect_delay} \
+      --num-keys ${num_keys}
+  done
+
+# =============================================================================
+# PARAMETERS
+# =============================================================================
+parameters:
+  page_size: "${model.page_size_bytes}"
+  num_keys: 50
+  commit_protocol: wal
+  ctrl_loss_tmo: 30       # seconds; tuned in nvme connect
+  reconnect_delay: 2      # seconds; retry cadence
+  eui: "<namespace WWN>"
+
+# =============================================================================
+# METRICS
+# =============================================================================
+metrics:
+  primary:
+    - reconnect_time_ms                        # nvme disconnect -> device visible again
+    - io_error_visible_before_reconnect        # boolean: adapter surfaced ENOTCONN / EIO, did not hang
+    - keys_lost_at_cutpoint
+    - keys_torn_at_cutpoint
+  correctness:
+    - no_torn_key_exposed_after_reconnect      # hard requirement
+    - device_path_stable_across_reconnect      # /dev/disk/by-id path unchanged
+    - map_consistent_after_reconnect
+
+# =============================================================================
+# PASS CRITERIA
+# =============================================================================
+pass_criteria:
+  no_torn_key_exposed_after_reconnect: "true"
+  device_path_stable_across_reconnect: "true"
+  map_consistent_after_reconnect: "true"
+  reconnect_time_ms: "<= 5000"
+  io_error_visible_before_reconnect: "true"    # do not hang; fail fast

@@ -104,6 +104,60 @@ The on-device format is intentionally unchanged by the MP adapter work.
 Recovered keys are exposed to the shared L2 eviction policy on adapter startup,
 so reclaimed slots come from global L2 eviction or explicit `delete()` calls.
 
+### Non-guarantee: this is not a durable cache-commit protocol
+
+The current model is a periodic snapshot of the in-memory index, not a
+transactional commit protocol. It does **not** provide any of:
+
+- data checksum stored with the payload
+- durable ordering between payload write and index publish (no `fsync`,
+  `fdatasync`, `FLUSH`, or FUA is issued on the write path)
+- atomic (data, checksum, key→LBA map) visibility — the three are
+  independent I/Os written to independent regions
+- a durable intent log (WAL) or copy-on-write generation flip that would
+  make map publication atomic with data persistence
+- torn-write / stale-map cleanup after a crash between payload write and
+  the next checkpoint
+
+Concretely, `RawBlockCore` publishes an entry into the in-memory index
+immediately after writing the slot header and payload
+(`lmcache/v1/storage_backend/raw_block/core.py:614` and `:1350`), and the
+only durable metadata is the periodic mirrored checkpoint at
+`lmcache/v1/storage_backend/raw_block/core.py:1627`. A crash between
+payload write and the next checkpoint can expose (a) an unrecoverable
+payload whose index entry is lost, or (b) after checkpoint restore, an
+index entry whose payload was torn or never fully landed.
+
+This is acceptable for the current storage-owned deployment where the
+target-side LMCache agent re-verifies BLAKE3 on read and the storage node
+is the durable authority. It is **not** acceptable for the initiator-owned
++ remote-NVMe-oF-L2 alternative (see
+`docs/design/v1/platform/ipu-poc/nvmeof-initiator-only-alternative.md`),
+which requires a WAL or COW-generation commit protocol before it can claim
+durable cache correctness across restart or reconnect.
+
+### Deployment modes
+
+`RawBlockCore` today assumes the device path resolves to a locally-attached
+NVMe namespace on the same host as the adapter (server-owned). A second
+deployment mode — the device path resolves to a **remote namespace**
+attached via `nvme connect -t rdma` from an `nvmet-rdma` target on a
+different host — is under evaluation on the alt track. Additional
+constraints apply in that mode:
+
+- Use `/dev/disk/by-id/nvme-...` (or namespace WWN) paths rather than
+  `/dev/nvmeXn1`, which is not stable across `nvme disconnect` /
+  `nvme connect` cycles or reboots.
+- Reconnect behavior (`ctrl-loss-tmo`, `reconnect_delay`) must be tuned so
+  the adapter surfaces disconnect as an I/O error rather than hanging
+  indefinitely.
+- `use_uring_cmd=true` (NVMe char-device passthrough via `io_uring_cmd`)
+  may not be portable to a remote namespace; validate on a specific
+  kernel / `nvme-fabrics` version before enabling.
+- The atomicity gap above is worse in this mode because the target-side
+  device page cache and the `nvmet-rdma` completion do not imply the
+  payload has reached durable media without an explicit `FLUSH` or FUA.
+
 ## Configuration
 
 The MP adapter is configured through `--l2-adapter` JSON:

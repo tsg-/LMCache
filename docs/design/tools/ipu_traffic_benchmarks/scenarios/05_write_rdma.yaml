@@ -86,17 +86,20 @@ variant_a:
     # Overhead per page: 192 bytes control + 256KB data.
 
 # =============================================================================
-# SUB-SCENARIO B: NVMe-oF Pull (NVMe Write cmd → RDMA Read for data)
+# SUB-SCENARIO B: NVMe-oF wire model (reference only — NOT a variant of the pull model)
 # =============================================================================
-# NVMe-oF layer wraps the same pull semantics:
-#   - Initiator sends NVMe Write command capsule (72B, control only, NO inline data)
-#   - Target SPDK receives command, sees "incoming write, 256K"
-#   - Target decides WHEN and WHERE:
-#     a. Allocates buffer in registered DRAM
-#     b. Posts RDMA Read to pull data from initiator's registered memory
-#   - Data arrives → target owns it → sends NVMe completion
+# NOTE 2026-07-21: NVMe-oF does NOT wrap the storage-owned pull model. The
+# storage-owned pull requires a target-side LMCache agent that owns semantic
+# admission, MR leases, and BLAKE3 verification on commit. An NVMe-oF target
+# has none of those cache-level semantics; it exposes block namespaces. Moving
+# to NVMe-oF is an architectural change, not a transport swap.
 #
-# This adds NVMe command parsing overhead but gives standard storage semantics.
+# The initiator-owned + remote-NVMe-oF-L2 alternative is tracked separately:
+#   - Doc: docs/design/v1/platform/ipu-poc/nvmeof-initiator-only-alternative.md
+#   - Scenario: docs/design/tools/ipu_traffic_benchmarks/scenarios/10_write_nvmeof_initiator.yaml
+#
+# The block below records NVMe-oF wire-level framing for cost-comparison only.
+# Do not run it as a variant of the storage-owned pull scenario.
 
 variant_b:
   name: nvme_of_pull
@@ -181,17 +184,15 @@ pass_criteria:
   variant_overhead_us: "<= 15"      # NVMe-oF adds acceptable overhead vs raw
 
 # =============================================================================
-# OPEN QUESTION FOR PAT'S TEAM
+# ARCHITECTURAL SCOPE
 # =============================================================================
 #
-# Is the pull implemented at the NVMe-oF layer (variant_b) or raw RDMA
-# (variant_a)? This determines:
-#   - Whether SPDK is in the write-admission path (adds latency, gains standard semantics)
-#   - Whether NVMe queue depth limits concurrent pulls (SQ depth = pull concurrency)
-#   - Whether the IPU needs NVMe command parsing or just RDMA Read posting
+# This scenario is the storage-owned pull model. Variant A (raw RDMA pull) is
+# the only variant runnable as part of this scenario; variant_b is retained
+# above only for wire-framing reference and MUST NOT be run as a substitute
+# for variant_a.
 #
-# If raw RDMA: LMCache directly posts RDMA Reads via NIXL/UCX. Simpler.
-# If NVMe-oF: SPDK handles command parsing, LMCache integrates with SPDK buffer pool.
-#
-# BENCHMARK BOTH. Compare variant_a vs variant_b. The overhead delta answers
-# whether NVMe-oF's operational benefits justify its latency cost.
+# The initiator-owned + remote-NVMe-oF-L2 alternative measures a fundamentally
+# different architecture (no target-side LMCache agent, cache metadata
+# authority on the initiator, WAL/COW durability, initiator-side eviction) and
+# lives in scenario 10 with its own metrics and pass criteria.

@@ -1,0 +1,90 @@
+# Scenario 11: Recovery — WAL replay / COW-generation reconstruction (alt architecture)
+#
+# ARCHITECTURAL SCOPE
+#
+# This scenario applies to the initiator-owned + remote NVMe-oF L2
+# alternative only. It validates that the initiator can reconstruct a
+# consistent key -> LBA map after a crash-cutpoint or an nvme reconnect,
+# with no target-side LMCache agent to help.
+#
+# See docs/design/v1/platform/ipu-poc/nvmeof-initiator-only-alternative.md
+# and scenario 10 (write path) for the write side of the same protocol.
+#
+# The storage-owned scenarios (1-9) do not require this scenario because
+# recovery there is anchored by the target-side LMCache agent's own state
+# (including on-target BLAKE3 verification on read).
+
+scenario: recovery_wal_replay_alt
+description: >
+  Kill the initiator LMCache process at each of the four durable-commit
+  cutpoints, restart, replay WAL (or read the active COW generation), and
+  verify that only durably-committed keys survive and no torn or stale
+  entries are exposed.
+
+architecture: initiator_owned_nvmeof_l2
+
+# =============================================================================
+# CUTPOINTS (matches the four durable-commit steps in scenario 10)
+# =============================================================================
+cutpoints:
+  - id: c1_before_wal_intent
+    description: kill after put() but before WAL intent write hits durable media
+    expected: key must not appear after restart; no LBAs reserved
+  - id: c2_after_wal_before_payload
+    description: kill after WAL intent flushed, before payload FUA write
+    expected: key must not appear; WAL intent is a GC candidate; no torn payload published
+  - id: c3_after_payload_before_checksum
+    description: kill after payload FUA completion, before checksum FUA write
+    expected: key must not appear; payload orphan is a GC candidate
+  - id: c4_after_checksum_before_map_publish
+    description: kill after checksum FUA completion, before map publication
+    expected: key must not appear; matched payload+checksum is a GC candidate
+  - id: c5_after_map_publish
+    description: kill immediately after map publication acked durable
+    expected: key MUST appear after restart with digest match on read
+
+# =============================================================================
+# COMMAND (placeholder — greenfield; see LMCache-msm.2 fault driver)
+# =============================================================================
+tool: nvmeof_fault_driver     # scripts/nvmeof_fault_driver.py — not yet implemented
+command: |
+  # For each cutpoint: run write, kill at cutpoint, restart, verify.
+  for cp in ${cutpoints}; do
+    python scripts/nvmeof_fault_driver.py \
+      --device /dev/disk/by-id/nvme-${eui} \
+      --commit-protocol ${commit_protocol} \
+      --cutpoint ${cp} \
+      --num-keys ${num_keys}
+  done
+
+# =============================================================================
+# PARAMETERS
+# =============================================================================
+parameters:
+  page_size: "${model.page_size_bytes}"
+  num_keys: 100                       # keys attempted per cutpoint
+  commit_protocol: wal
+  eui: "<namespace WWN>"
+
+# =============================================================================
+# METRICS
+# =============================================================================
+metrics:
+  primary:
+    - replay_time_ms                  # wall clock from restart to map ready
+    - keys_lost_at_cutpoint           # per cutpoint
+    - keys_torn_at_cutpoint           # committed key with bad/missing checksum
+    - orphan_lba_ranges_after_replay  # unreferenced blocks caught by GC
+  correctness:
+    - no_torn_key_exposed_after_replay    # hard requirement
+    - no_missing_checksum_survives_replay # hard requirement
+
+# =============================================================================
+# PASS CRITERIA
+# =============================================================================
+pass_criteria:
+  no_torn_key_exposed_after_replay: "true"
+  no_missing_checksum_survives_replay: "true"
+  replay_time_ms: "<= 5000"
+  # At c1..c4: keys_lost_at_cutpoint == num_keys (intent by design)
+  # At c5:    keys_lost_at_cutpoint == 0

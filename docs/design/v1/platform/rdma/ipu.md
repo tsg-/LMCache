@@ -555,6 +555,18 @@ validation confirms PCIe BAR accessibility from the IPU on both GPU and TPU
 platforms.
 
 
+## Related: Initiator-owned + Remote NVMe-oF L2 Alternative
+
+An orthogonal architectural alternative — LMCache runs only on the compute
+node, and the storage node exports NVMe SSDs over NVMe-oF/RDMA with no
+target-side LMCache agent — is documented at
+[../ipu-poc/nvmeof-initiator-only-alternative.md](../ipu-poc/nvmeof-initiator-only-alternative.md).
+That path measures a different architecture (initiator-owned cache
+metadata, WAL/COW durability, initiator-side eviction) and produces
+different metrics than the storage-owned RDMA baselines in this file. Do
+not cross-compare headline throughput numbers between the two tracks.
+
+
 ## Future Enhancement: Anjali's IPT Transport (Custom Transport)
 
 An alternative to mapping KV cache semantics onto standard RDMA verbs or

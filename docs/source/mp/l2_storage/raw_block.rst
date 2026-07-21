@@ -43,12 +43,12 @@ caller-provided load buffers during prefetch.
 
 **Notes:**
 
-- ``raw_block`` is a server-owned MP adapter. It does **not** support
-  per-TP device-path mappings in MP mode.
+- ``raw_block`` is an MP adapter that owns on-device slot allocation,
+  checkpointing, and recovery through ``RawBlockCore``. It does **not**
+  support per-TP device-path mappings in MP mode.
 - ``raw_block`` remains ``"type": "raw_block"`` for all supported engines.
-- ``raw_block`` owns on-device slot allocation, checkpointing, and recovery
-  through ``RawBlockCore``. Slot reclamation is driven by the shared/global
-  L2 eviction controller or explicit ``delete()`` calls.
+- Slot reclamation is driven by the shared/global L2 eviction controller
+  or explicit ``delete()`` calls.
 - ``slot_bytes``, ``header_bytes``, and ``meta_total_bytes`` must be multiples
   of ``block_align``.
 - If ``use_odirect`` is enabled, the server's ``--l1-align-bytes`` should be
@@ -66,6 +66,46 @@ caller-provided load buffers during prefetch.
 - ``use_uring_cmd`` requires ``io_engine="io_uring"`` to be set.
 - When ``use_uring_cmd=true``, ``use_odirect`` is ignored for NVMe namespace
   character devices.
+
+**Deployment modes:**
+
+- **Locally-attached namespace (default).** ``device_path`` points at a
+  namespace on the same host as the adapter (e.g., ``/dev/nvme0n1``,
+  ``/dev/ng0n1``). All examples below use this mode.
+- **Remote namespace over NVMe-oF/RDMA (alt track).** The host attaches a
+  remote namespace via ``nvme connect -t rdma ...`` and ``device_path``
+  resolves to that attached device. In this mode:
+
+  - Prefer a stable identifier such as ``/dev/disk/by-id/nvme-<eui>...``
+    over ``/dev/nvmeXn1``. The kernel enumerator number is not stable
+    across ``nvme disconnect`` / ``nvme connect`` cycles or reboots.
+  - Tune ``ctrl-loss-tmo`` and ``reconnect_delay`` on the ``nvme connect``
+    call so the adapter surfaces disconnect as an I/O error rather than
+    hanging indefinitely.
+  - ``use_uring_cmd=true`` (NVMe char-device passthrough via
+    ``io_uring_cmd``) may not be portable to a remote namespace served
+    by ``nvmet-rdma``. Validate against a specific kernel and
+    ``nvme-fabrics`` version before enabling; fall back to
+    ``io_engine="io_uring"`` with a block device node if unsure.
+
+**Non-guarantee — this is not a durable cache-commit protocol:**
+
+``raw_block`` publishes its in-memory index immediately after writing the
+slot header and payload, and the only durable metadata is a periodic
+mirrored checkpoint. There is no ``fsync`` / ``fdatasync`` / ``FLUSH`` /
+FUA on the write path, no data checksum stored with the payload, and no
+atomic (data, checksum, key→LBA map) publication. A crash between a
+payload write and the next checkpoint can drop an index entry or, after
+checkpoint restore, leave a stale index entry pointing at a torn or
+absent payload.
+
+That is safe for the current storage-owned deployment where the target
+LMCache agent re-verifies BLAKE3 on read. It is **not** safe for the
+initiator-owned + remote-NVMe-oF-L2 alternative, which requires a WAL or
+copy-on-write generation protocol on top of ``raw_block`` before it can
+claim durable cache correctness across restart or reconnect. See
+``docs/design/v1/distributed/l2_adapters/raw_block.md`` and
+``docs/design/v1/platform/ipu-poc/nvmeof-initiator-only-alternative.md``.
 
 **Configuration examples:**
 

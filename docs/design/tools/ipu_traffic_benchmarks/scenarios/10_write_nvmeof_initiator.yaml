@@ -1,0 +1,143 @@
+# Scenario 10: Write Path — Initiator-Owned + Remote NVMe-oF L2 (alt architecture)
+#
+# THIS IS NOT A VARIANT OF SCENARIO 5.
+#
+# Scenario 5 measures the storage-owned pull model: LMCache runs on both the
+# compute node AND the storage node; the storage-side agent owns semantic
+# admission, MR leases, and BLAKE3-on-commit verification.
+#
+# Scenario 10 measures a fundamentally different architecture: LMCache runs
+# ONLY on the compute (initiator) side. The storage node exports NVMe SSDs
+# over NVMe-oF/RDMA via nvmet-rdma. There is NO target-side LMCache agent.
+# Cache-level admission, per-key semantics, BLAKE3 verification, and
+# key -> LBA mapping all live on the initiator.
+#
+# See docs/design/v1/platform/ipu-poc/nvmeof-initiator-only-alternative.md
+# for the architectural analysis.
+#
+# What this scenario measures:
+#
+#   1. NVMe-oF/RDMA transport cost for a KV-page-sized write, end-to-end
+#      from the initiator LMCache into a durable target LBA range.
+#   2. The initiator's atomic-commit cost: WAL/COW intent write, payload
+#      write with FUA, checksum write with FUA, map publication. This is
+#      NOT free and must not be conflated with an M1 verbs number.
+#   3. Attach-time and reconnect behavior for the NVMe-oF connection --
+#      those are new failure surfaces the storage-owned track does not have.
+#
+# Non-goal: the storage-owned pull-model semantics measured by scenarios 1-9.
+# Those cannot be recovered without adding an agent back on the storage side.
+
+scenario: write_nvmeof_initiator
+description: >
+  Initiator-owned LMCache writes a KV page through a remote NVMe-oF/RDMA
+  namespace with durable-commit ordering. Alt architecture; not comparable
+  to scenario 5 numbers.
+
+architecture: initiator_owned_nvmeof_l2
+storage_topology:
+  compute_node:
+    runs_lmcache: true
+    tiers:
+      - L1: initiator DRAM/HBM (LMCache-managed)
+      - L2: remote NVMe namespace via nvme connect -t rdma (LMCache-managed)
+  storage_node:
+    runs_lmcache: false          # explicit — no target-side agent
+    exports: nvmet-rdma
+    role: passive block target
+
+# =============================================================================
+# PREREQUISITES (all captured in the alt-track script layer, not runnable yet)
+# =============================================================================
+prerequisites:
+  target_side:
+    - nvmet-rdma provisioning: NQN, listener, namespace, host ACLs
+    - queue-depth and inline-data-size configured for KV page size
+  initiator_side:
+    - nvme connect -t rdma with tuned ctrl-loss-tmo and reconnect_delay
+    - stable device path resolved via /dev/disk/by-id/nvme-<eui>
+    - LMCache configured with raw_block L2 pointing at the attached device
+    - durable-commit protocol (WAL or COW) enabled on top of raw_block
+  fabric:
+    - 192.168.200 RoCEv2, MTU >= 4096 verified end-to-end (see LMCache-awi)
+
+# =============================================================================
+# COMMAND (placeholder — no runner exists yet; see LMCache-msm.3)
+# =============================================================================
+tool: nvmeof_bench_runner   # scripts/nvmeof_bench_runner.py — greenfield
+command: |
+  # Provision + attach + benchmark, then always disconnect on exit.
+  # NOTE: this runner is not yet implemented. Filed as LMCache-msm.3.
+  ./scripts/nvmeof_target_provision.sh --nqn ${target_nqn} --namespace ${namespace}
+  ./scripts/nvmeof_initiator_attach.sh --target-ip ${target_ip} --nqn ${target_nqn}
+  python scripts/nvmeof_bench_runner.py \
+    --device /dev/disk/by-id/nvme-${eui} \
+    --page-size ${page_size} \
+    --iterations ${iters} \
+    --queue-depth ${queue_depth} \
+    --commit-protocol ${commit_protocol} \
+    --verify-recovery
+  ./scripts/nvmeof_initiator_attach.sh --detach
+
+# =============================================================================
+# WIRE MODEL (per page, best case, single initiator)
+# =============================================================================
+wire_model:
+  per_page:
+    - {phase: "wal_intent_write", dir: "tx", bytes: 128, note: "durable intent record (key, LBA, D)"}
+    - {phase: "wal_intent_flush", dir: "rx", bytes: 16,  note: "NVMe FLUSH completion"}
+    - {phase: "payload_nvme_cmd", dir: "tx", bytes: 72,  note: "NVMe Write command capsule (FUA)"}
+    - {phase: "payload_rdma_read", dir: "rx", bytes: "${model.page_size_bytes}", note: "target pulls payload via RDMA Read"}
+    - {phase: "payload_cqe",       dir: "rx", bytes: 16,  note: "durable NVMe completion"}
+    - {phase: "checksum_write",    dir: "tx", bytes: 64,  note: "BLAKE3 record with FUA"}
+    - {phase: "checksum_cqe",      dir: "rx", bytes: 16,  note: "durable NVMe completion"}
+    - {phase: "map_publish",       dir: "tx", bytes: 32,  note: "WAL commit record OR COW pointer flip"}
+    - {phase: "map_publish_cqe",   dir: "rx", bytes: 16,  note: "durable NVMe completion"}
+  overhead_vs_scenario_5a: >
+    Do not compute this delta. Scenario 5A measures cache-level admission
+    over raw RDMA verbs with a target-side LMCache agent. Scenario 10
+    measures a full durable-commit transaction against an nvmet-rdma target
+    with no target-side agent. The two measure different things.
+
+# =============================================================================
+# PARAMETERS
+# =============================================================================
+parameters:
+  page_size: "${model.page_size_bytes}"
+  iters: 100
+  warmup: 10
+  queue_depth: 16              # NVMe SQ depth on the initiator side
+  commit_protocol: wal         # or "cow_generation" — pick one; must be defined
+  target_nqn: "nqn.2026-07.io.lmcache.alt:${target_hostname}"
+  namespace: 1
+  target_ip: "192.168.200.4"
+  eui: "<namespace WWN, filled in by attach script>"
+
+# =============================================================================
+# METRICS
+# =============================================================================
+metrics:
+  primary:
+    - end_to_end_write_latency_us    # store() call -> cache-visible
+    - wal_intent_flush_us            # step 1 cost
+    - payload_write_us               # step 2 cost (FUA)
+    - checksum_write_us              # step 3 cost (FUA)
+    - map_publish_us                 # step 4 cost
+    - attach_time_ms                 # nvme connect -> device visible
+    - reconnect_time_ms              # after simulated fabric loss
+  derived:
+    - commit_overhead_us: "end_to_end - payload_write_us"
+    - fua_penalty_us: "payload_write_us - non_fua_baseline"
+  correctness:
+    - recovery_passes_after_crash_at_each_step   # crash-cutpoint tests
+    - post_reconnect_map_consistent              # attach -> replay -> serve
+
+# =============================================================================
+# PASS CRITERIA (draft — refine after first end-to-end run)
+# =============================================================================
+pass_criteria:
+  end_to_end_write_latency_us: ">= 0"      # placeholder; set after baseline
+  attach_time_ms: "<= 500"
+  reconnect_time_ms: "<= 5000"
+  recovery_passes_after_crash_at_each_step: "all"
+  post_reconnect_map_consistent: "true"

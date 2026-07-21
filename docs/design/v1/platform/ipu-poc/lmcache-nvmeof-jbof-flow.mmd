@@ -1,19 +1,22 @@
+%%{init: {"theme": "default", "sequence": {"wrap": true, "noteAlign": "left", "noteMargin": 12, "actorMargin": 80, "messageMargin": 45}}}%%
 sequenceDiagram
     participant vLLM as vLLM Engine<br/>(GPU Node)
-    participant CE as LMCache Engine
+    participant CE as LMCache Engine<br/>(initiator, alt track)
     participant SM as StorageManager
     participant L1 as LocalCPUBackend<br/>(L1 DRAM)
+    participant TX as WAL / COW map<br/>(initiator-side)
     participant RB as RawBlockL2Adapter<br/>(io_uring / O_DIRECT)
-    participant K as Kernel NVMe-oF<br/>(TCP or RDMA)
-    participant JBOF as NVMe JBOF<br/>(dumb storage)
+    participant K as Kernel NVMe-oF<br/>(nvmet-rdma)
+    participant JBOF as NVMe JBOF<br/>(remote namespace)
     participant GPU as GPU Connector<br/>(DMA to HBM)
+
+    Note over vLLM,JBOF: Initiator-owned + remote-NVMe-oF-L2 alt track.<br/>Storage node runs no LMCache agent — only nvmet-rdma exports namespaces.<br/>Semantic admission, key→LBA map, integrity metadata, and durable-commit ordering all live on the initiator.
 
     Note over vLLM,JBOF: === RETRIEVE (Cache Lookup) ===
 
     vLLM->>CE: retrieve(tokens)
     CE->>CE: TokenDatabase: hash tokens → chunk keys (BLAKE3)
     CE->>SM: batched_contains(keys)
-
     SM->>L1: batched_contains(keys)
 
     alt L1 HIT (page in DRAM)
@@ -23,43 +26,78 @@ sequenceDiagram
         L1-->>CE: MemoryObj (pinned DRAM buffer)
         CE->>GPU: load → DMA to GPU HBM
         GPU-->>vLLM: KV in HBM, resume inference
-    else L1 MISS → check L2
+    else L1 MISS → check L2 map
         L1-->>SM: hit_chunks = 0
-        SM->>RB: submit_lookup_and_lock_task(keys)
-        RB->>RB: metadata scan (header read from device)
-
-        alt L2 HIT (page on JBOF)
-            RB-->>SM: bitmap (hits found)
-            SM-->>CE: block_mapping: {RawBlock: keys}
-            CE->>RB: submit_load_task(keys, dst_buffers)
+        SM->>TX: lookup(keys) → LBA extents + checksum ref
+        alt L2 HIT (key present in initiator map)
+            TX-->>SM: LBAs + checksum refs
+            SM->>RB: submit_load_task(LBAs, dst_buffers)
             RB->>K: io_uring submit (O_DIRECT read, 256KB)
-            K->>JBOF: NVMe Read Command (over TCP/RDMA)
+            K->>JBOF: NVMe Read Command (nvmet-rdma)
             JBOF-->>K: NVMe Read Response (256KB)
             K-->>RB: completion → data in registered DRAM
-            RB-->>CE: load complete (bitmap)
-            CE->>L1: promote to L1 (optional)
-            CE->>GPU: load → DMA to GPU HBM
-            GPU-->>vLLM: KV in HBM, resume inference
-        else L2 MISS (not cached anywhere)
-            RB-->>SM: bitmap (no hits)
+            RB->>RB: recompute BLAKE3, compare to checksum ref
+            alt VALIDATE OK
+                RB-->>CE: load complete
+                CE->>L1: promote to L1 (optional)
+                CE->>GPU: load → DMA to GPU HBM
+                GPU-->>vLLM: KV in HBM, resume inference
+            else VALIDATE FAIL
+                RB->>TX: mark key stale / discard map entry
+                RB-->>CE: load failed (integrity)
+                CE-->>vLLM: miss (recompute)
+            end
+        else L2 MISS (no map entry)
+            TX-->>SM: not present
             SM-->>CE: total_hit_chunks = 0
             CE-->>vLLM: miss mask (recompute these tokens)
-            Note over vLLM: vLLM recomputes KV via forward pass
         end
     end
 
-    Note over vLLM,JBOF: === STORE (After KV Computation) ===
+    Note over vLLM,JBOF: === STORE (After KV Computation) — durable commit ===
 
     vLLM->>CE: store(tokens, kv_tensors)
     CE->>GPU: GPU HBM → DMA to host DRAM
-    CE->>CE: hash tokens → chunk keys
-    CE->>SM: put(keys, memory_objs)
+    CE->>CE: hash tokens → chunk keys, compute per-page BLAKE3 digest D
+    CE->>SM: put(keys, memory_objs, digests)
     SM->>L1: put(keys, data) → pinned in DRAM (L1)
 
-    Note over SM,RB: Async background flush to L2
-    SM->>RB: submit_store_task(keys, data)
-    RB->>K: io_uring submit (O_DIRECT write, 256KB)
-    K->>JBOF: NVMe Write Command (over TCP/RDMA)
-    JBOF-->>K: NVMe Write Completion
+    Note over SM,TX: Initiator-side durable commit begins here.<br/>Order of the four steps below is what makes the commit crash-safe.
+
+    SM->>TX: 1. append intent { key, LBA_range, D } to WAL (or reserve new COW generation)
+    TX->>K: fsync/FLUSH intent log
+    K->>JBOF: NVMe FLUSH → durable
+
+    SM->>RB: 2. submit_store_task(LBA_range, data, FUA)
+    RB->>K: io_uring submit (O_DIRECT write with FUA, 256KB)
+    K->>JBOF: NVMe Write (FUA) → durable payload
+    JBOF-->>K: completion
     K-->>RB: completion
-    RB-->>SM: store complete
+
+    RB->>TX: 3. write checksum record (D, LBA_range) with FUA
+    TX->>K: io_uring submit (checksum write with FUA)
+    K->>JBOF: NVMe Write (FUA) → durable checksum
+    JBOF-->>K: completion
+
+    TX->>TX: 4. publish key→LBA map atomically<br/>(WAL commit record OR COW generation-pointer flip)
+    TX->>K: fsync/FLUSH map publication
+    K->>JBOF: NVMe FLUSH → durable
+    TX-->>SM: store ACK (terminal, cache-visible)
+
+    Note over vLLM,JBOF: === RECOVERY (restart / nvme reconnect) ===
+
+    CE->>TX: replay WAL (or read active COW generation)
+    TX->>K: read intent log + checksum region
+    K->>JBOF: NVMe Reads (nvmet-rdma)
+    JBOF-->>K: log + checksum blocks
+    K-->>TX: bytes
+    TX->>TX: reconstruct key-to-LBA map from committed WAL records only<br/>uncommitted intents become GC candidates<br/>committed records with missing or bad checksum are discarded<br/>unreferenced blocks are freed on next GC pass
+    TX-->>CE: map ready
+    CE-->>vLLM: cache online
+
+    Note over vLLM,JBOF: === GARBAGE COLLECTION (background) ===
+
+    TX->>TX: scan WAL / COW generations, identify orphan LBA ranges
+    TX->>RB: release_slots(LBA_range)
+    RB->>K: io_uring TRIM/UNMAP (optional)
+    K->>JBOF: NVMe Dataset Management → deallocate
