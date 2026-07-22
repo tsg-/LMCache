@@ -1,0 +1,151 @@
+%%{init: {"theme": "default", "sequence": {"wrap": true, "noteAlign": "left", "noteMargin": 12, "actorMargin": 80, "messageMargin": 45}}}%%
+sequenceDiagram
+    participant vLLM as vLLM Engine<br/>(GPU Node)
+    participant CE as LMCache Engine<br/>(initiator, Architecture A)
+    participant SM as StorageManager
+    participant L1 as LocalCPUBackend<br/>(L1 DRAM)
+    participant TX as WAL + key→LBA map<br/>(initiator-side)
+    participant RB as RawBlockL2Adapter<br/>(io_uring / O_DIRECT)
+    participant K_INIT as Initiator kernel<br/>nvme_rdma
+    participant K_TGT as Target kernel<br/>nvmet_rdma
+    participant JBOF as NVMe JBOF<br/>(remote namespace)
+    participant GPU as GPU Connector<br/>(DMA to HBM)
+
+    Note over vLLM,JBOF: Architecture A — initiator-owned + remote NVMe-oF L2.<br/>All cache semantics (hash, admission, allocator, WAL, map, checksum verify) live on the initiator.<br/>Target runs standard Linux nvmet + nvmet_rdma and the SSD block layer — no LMCache agent.
+    Note over K_INIT,K_TGT: WAL only<br/>COW deferred to Future Work<br/>For NVMe Write target performs RDMA Read from initiator buffer<br/>For NVMe Read target performs RDMA Write to initiator buffer<br/>Transport execution only<br/>No target cache admission or scheduling
+
+    Note over vLLM,JBOF: === RETRIEVE (Cache Lookup) ===
+
+    vLLM->>CE: retrieve(tokens)
+    CE->>CE: TokenDatabase: hash tokens → chunk keys (BLAKE3)
+    CE->>SM: batched_contains(keys)
+    SM->>L1: batched_contains(keys, exclude_pending=true)
+
+    Note over SM,L1: L1 entries in PENDING state (not yet map-published) are<br/>invisible to batched_contains and get. They become visible atomically<br/>with map publication in the STORE flow below.
+
+    alt L1 HIT (page in DRAM)
+        L1-->>SM: hit_chunks = N
+        SM-->>CE: block_mapping: {LocalCPUBackend: keys}
+        CE->>L1: get(keys)
+        L1-->>CE: MemoryObj (pinned DRAM buffer)
+        CE->>GPU: load → DMA to GPU HBM
+        GPU-->>vLLM: KV in HBM, resume inference
+    else L1 MISS → check L2 map
+        L1-->>SM: hit_chunks = 0
+        SM->>TX: lookup(keys) → LBA extents + checksum ref
+        alt L2 HIT (key present in initiator map)
+            TX-->>SM: LBAs + checksum refs
+            SM->>RB: submit_load_task(LBAs, dst_buffers)
+            RB->>K_INIT: io_uring submit (O_DIRECT read, 256KB)
+            K_INIT->>K_TGT: NVMe Read command + initiator SGL
+            K_TGT->>JBOF: block-layer read
+            JBOF-->>K_TGT: block data
+            K_TGT->>RB: RDMA Write payload into initiator MR
+            K_TGT-->>K_INIT: NVMe completion
+            K_INIT-->>RB: completion → data in registered DRAM
+            RB->>RB: recompute BLAKE3, compare to committed digest
+            alt VALIDATE OK
+                RB-->>CE: load complete
+                CE->>L1: promote to L1 (optional)
+                CE->>GPU: load → DMA to GPU HBM
+                GPU-->>vLLM: KV in HBM, resume inference
+            else VALIDATE FAIL
+                RB->>TX: mark key stale / discard map entry
+                RB-->>CE: load failed (integrity)
+                CE-->>vLLM: miss (recompute)
+            end
+        else L2 MISS (no map entry)
+            TX-->>SM: not present
+            SM-->>CE: total_hit_chunks = 0
+            CE-->>vLLM: miss mask (recompute these tokens)
+        end
+    end
+
+    Note over vLLM,JBOF: === STORE (WAL Durable Commit) ===
+
+    vLLM->>CE: store(tokens, kv_tensors)
+    CE->>GPU: GPU HBM → DMA to host DRAM
+    CE->>CE: hash tokens → chunk keys, compute per-page BLAKE3 digest D
+    CE->>CE: run key+digest idempotency check
+    Note over CE,SM: Appendix A.5 idempotency (per key). absent → proceed. PENDING match → join or retryable. VISIBLE match → no-op ACK. different digest → reject.
+    CE->>SM: put(keys, memory_objs, digests)
+    SM->>L1: put(keys, data, state=PENDING) → pinned in DRAM, NOT lookup-visible
+
+    Note over SM,TX: Initiator-side durable commit begins here.<br/>L1 buffer holds data but stays PENDING until step 4b/4c succeeds.<br/>Concurrent retrieve cannot see PENDING entries.
+
+    SM->>TX: 1. append intent { key, LBA_range, D } to WAL
+    TX->>K_INIT: submit WAL-intent write
+    K_INIT->>K_TGT: NVMe Write command + WAL-intent SGL
+    K_TGT->>TX: RDMA Read WAL intent from initiator MR
+    K_TGT->>JBOF: block-layer write
+    JBOF-->>K_TGT: completion
+    K_TGT-->>K_INIT: completion
+    TX->>K_INIT: NVMe FLUSH intent log
+    K_INIT->>K_TGT: NVMe FLUSH
+    K_TGT->>JBOF: block-layer flush
+    JBOF-->>K_TGT: completion
+    K_TGT-->>K_INIT: completion
+    K_INIT-->>TX: flush returns
+
+    SM->>RB: 2. submit_store_task(LBA_range, data, FUA)
+    RB->>K_INIT: io_uring submit (O_DIRECT write with FUA, 256KB)
+    K_INIT->>K_TGT: NVMe Write command + payload SGL (FUA)
+    K_TGT->>RB: RDMA Read payload from initiator MR
+    K_TGT->>JBOF: block-layer write, FUA → durable payload
+    JBOF-->>K_TGT: completion
+    K_TGT-->>K_INIT: completion
+    K_INIT-->>RB: completion
+
+    RB->>TX: 3. write checksum record (D, LBA_range) with FUA
+    TX->>K_INIT: submit checksum write with FUA
+    K_INIT->>K_TGT: NVMe Write command + checksum SGL (FUA)
+    K_TGT->>TX: RDMA Read checksum from initiator MR
+    K_TGT->>JBOF: block-layer write, FUA → durable checksum
+    JBOF-->>K_TGT: completion
+    K_TGT-->>K_INIT: completion
+
+    Note over TX,K_TGT: Step 4 is the durable-commit + atomic-publish boundary.<br/>4a is the media-durability step. 4b/4c is the in-memory publish. c5 = between 4a return and 4b/4c.
+
+    TX->>TX: 4a. append WAL COMMITTED record { key, LBA_range, D }
+    TX->>K_INIT: submit WAL-COMMITTED-record write
+    K_INIT->>K_TGT: NVMe Write command + commit-record SGL
+    K_TGT->>TX: RDMA Read commit record from initiator MR
+    K_TGT->>JBOF: block-layer write
+    JBOF-->>K_TGT: completion
+    K_TGT-->>K_INIT: completion
+    TX->>K_INIT: NVMe FLUSH commit record
+    K_INIT->>K_TGT: NVMe FLUSH
+    K_TGT->>JBOF: block-layer flush
+    JBOF-->>K_TGT: completion
+    K_TGT-->>K_INIT: completion
+    K_INIT-->>TX: flush returns [c5 begins here — durable on media, not yet visible]
+
+    TX->>TX: 4b. publish key→LBA map entry (atomic w/ 4c)
+    TX->>L1: 4c. flip L1 state PENDING → VISIBLE (atomic w/ 4b) [c5 ends here]
+    TX-->>SM: 4d. return terminal ACK
+    SM-->>CE: store ACK (terminal, cache-visible)
+
+    Note over SM,L1: If any step fails or the process crashes before 4a's flush returns, the PENDING L1 entry is dropped on restart —<br/>it was never lookup-visible.<br/>If the crash lands between 4a return and 4b/4c (the c5 window), WAL replay reconstructs the new value exactly once.
+
+    Note over vLLM,JBOF: === RECOVERY (restart / nvme reconnect) ===
+
+    CE->>TX: replay WAL
+    TX->>K_INIT: read intent + commit log + checksum region
+    K_INIT->>K_TGT: NVMe Read commands + initiator SGLs
+    K_TGT->>JBOF: block-layer reads
+    JBOF-->>K_TGT: log + checksum blocks
+    K_TGT->>TX: RDMA Write metadata into initiator MR
+    K_TGT-->>K_INIT: NVMe completions
+    K_INIT-->>TX: bytes
+    TX->>TX: reconstruct key→LBA map from WAL COMMITTED records only.<br/>Uncommitted intents → GC candidates.<br/>COMMITTED records with missing / bad checksum → discarded, extents freed on next GC.<br/>Extents referenced by a COMMITTED record are never reclaimed until an explicit RELEASED record is written.
+    TX->>L1: initialize L1 as empty — no PENDING entries survive restart
+    TX-->>CE: map ready
+    CE-->>vLLM: cache online
+
+    Note over vLLM,JBOF: === GARBAGE COLLECTION (background) ===
+
+    TX->>TX: scan WAL, identify orphan LBA ranges (intents w/o COMMITTED, or explicit RELEASED)
+    TX->>RB: release_slots(LBA_range)
+    RB->>K_INIT: io_uring TRIM/UNMAP (optional)
+    K_INIT->>K_TGT: NVMe Dataset Management
+    K_TGT->>JBOF: block-layer deallocate

@@ -9,7 +9,7 @@ sequenceDiagram
     participant DRAM as Registered DRAM<br/>(L1)
     participant SSD as NVMe Gen5<br/>(L2)
 
-    Note over vLLM,SSD: Target flow (intended design).<br/>Page size P is a runner parameter (sweep 72 / 128 / 144 / 256 KiB) — all sizes below shown for P = 256 KiB.
+    Note over vLLM,SSD: Architecture B — storage-owned RDMA + LMCache server (intended design).<br/>Page size P is a runner parameter (sweep 72 / 128 / 144 / 256 KiB) — all sizes below shown for P = 256 KiB.
 
     Note over vLLM,SSD: === RETRIEVE (Cache Lookup) ===
 

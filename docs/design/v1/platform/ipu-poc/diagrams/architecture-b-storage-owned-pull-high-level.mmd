@@ -1,8 +1,8 @@
 %%{init: {"theme": "default", "themeVariables": {"actorFontSize": "12px", "actorFontFamily": "\"Helvetica Neue\", Helvetica, Arial, sans-serif"}, "sequence": {"wrap": true, "noteAlign": "left", "noteMargin": 12, "actorMargin": 50, "messageMargin": 45, "width": 260, "boxMargin": 10}}}%%
-%% Scope: storage-owned pull architecture (LMCache runs on both compute and storage nodes).
+%% Scope: Architecture B, storage-owned RDMA + LMCache server (intended design).
 %% For the initiator-owned + remote-NVMe-oF-L2 alternative, see
 %%   docs/design/v1/platform/ipu-poc/nvmeof-initiator-only-alternative.md
-%%   docs/design/v1/platform/ipu-poc/lmcache-nvmeof-jbof-flow.mmd
+%%   docs/design/v1/platform/ipu-poc/diagrams/architecture-a-nvmeof-wal-sequence.mmd
 sequenceDiagram
     participant vLLM as Xeon GNR-SP<br/>(vLLM / Bench)
     participant LMC_I as Xeon GNR-SP<br/>(LMCache: minimal)
@@ -11,7 +11,7 @@ sequenceDiagram
     participant LMC_T as Xeon GNR-SP<br/>(LMCache control plane)
     participant SSD as NVMe Gen5<br/>(L2)
 
-    Note over vLLM,SSD: High-level target flow.<br/>See lmcache-ipu-pull-model-flow.mmd for wire-level detail:<br/>control frames, MR lifetime, two-phase eviction, lease and cancel semantics.
+    Note over vLLM,SSD: Architecture B — storage-owned RDMA + LMCache server (intended design).<br/>See architecture-b-storage-owned-pull-sequence.mmd for wire-level detail:<br/>control frames, MR lifetime, two-phase eviction, lease and cancel semantics.
 
     Note over vLLM,SSD: === RETRIEVE ===
 
