@@ -140,6 +140,15 @@ evidence is in:
 All cache semantics live on the initiator. Roles not listed do not
 participate in Architecture A.
 
+![Architecture A — CX7 hardware topology](diagrams/architecture-a-cx7-hardware-topology.svg)
+
+*Physical hardware view of the CX7 platform: two identical Xeon +
+CX7 servers connected over a single RoCEv2 link on the 192.168.200
+data plane. Media (GPU HBM on the initiator; NVMe SSD on the
+target) is shown in blue, host CPU sockets in purple, DRAM in green,
+and RoCEv2 network hardware in amber. See Section 4.1–4.3 for the
+role each component plays.*
+
 ### 4.1 Initiator (compute) host
 
 | Component | Role in Architecture A |
