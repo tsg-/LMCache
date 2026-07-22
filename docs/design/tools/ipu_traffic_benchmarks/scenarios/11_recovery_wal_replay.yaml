@@ -1,4 +1,4 @@
-# Scenario 11: Recovery — WAL replay / COW-generation reconstruction (alt architecture)
+# Scenario 11: Recovery — WAL replay (alt architecture)
 #
 # ARCHITECTURAL SCOPE
 #
@@ -16,35 +16,48 @@
 
 scenario: recovery_wal_replay_alt
 description: >
-  Kill the initiator LMCache process at each of the four durable-commit
-  cutpoints, restart, replay WAL (or read the active COW generation), and
-  verify that only durably-committed keys survive and no torn or stale
-  entries are exposed.
+  Kill the initiator LMCache process at each of the six durable-commit
+  cutpoints defined in nvmeof-poc-plan.md Appendix A.3, restart, replay
+  the WAL, and verify that only durably-committed keys survive, no torn
+  or stale entries are exposed, and every committed-but-not-yet-visible
+  case (c5) reconstructs the new value exactly once.
 
 architecture: initiator_owned_nvmeof_l2
 
 # =============================================================================
-# CUTPOINTS (matches the four durable-commit steps in scenario 10)
+# CUTPOINTS (6 boundaries; matches nvmeof-poc-plan.md Appendix A.3)
 # =============================================================================
 cutpoints:
   - id: c1_before_wal_intent
     description: kill after put() but before WAL intent write hits durable media
     expected: key must not appear after restart; no LBAs reserved
-  - id: c2_after_wal_before_payload
+  - id: c2_after_wal_intent_before_payload
     description: kill after WAL intent flushed, before payload FUA write
     expected: key must not appear; WAL intent is a GC candidate; no torn payload published
   - id: c3_after_payload_before_checksum
     description: kill after payload FUA completion, before checksum FUA write
     expected: key must not appear; payload orphan is a GC candidate
-  - id: c4_after_checksum_before_map_publish
-    description: kill after checksum FUA completion, before map publication
+  - id: c4_after_checksum_before_wal_commit
+    description: kill after checksum FUA completion, before WAL commit-record fsync returns
     expected: key must not appear; matched payload+checksum is a GC candidate
-  - id: c5_after_map_publish
-    description: kill immediately after map publication acked durable
+  - id: c5_after_wal_commit_before_visibility
+    description: >
+      CRITICAL BOUNDARY. Kill AFTER WAL commit-record fsync returns
+      (store is durable on media), BEFORE in-memory map/L1 publication
+      is observable. Recovery MUST reconstruct the new value from the
+      committed WAL exactly once — no duplicate map entry, no double-
+      allocate on the referenced extent.
+    expected: >
+      key MUST appear after restart with digest match on read; extent
+      referenced by the COMMITTED record MUST NOT be re-allocated to
+      any other key; reconstruction MUST be idempotent across a
+      second replay
+  - id: c6_after_ack
+    description: kill after terminal ACK returned to caller (fully committed and visible)
     expected: key MUST appear after restart with digest match on read
 
 # =============================================================================
-# COMMAND (placeholder — greenfield; see LMCache-msm.2 fault driver)
+# COMMAND (placeholder — greenfield; fault driver not yet implemented)
 # =============================================================================
 tool: nvmeof_fault_driver     # scripts/nvmeof_fault_driver.py — not yet implemented
 command: |
@@ -87,4 +100,6 @@ pass_criteria:
   no_missing_checksum_survives_replay: "true"
   replay_time_ms: "<= 5000"
   # At c1..c4: keys_lost_at_cutpoint == num_keys (intent by design)
-  # At c5:    keys_lost_at_cutpoint == 0
+  # At c5..c6: keys_lost_at_cutpoint == 0
+  # At c5:    reconstruction MUST be idempotent across a second replay
+  #           (no duplicate map entry, no double-allocate)

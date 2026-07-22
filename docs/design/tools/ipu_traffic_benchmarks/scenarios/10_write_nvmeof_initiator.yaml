@@ -19,7 +19,7 @@
 #
 #   1. NVMe-oF/RDMA transport cost for a KV-page-sized write, end-to-end
 #      from the initiator LMCache into a durable target LBA range.
-#   2. The initiator's atomic-commit cost: WAL/COW intent write, payload
+#   2. The initiator's atomic-commit cost: WAL intent write, payload
 #      write with FUA, checksum write with FUA, map publication. This is
 #      NOT free and must not be conflated with an M1 verbs number.
 #   3. Attach-time and reconnect behavior for the NVMe-oF connection --
@@ -57,16 +57,15 @@ prerequisites:
     - nvme connect -t rdma with tuned ctrl-loss-tmo and reconnect_delay
     - stable device path resolved via /dev/disk/by-id/nvme-<eui>
     - LMCache configured with raw_block L2 pointing at the attached device
-    - durable-commit protocol (WAL or COW) enabled on top of raw_block
+    - WAL durable-commit protocol enabled on top of raw_block (COW deferred to post-POC)
   fabric:
-    - 192.168.200 RoCEv2, MTU >= 4096 verified end-to-end (see LMCache-awi)
+    - 192.168.200 RoCEv2, MTU >= 4096 verified end-to-end
 
 # =============================================================================
-# COMMAND (placeholder — nvmeof_bench_runner.py is not yet implemented;
-# see LMCache-msm.3. The provision/attach/disconnect calls below use the
-# current interfaces of scripts/nvmeof_target_provision.sh and
-# scripts/nvmeof_initiator_attach.sh so that when the runner lands, the
-# glue is already correct.)
+# COMMAND (placeholder — nvmeof_bench_runner.py is not yet implemented.
+# The provision/attach/disconnect calls below use the current interfaces
+# of scripts/nvmeof_target_provision.sh and scripts/nvmeof_initiator_attach.sh
+# so that when the runner lands, the glue is already correct.)
 # =============================================================================
 tool: nvmeof_bench_runner   # scripts/nvmeof_bench_runner.py — greenfield
 command: |
@@ -108,27 +107,50 @@ command: |
 #   tx = bytes leaving the initiator NIC
 #   rx = bytes arriving at the initiator NIC
 #
-# For an NVMe Write flow, the *initiator* posts commands, and the *target*
-# posts an RDMA Read against the initiator's registered data buffer to
-# pull the payload -- so the payload data phase is INITIATOR-TX (bytes
-# leave the initiator), not INITIATOR-RX. (Finding #5.)
+# For every NVMe Write in this flow (WAL intent, payload, checksum record,
+# WAL commit record), the *initiator* posts the command capsule, and the
+# *target* posts an RDMA Read against the initiator's registered buffer to
+# pull the write payload -- so the payload data phase is INITIATOR-TX for
+# every write, not INITIATOR-RX.
+#
+# All four writes therefore share the same wire shape:
+#   cmd (tx small) -> rdma_read (tx payload) -> cqe (rx small)
+#   [+ optional flush cmd (tx) -> flush cqe (rx) when a durability
+#    barrier is required (WAL intent, WAL commit)].
+#
+# Model matches diagrams/architecture-a-nvmeof-wal-sequence.mmd.
 # =============================================================================
 wire_model:
   per_page:
-    - {phase: "wal_intent_write",  dir: "tx", bytes: 128, note: "durable intent record (key, LBA, D)"}
-    - {phase: "wal_intent_flush",  dir: "rx", bytes: 16,  note: "NVMe FLUSH completion"}
-    - {phase: "payload_nvme_cmd",  dir: "tx", bytes: 72,  note: "NVMe Write command capsule (FUA)"}
-    - {phase: "payload_rdma_read", dir: "tx", bytes: "${model.page_size_bytes}", note: "target pulls payload via RDMA Read; bytes LEAVE the initiator"}
-    - {phase: "payload_cqe",       dir: "rx", bytes: 16,  note: "durable NVMe completion"}
-    - {phase: "checksum_write",    dir: "tx", bytes: 64,  note: "BLAKE3 record with FUA"}
-    - {phase: "checksum_cqe",      dir: "rx", bytes: 16,  note: "durable NVMe completion"}
-    - {phase: "map_publish",       dir: "tx", bytes: 32,  note: "WAL commit record OR COW pointer flip"}
-    - {phase: "map_publish_cqe",   dir: "rx", bytes: 16,  note: "durable NVMe completion"}
-  overhead_vs_scenario_5a: >
-    Do not compute this delta. Scenario 5A measures cache-level admission
-    over raw RDMA verbs with a target-side LMCache agent. Scenario 10
-    measures a full durable-commit transaction against an nvmet-rdma target
-    with no target-side agent. The two measure different things.
+    # Step 1 -- WAL intent write + flush (durable barrier)
+    - {phase: "intent_nvme_cmd",      dir: "tx", bytes: 72,  note: "NVMe Write command capsule (WAL intent)"}
+    - {phase: "intent_rdma_read",     dir: "tx", bytes: 128, note: "target RDMA Read pulls intent record {key, LBA, D}"}
+    - {phase: "intent_cqe",           dir: "rx", bytes: 16,  note: "NVMe completion (intent durable on media)"}
+    - {phase: "intent_flush_cmd",     dir: "tx", bytes: 72,  note: "NVMe FLUSH command capsule"}
+    - {phase: "intent_flush_cqe",     dir: "rx", bytes: 16,  note: "NVMe FLUSH completion"}
+
+    # Step 2 -- payload write with FUA
+    - {phase: "payload_nvme_cmd",     dir: "tx", bytes: 72,  note: "NVMe Write command capsule (FUA)"}
+    - {phase: "payload_rdma_read",    dir: "tx", bytes: "${model.page_size_bytes}", note: "target RDMA Read pulls payload"}
+    - {phase: "payload_cqe",          dir: "rx", bytes: 16,  note: "NVMe completion (payload durable on media, FUA)"}
+
+    # Step 3 -- checksum record write with FUA
+    - {phase: "checksum_nvme_cmd",    dir: "tx", bytes: 72,  note: "NVMe Write command capsule (checksum record, FUA)"}
+    - {phase: "checksum_rdma_read",   dir: "tx", bytes: 64,  note: "target RDMA Read pulls BLAKE3 record"}
+    - {phase: "checksum_cqe",         dir: "rx", bytes: 16,  note: "NVMe completion (checksum durable on media, FUA)"}
+
+    # Step 4a -- WAL commit record write + flush (durable-commit barrier before publish)
+    - {phase: "commit_nvme_cmd",      dir: "tx", bytes: 72,  note: "NVMe Write command capsule (WAL commit record)"}
+    - {phase: "commit_rdma_read",     dir: "tx", bytes: 32,  note: "target RDMA Read pulls commit record"}
+    - {phase: "commit_cqe",           dir: "rx", bytes: 16,  note: "NVMe completion (commit record on media)"}
+    - {phase: "commit_flush_cmd",     dir: "tx", bytes: 72,  note: "NVMe FLUSH command capsule (durable-commit barrier)"}
+    - {phase: "commit_flush_cqe",     dir: "rx", bytes: 16,  note: "NVMe FLUSH completion (c5 begins here; steps 4b/4c are in-memory only)"}
+  overhead_vs_scenario_5: >
+    Do not compute this delta. Scenario 5 (write_rdma) measures cache-level
+    admission over raw RDMA verbs with a target-side LMCache agent
+    (Architecture B). Scenario 10 measures a full initiator-owned WAL
+    durable-commit transaction against a passive nvmet-rdma target
+    (Architecture A). The two measure different things.
 
 # =============================================================================
 # PARAMETERS
@@ -138,7 +160,7 @@ parameters:
   iters: 100
   warmup: 10
   queue_depth: 16              # NVMe SQ depth on the initiator side
-  commit_protocol: wal         # or "cow_generation" — pick one; must be defined
+  commit_protocol: wal         # WAL only; COW deferred (see nvmeof-poc-plan.md Future Work)
   target_host: bmg1            # SSH alias for the nvmet-rdma target
   remote_repo: "~/tsg/LMCache" # LMCache checkout on the target host
   target_nqn: "nqn.2026-07.io.lmcache.alt:bmg1"

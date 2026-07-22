@@ -1,58 +1,113 @@
-# Scenario 12: NVMe-oF Reconnect Cutpoint (alt architecture)
+# Scenario 12: NVMe-oF In-Flight Fault + Reconnect Cutpoint (alt architecture)
 #
 # ARCHITECTURAL SCOPE
 #
-# Initiator-owned + remote NVMe-oF L2 alternative only. Validates that a
-# transient NVMe-oF fabric loss between the initiator and the nvmet-rdma
-# target is handled without exposing torn or stale cache entries, and
-# that reconnect returns the L2 device path in a working state.
+# Initiator-owned + remote NVMe-oF L2 alternative only. Exercises the
+# six WAL cutpoints (c1-c6) defined in the POC plan Appendix A.3 with a
+# controlled in-flight fault harness (Appendix E), and separately
+# validates the reconnect path itself.
 #
-# The storage-owned scenarios (1-9) do not encounter this failure surface
-# because there is no NVMe-oF between compute and storage there.
+# Two injection layers are used, and they are NOT interchangeable:
+#
+#   (a) Primary in-flight faults - controlled data-plane faults that
+#       provably fire between an Appendix-A.3 checkpoint entry and the
+#       next NVMe completion. This is the only mechanism that produces
+#       true torn-I/O evidence at c1-c5. Uncontrolled `nvme disconnect`
+#       or `configfs` teardown is NOT used here, because either may
+#       drain in-flight work before the failure reaches the target,
+#       producing a clean-lifecycle result rather than a torn-I/O
+#       result.
+#
+#   (b) Secondary reconnect-path validation - `nvme disconnect` is
+#       valid ONLY as a reconnect-path test after (a) has proven the
+#       in-flight semantics. It verifies device-path stability,
+#       reconnect timing, and fail-fast error surfacing; it does NOT
+#       stand in for cutpoint injection.
+#
+# The storage-owned scenarios (1-9) do not encounter this failure
+# surface because there is no NVMe-oF between compute and storage
+# there.
 
 scenario: reconnect_cutpoint_alt
 description: >
-  Inject nvme disconnect at each of the four durable-commit cutpoints and
-  during idle. Verify the initiator LMCache surfaces I/O errors (not
-  hangs), reconnects with a stable device path, replays or discards
-  in-flight commits correctly, and serves the cache consistently after
-  reconnect.
+  Inject a controlled in-flight fault at each of the six WAL cutpoints
+  (c1-c6) via the Appendix-E fault harness, and separately validate the
+  reconnect path via nvme disconnect after the harness passes. Verify
+  the initiator LMCache surfaces I/O errors (not hangs), reconnects
+  with a stable device path, replays or discards in-flight commits
+  correctly, and serves the cache consistently after reconnect.
 
 architecture: initiator_owned_nvmeof_l2
 
 # =============================================================================
-# CUTPOINTS
+# CUTPOINTS (Appendix A.3 c1-c6)
 # =============================================================================
 cutpoints:
-  - id: r0_idle
-    description: disconnect while no commit is in flight
-    expected: reconnect with no state change; existing keys unchanged
-  - id: r1_during_wal_intent
-    description: disconnect while WAL intent write is in flight
-    expected: intent either durable or absent; no key published; no dangling LBAs
-  - id: r2_during_payload
-    description: disconnect while payload FUA write is in flight
-    expected: no key published; payload either fully durable or absent; GC candidate
-  - id: r3_during_checksum
-    description: disconnect while checksum FUA write is in flight
-    expected: no key published; checksum either durable or absent
-  - id: r4_during_map_publish
-    description: disconnect while map-publication write is in flight
-    expected: key visibility is all-or-nothing; publication succeeds fully or is retried after reconnect
+  - id: c1_before_wal_intent_flush
+    description: fault fires after write(intent) enqueue, before intent fsync returns
+    expected: intent not durable; no key published; no LBAs reserved
+  - id: c2_after_intent_before_payload
+    description: fault fires after intent fsync, before payload FUA completes
+    expected: intent durable; payload not durable; no key; intent is a GC candidate
+  - id: c3_after_payload_before_checksum
+    description: fault fires after payload CQE, before checksum FUA completes
+    expected: payload durable; no checksum; no key; payload orphan is a GC candidate
+  - id: c4_after_checksum_before_commit_flush
+    description: fault fires after checksum CQE, before WAL commit-record fsync returns
+    expected: payload+checksum durable; no COMMITTED record; no key; matched pair is a GC candidate
+  - id: c5_after_commit_flush_before_publish
+    description: >
+      fault fires AFTER WAL commit-record fsync returns, BEFORE the
+      in-memory map/L1 publication is observable - the committed-but-
+      not-yet-visible boundary
+    expected: >
+      COMMITTED record durable on media; key MUST appear after restart
+      with digest match on read; recovery reconstructs the new value
+      exactly once (no duplicate map entry, no double-allocate)
+  - id: c6_after_publish_and_ack
+    description: fault fires after ACK enqueue to caller
+    expected: fully durable and visible; key MUST appear with digest match
 
 # =============================================================================
-# COMMAND (placeholder — greenfield; see LMCache-msm.1 and LMCache-msm.2)
+# RECONNECT-PATH VALIDATION (secondary, after cutpoint pass)
+# =============================================================================
+reconnect_validation:
+  - id: r_idle
+    description: nvme disconnect while no commit is in flight
+    expected: reconnect within timeout; device path stable; existing keys unchanged
+  - id: r_post_ack
+    description: nvme disconnect after a completed store's ACK, before the next store starts
+    expected: reconnect within timeout; committed keys still visible with digest match
+
+# =============================================================================
+# COMMAND (placeholder - greenfield; harness implementation is scenario-owned)
 # =============================================================================
 tool: nvmeof_fault_driver
 command: |
-  # For each cutpoint: initiate write, inject nvme disconnect, wait for reconnect,
-  # verify cache state.
+  # Primary: controlled in-flight fault harness across cutpoints c1-c6.
+  # The harness instruments the LMCache code path with named checkpoints
+  # matching Appendix A.3 and fires the injection between checkpoint
+  # entry and the corresponding NVMe/WAL syscall completion. Each
+  # injection records the NVMe command status observed by the kernel
+  # or harness.
   for cp in ${cutpoints}; do
     python scripts/nvmeof_fault_driver.py \
       --device /dev/disk/by-id/nvme-${eui} \
       --commit-protocol ${commit_protocol} \
-      --fault reconnect \
+      --fault inflight \
       --cutpoint ${cp} \
+      --record-nvme-status \
+      --num-keys ${num_keys}
+  done
+
+  # Secondary: reconnect-path validation via nvme disconnect. Runs
+  # only AFTER the cutpoint sweep passes.
+  for rv in ${reconnect_validation}; do
+    python scripts/nvmeof_fault_driver.py \
+      --device /dev/disk/by-id/nvme-${eui} \
+      --commit-protocol ${commit_protocol} \
+      --fault reconnect \
+      --cutpoint ${rv} \
       --ctrl-loss-tmo ${ctrl_loss_tmo} \
       --reconnect-delay ${reconnect_delay} \
       --num-keys ${num_keys}
@@ -74,12 +129,16 @@ parameters:
 # =============================================================================
 metrics:
   primary:
+    - inflight_fault_fired_before_completion   # boolean per cutpoint: ordering proof
+    - nvme_status_recorded_per_injection       # per cutpoint: NVMe command status or "no completion"
     - reconnect_time_ms                        # nvme disconnect -> device visible again
     - io_error_visible_before_reconnect        # boolean: adapter surfaced ENOTCONN / EIO, did not hang
     - keys_lost_at_cutpoint
     - keys_torn_at_cutpoint
   correctness:
-    - no_torn_key_exposed_after_reconnect      # hard requirement
+    - no_torn_key_exposed                      # hard requirement across all cutpoints
+    - c5_key_reconstructed_exactly_once        # c5 invariant
+    - no_committed_extent_reallocated          # allocator invariant across restart
     - device_path_stable_across_reconnect      # /dev/disk/by-id path unchanged
     - map_consistent_after_reconnect
 
@@ -87,8 +146,11 @@ metrics:
 # PASS CRITERIA
 # =============================================================================
 pass_criteria:
-  no_torn_key_exposed_after_reconnect: "true"
+  no_torn_key_exposed: "true"
+  c5_key_reconstructed_exactly_once: "true"
+  no_committed_extent_reallocated: "true"
   device_path_stable_across_reconnect: "true"
   map_consistent_after_reconnect: "true"
   reconnect_time_ms: "<= 5000"
   io_error_visible_before_reconnect: "true"    # do not hang; fail fast
+  inflight_fault_fired_before_completion: "true"   # ordering proof required per cutpoint
