@@ -230,35 +230,52 @@ A single per-layer KV chunk on the wire (the atomic RDMA operation):
     page_bytes = kv_size x num_kv_heads x head_size x dtype_bytes x tokens_per_chunk
 ```
 
-The KV page is a **fixed size of 256 tokens** per the project requirement.
-Network traffic patterns depend on model characteristics (layer count, KV
-heads, dtype). The packet size on the wire is fixed per model.
+**Canonical wire-page geometry.** Two page sizes are tracked; every
+result declares which one it used.
+
+- **Reference geometry: 256 tokens/chunk.** Used for the standard
+  wire-speed and throughput claims. Yields ~512 KB per layer for
+  GQA-8 models; DeepSeek-V3 (MLA) is smaller — see the exact-sizing
+  note below and the model configs in
+  `docs/design/tools/ipu_traffic_benchmarks/README.md`.
+- **Sweep-alternate geometry: 128 tokens/chunk.** IPU-optimized
+  variant (~256 KB per layer for GQA-8), matches the IPU DMA
+  sweet spot (128–256 KB) and better utilizes the 32 KB IPU cache
+  for per-packet processing. Sweep results MUST be labeled as such
+  and not compared against 256-token numbers as if same experiment.
+
+Network traffic patterns depend on model characteristics (layer count,
+KV heads, dtype). The packet size on the wire is fixed per (model,
+tokens/chunk) pair.
+
+**256-token reference table:**
 
 | Model           | Tokens/Chunk | Dtype | Page Size | Burst (all layers) |
 |-----------------|--------------|-------|-----------|--------------------|
-| DeepSeek-V3     | 256          | FP8   | 512 KB    | 61 x 512KB = 31 MB |
+| DeepSeek-V3     | 256          | FP8   | 144 KB (MLA)  | 61 x 144KB = 8.6 MB |
 | Llama-3.1 70B   | 256          | FP8   | 512 KB    | 80 x 512KB = 40 MB |
 | Llama-3.1 8B    | 256          | FP8   | 512 KB    | 32 x 512KB = 16 MB |
 | Llama-3.1 405B  | 256          | FP8   | 512 KB    | 126 x 512KB = 63 MB|
 | Mixtral 8x22B   | 256          | FP8   | 512 KB    | 56 x 512KB = 28 MB |
 
-Note: DeepSeek-V3 uses MLA (Multi-head Latent Attention) with compressed KV,
-so actual per-layer page size may differ — the 512KB figure assumes standard
-GQA-8 for comparison. See model configs for exact sizing.
+Note: DeepSeek-V3 uses MLA (Multi-head Latent Attention) with a 576-
+element compressed latent per token (shared across heads), not a
+per-head KV pair. Its page size (144 KB @ 256 tokens FP8) does not
+follow the `kv_size × num_heads × head_size` formula. GQA-8 models
+land at 512 KB @ 256 tokens FP8. See `models/deepseek_v3_fp8.yaml`
+for the derivation; the benchmark README table is authoritative.
 
-**IPU-optimized alternative (128 tokens/chunk):**
+**128-token IPU-alt sweep table:**
 
 | Model           | Tokens/Chunk | Dtype | Page Size | Burst (all layers) |
 |-----------------|--------------|-------|-----------|--------------------|
-| DeepSeek-V3     | 128          | FP8   | 256 KB    | 61 x 256KB = 15 MB |
+| DeepSeek-V3     | 128          | FP8   | 72 KB (MLA)   | 61 x 72KB = 4.3 MB  |
 | Llama-3.1 70B   | 128          | FP8   | 256 KB    | 80 x 256KB = 20 MB |
 | Llama-3.1 405B  | 128          | FP8   | 256 KB    | 126 x 256KB = 32 MB|
 
-The 128-token variant yields 256KB pages which match IPU DMA optimal transfer
-size (128-256KB). This may give better utilization of the 32KB IPU cache for
-per-packet processing. Both 256 and 128 are valid configurations — the choice
-is a latency vs throughput tradeoff that benchmarks (scenarios 1-4) will
-inform.
+The 128-token variant yields ~256 KB pages for GQA-8 (IPU DMA
+optimal). Both 256 and 128 are valid configurations — the choice is a
+latency vs throughput tradeoff that benchmarks (scenarios 1–4) inform.
 
 **Proxy reference model:** LMCache with DeepSeek as the primary workload
 characterization target. DeepSeek's long-context usage patterns (32K-128K
@@ -431,7 +448,7 @@ The unit test exercises:
 ### Integration Test (stub transport, two processes)
 
 ```bash
-# Terminal 1: start LMCache server with chunk_size=256 (default, per requirement)
+# Terminal 1: start LMCache server with chunk_size=256 (canonical)
 lmcache server \
     --port 5555 \
     --http-port 8080 \
@@ -472,7 +489,7 @@ lmcache server \
     --supported-transfer-mode rdma
 
 # On the INITIATOR node (compute host):
-# Default 256 tokens/chunk -> 512KB pages (per requirement)
+# Canonical 256 tokens/chunk -> 512KB pages
 LMCACHE_RDMA_TRANSPORT=verbs \
 LMCACHE_MP_TRANSFER_MODE=rdma \
 lmcache bench server \
@@ -493,7 +510,7 @@ This exercises Scenario 1 (L1 DRAM hit, RDMA serve) from the benchmark
 matrix. For the full scenario set:
 
 ```bash
-# Run all 9 benchmark scenarios with the 70B FP8 model config:
+# Run all 12 benchmark scenarios with the 70B FP8 model config:
 lmcache bench ipu \
     --config docs/design/tools/ipu_traffic_benchmarks/scenarios/ \
     --model docs/design/tools/ipu_traffic_benchmarks/models/llama3_70b_fp8.yaml \

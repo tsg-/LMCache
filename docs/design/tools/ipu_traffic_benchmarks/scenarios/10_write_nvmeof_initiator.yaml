@@ -20,8 +20,11 @@
 #   1. NVMe-oF/RDMA transport cost for a KV-page-sized write, end-to-end
 #      from the initiator LMCache into a durable target LBA range.
 #   2. The initiator's atomic-commit cost: WAL intent write, payload
-#      write with FUA, checksum write with FUA, map publication. This is
-#      NOT free and must not be conflated with an M1 verbs number.
+#      write with FUA, checksum write with FUA, WAL commit-record write
+#      and flush, map publication, and -- on the overwrite path only --
+#      reader quiesce and WAL RELEASED write + flush. This is NOT free
+#      and must not be conflated with an M1 verbs number. Runners
+#      report first-write and overwrite paths separately, not averaged.
 #   3. Attach-time and reconnect behavior for the NVMe-oF connection --
 #      those are new failure surfaces the storage-owned track does not have.
 #
@@ -116,9 +119,14 @@ command: |
 # All four writes therefore share the same wire shape:
 #   cmd (tx small) -> rdma_read (tx payload) -> cqe (rx small)
 #   [+ optional flush cmd (tx) -> flush cqe (rx) when a durability
-#    barrier is required (WAL intent, WAL commit)].
+#    barrier is required (WAL intent, WAL commit, RELEASED)].
 #
-# Model matches diagrams/architecture-a-nvmeof-wal-sequence.mmd.
+# Overwrite path (prior_gen exists): after 4c publishes the new gen and
+# 4d quiesces prior-gen readers, step 4e writes a WAL RELEASED record
+# and flushes it -- one additional cmd/rdma_read/cqe + flush cmd/cqe on
+# the wire, shape identical to the commit-record barrier. First-writes
+# skip 4d/4e and pay none of this cost. Model matches
+# diagrams/architecture-a-nvmeof-wal-sequence.mmd.
 # =============================================================================
 wire_model:
   per_page:
@@ -145,6 +153,16 @@ wire_model:
     - {phase: "commit_cqe",           dir: "rx", bytes: 16,  note: "NVMe completion (commit record on media)"}
     - {phase: "commit_flush_cmd",     dir: "tx", bytes: 72,  note: "NVMe FLUSH command capsule (durable-commit barrier)"}
     - {phase: "commit_flush_cqe",     dir: "rx", bytes: 16,  note: "NVMe FLUSH completion (c5 begins here; steps 4b/4c are in-memory only)"}
+
+    # Step 4e -- WAL RELEASED write + flush (overwrite only; gated on prior_gen).
+    # First-writes skip this block. When present, closes the c5 window and
+    # makes the prior extent GC-eligible (step 4d reader quiesce is
+    # in-memory only and does not appear on the wire).
+    - {phase: "overwrite_release_nvme_cmd",   dir: "tx", bytes: 72,  note: "NVMe Write command capsule (WAL RELEASED record; overwrite only)", conditional: "prior_gen"}
+    - {phase: "overwrite_release_rdma_read",  dir: "tx", bytes: 40,  note: "target RDMA Read pulls RELEASED record {key, prior_gen, LBA_range', D'}", conditional: "prior_gen"}
+    - {phase: "overwrite_release_cqe",        dir: "rx", bytes: 16,  note: "NVMe completion (RELEASED record on media)", conditional: "prior_gen"}
+    - {phase: "overwrite_release_flush_cmd",  dir: "tx", bytes: 72,  note: "NVMe FLUSH command capsule (durable RELEASED barrier)", conditional: "prior_gen"}
+    - {phase: "overwrite_release_flush_cqe",  dir: "rx", bytes: 16,  note: "NVMe FLUSH completion (c5 closes here on the overwrite path)", conditional: "prior_gen"}
   overhead_vs_scenario_5: >
     Do not compute this delta. Scenario 5 (write_rdma) measures cache-level
     admission over raw RDMA verbs with a target-side LMCache agent
@@ -177,11 +195,27 @@ metrics:
     - wal_intent_flush_us            # step 1 cost
     - payload_write_us               # step 2 cost (FUA)
     - checksum_write_us              # step 3 cost (FUA)
-    - map_publish_us                 # step 4 cost
+    - commit_flush_us                # step 4a: WAL commit-record write + FLUSH command latency
+    - commit_flush_completion_us     # step 4a: time from FLUSH-cmd post to FLUSH-cqe (c5 becomes observable at this boundary)
+    - map_publish_us                 # step 4c: in-memory map/L1 flip
+    - reader_quiesce_us              # step 4d: overwrite only; drain of prior-gen readers (in-memory, off the wire)
+    - overwrite_release_flush_us     # step 4e: overwrite only; WAL RELEASED write + FLUSH command latency
+    - overwrite_release_completion_us # step 4e: overwrite only; time from RELEASED FLUSH-cmd post to FLUSH-cqe (closes c5)
     - attach_time_ms                 # nvme connect -> device visible
     - reconnect_time_ms              # after simulated fabric loss
   derived:
-    - commit_overhead_us: "end_to_end - payload_write_us"
+    # Full WAL durable-commit tax over a plain block write. Excludes
+    # only payload_write_us (the "what a raw NVMe write would cost")
+    # is intentionally NOT what commit_overhead measures -- the intent,
+    # checksum, and commit steps are ALL commit overhead. Use the
+    # per-step primaries above if you need a finer breakdown.
+    - commit_overhead_us: "end_to_end_write_latency_us - payload_write_us"
+    # durable_barrier_us covers all commit-ordering flushes on the wire.
+    # First-write: intent flush + commit flush. Overwrite: also adds the
+    # RELEASED flush (step 4e). Runners must report the two paths
+    # separately, not averaged, so the overwrite tail is visible.
+    - durable_barrier_us_first_write: "wal_intent_flush_us + commit_flush_us + commit_flush_completion_us"
+    - durable_barrier_us_overwrite: "wal_intent_flush_us + commit_flush_us + commit_flush_completion_us + overwrite_release_flush_us + overwrite_release_completion_us"
     - fua_penalty_us: "payload_write_us - non_fua_baseline"
   correctness:
     - recovery_passes_after_crash_at_each_step   # crash-cutpoint tests

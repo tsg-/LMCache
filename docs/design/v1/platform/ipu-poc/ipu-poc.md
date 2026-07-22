@@ -1,5 +1,14 @@
 # Architecture B — Storage-Owned Pull POC
 
+> **Status: intended design — blocked on MMG-400 silicon and Falcon
+> enabling.** Anticipated availability early August 2026. The
+> execution content below (milestones, dependency table, success
+> thresholds) describes the runnable POC once the hardware and driver
+> stack land. Until then, treat this document as the target design,
+> not a current execution plan. Contact the hardware team for the
+> latest availability status before scheduling any lab work against
+> it.
+
 Proof-of-concept for IPU-accelerated KV cache transfer between a GPU Node
 and a KV Cache Node over MMG-400 RDMA at 400 Gb/s under the
 **storage-owned pull** design (Architecture B).
@@ -102,9 +111,17 @@ page_bytes = kv_size × num_kv_heads × head_size × dtype_bytes × tokens_per_c
 ```
 
 POC configuration (DeepSeek-V3 proxy):
-- 128 tokens/chunk → 256KB page (IPU DMA optimal)
-- 61 layers → 61 × 256KB = 15 MB burst per prefix retrieval
+- 128 tokens/chunk → ~72 KB per MLA layer (256 KB for GQA-8 models)
+- 61 layers → ~4.3 MB burst per prefix retrieval (DeepSeek-V3)
 - FP8 dtype
+
+Note: 128 tokens/chunk is the **IPU-alt sweep geometry**, not the
+canonical 256-token reference. See
+[`ipu.md` → Wire Transfer Unit](../rdma/ipu.md#wire-transfer-unit) for
+the canonical geometry definition and both reference/sweep tables.
+DeepSeek-V3 uses MLA and does not follow the `kv_size × num_heads ×
+head_size` formula; see the benchmark README's model configs for
+exact per-model sizing.
 
 
 ## Success Criteria
@@ -168,11 +185,11 @@ implementation spec). Wire-level design lives in the diagrams:
 
 | Dependency | Owner | Status |
 |------------|-------|--------|
-| MMG-400 IPU driver + RDMA support | Hardware team | Available |
+| MMG-400 IPU driver + RDMA support | Hardware team | Enabling in progress; anticipated early August 2026 |
 | libibverbs headers / libraries | System | Standard OFED |
-| Two-node testbed with IPU connectivity | Lab ops | Needs setup confirmation |
+| Two-node testbed with IPU connectivity | Lab ops | Blocked on MMG silicon availability |
 | DeepSeek workload trace (synthetic) | This POC | To be generated |
-| `lmcache bench server --mode ipu` | This POC (LMCache-bnw) | Blocked on transport |
+| `lmcache bench server --mode ipu` | This POC | Blocked on transport |
 
 
 ## Further Optimizations (Post-POC)

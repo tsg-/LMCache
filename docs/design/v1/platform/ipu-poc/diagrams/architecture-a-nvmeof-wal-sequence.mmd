@@ -66,14 +66,15 @@ sequenceDiagram
     vLLM->>CE: store(tokens, kv_tensors)
     CE->>GPU: GPU HBM → DMA to host DRAM
     CE->>CE: hash tokens → chunk keys, compute per-page BLAKE3 digest D
+    CE->>CE: assign gen (=1 for first-write, =current_gen+1 for overwrite)
     CE->>CE: run key+digest idempotency check
-    Note over CE,SM: Appendix A.5 idempotency (per key). absent → proceed. PENDING match → join or retryable. VISIBLE match → no-op ACK. different digest → reject.
-    CE->>SM: put(keys, memory_objs, digests)
+    Note over CE,SM: Appendix A.5 idempotency (per key). absent → proceed at gen=1. PENDING match same digest → join or retryable. PENDING match different digest → busy/retryable. VISIBLE match → no-op ACK. VISIBLE differ → admit as overwrite at gen+1.
+    CE->>SM: put(keys, memory_objs, digests, gen)
     SM->>L1: put(keys, data, state=PENDING) → pinned in DRAM, NOT lookup-visible
 
-    Note over SM,TX: Initiator-side durable commit begins here.<br/>L1 buffer holds data but stays PENDING until step 4b/4c succeeds.<br/>Concurrent retrieve cannot see PENDING entries.
+    Note over SM,TX: Initiator-side durable commit begins here.<br/>L1 buffer holds data but stays PENDING until step 4c succeeds.<br/>Concurrent retrieve cannot see PENDING entries.
 
-    SM->>TX: 1. append intent { key, LBA_range, D } to WAL
+    SM->>TX: 1. append intent { key, gen, LBA_range, D, INTENT } to WAL
     TX->>K_INIT: submit WAL-intent write
     K_INIT->>K_TGT: NVMe Write command + WAL-intent SGL
     K_TGT->>TX: RDMA Read WAL intent from initiator MR
@@ -104,9 +105,9 @@ sequenceDiagram
     JBOF-->>K_TGT: completion
     K_TGT-->>K_INIT: completion
 
-    Note over TX,K_TGT: Step 4 is the durable-commit + atomic-publish boundary.<br/>4a is the media-durability step. 4b/4c is the in-memory publish. c5 = between 4a return and 4b/4c.
+    Note over TX,K_TGT: Step 4 is the durable-commit + atomic-publish + supersede boundary.<br/>4a = media-durability of new gen. 4b/4c = in-memory publish. 4d = quiesce prior-gen readers. 4e = durable RELEASED of prior gen (overwrite only).<br/>c5 window = anywhere from 4a return through 4e — same on-media state after restart.
 
-    TX->>TX: 4a. append WAL COMMITTED record { key, LBA_range, D }
+    TX->>TX: 4a. append WAL COMMITTED record { key, gen, LBA_range, D, COMMITTED }
     TX->>K_INIT: submit WAL-COMMITTED-record write
     K_INIT->>K_TGT: NVMe Write command + commit-record SGL
     K_TGT->>TX: RDMA Read commit record from initiator MR
@@ -118,14 +119,29 @@ sequenceDiagram
     K_TGT->>JBOF: block-layer flush
     JBOF-->>K_TGT: completion
     K_TGT-->>K_INIT: completion
-    K_INIT-->>TX: flush returns [c5 begins here — durable on media, not yet visible]
+    K_INIT-->>TX: flush returns [c5 window begins — new gen durable on media]
 
-    TX->>TX: 4b. publish key→LBA map entry (atomic w/ 4c)
-    TX->>L1: 4c. flip L1 state PENDING → VISIBLE (atomic w/ 4b) [c5 ends here]
-    TX-->>SM: 4d. return terminal ACK
+    TX->>TX: 4b. publish key→LBA map entry at new gen (atomic w/ 4c)
+    TX->>L1: 4c. flip L1 state PENDING → VISIBLE at new gen (atomic w/ 4b)
+    Note over TX,L1: After 4c, no new reader can resolve key to prior gen.
+
+    alt overwrite (prior gen existed)
+        TX->>TX: 4d. quiesce readers of prior gen (epoch / RCU drain)
+        TX->>TX: 4e. append WAL RELEASED record { key, prior_gen, LBA_range', D', RELEASED }
+        TX->>K_INIT: submit WAL-RELEASED-record write + FLUSH
+        K_INIT->>K_TGT: NVMe Write + FLUSH commands
+        K_TGT->>JBOF: block-layer write + flush
+        JBOF-->>K_TGT: completions
+        K_TGT-->>K_INIT: completions
+        K_INIT-->>TX: RELEASED flush returns [c5 window ends — prior extent GC-eligible]
+    else first-write (no prior gen)
+        Note over TX,K_INIT: skip 4d/4e — no reader quiesce, no RELEASED to write
+    end
+
+    TX-->>SM: 4f. return terminal ACK
     SM-->>CE: store ACK (terminal, cache-visible)
 
-    Note over SM,L1: If any step fails or the process crashes before 4a's flush returns, the PENDING L1 entry is dropped on restart —<br/>it was never lookup-visible.<br/>If the crash lands between 4a return and 4b/4c (the c5 window), WAL replay reconstructs the new value exactly once.
+    Note over SM,L1: If any step fails before 4a's flush returns, the PENDING L1 entry is dropped on restart — it was never lookup-visible.<br/>If the crash lands anywhere in the c5 window (4a → 4e), WAL replay reconstructs the new value at gen exactly once. For overwrites, replay emits a synthetic RELEASED for the prior gen.
 
     Note over vLLM,JBOF: === RECOVERY (restart / nvme reconnect) ===
 
@@ -137,7 +153,7 @@ sequenceDiagram
     K_TGT->>TX: RDMA Write metadata into initiator MR
     K_TGT-->>K_INIT: NVMe completions
     K_INIT-->>TX: bytes
-    TX->>TX: reconstruct key→LBA map from WAL COMMITTED records only.<br/>Uncommitted intents → GC candidates.<br/>COMMITTED records with missing / bad checksum → discarded, extents freed on next GC.<br/>Extents referenced by a COMMITTED record are never reclaimed until an explicit RELEASED record is written.
+    TX->>TX: bucket records by (key, gen). For each key: gen_current = max{gen | COMMITTED and not RELEASED and checksum OK}.<br/>Uncommitted (INTENT only) → extents freed.<br/>COMMITTED with missing / bad checksum → discarded, extents freed on next GC.<br/>COMMITTED at gen < gen_current → emit synthetic RELEASED, free extent (covers c5-crashed overwrites).<br/>Extents referenced by the max-gen COMMITTED are never reclaimed until an explicit RELEASED record is written.
     TX->>L1: initialize L1 as empty — no PENDING entries survive restart
     TX-->>CE: map ready
     CE-->>vLLM: cache online
