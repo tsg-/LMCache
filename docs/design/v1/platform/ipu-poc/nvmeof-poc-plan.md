@@ -22,23 +22,35 @@ rollout.
     (anticipated early August 2026; see Appendix D.6).
 
   They are not sequential stages.
-- **Delivery scope of this plan:** CX7 and MEV. MMG is a follow-on
-  integration whose environment is a placeholder (Appendix D.6).
+- **Delivery scope of this plan:** CX7 end-to-end (Deliverables 1
+  and 2), plus the MEV integration contract (Appendix D.5) that a
+  follow-on MEV plan will consume. MEV execution itself and MMG
+  integration are follow-on plans; their environments are captured
+  as contracts in Appendix D.5 / D.6, not as milestones on this
+  plan's schedule.
 - Under Architecture A, execution on any platform is split into
   **two deliverables**. Stages 0–5 (Appendix B) are the
   implementation milestones inside these deliverables:
-  - **Deliverable 1 — Raw NVMe-oF Baseline.** Safe target lifecycle,
-    attach / detach, direct block read/write. Integrity verification,
-    latency, throughput, CPU measurements. **Exit:** reproducible
-    remote-NVMe baseline. **Explicit non-claim:** no durable LMCache
-    cache semantics or crash recovery yet. (Stages 0–2.)
+  - **Deliverable 1 — Raw NVMe-oF Baseline.** Safe target lifecycle
+    (attach, detach, reconnect exercised as lifecycle steps under T1
+    — timing is not part of D1 exit), direct block read/write with
+    integrity verification (T2a), latency and throughput (T2b).
+    **Exit:** reproducible remote-NVMe latency/throughput baseline
+    and a lifecycle that is idempotent. **Explicit non-claims:** no
+    durable LMCache cache semantics, no crash recovery, no host-CPU
+    baseline (T7, host-CPU-per-GB and MR/QP churn), no timed
+    attach/reconnect metrics — those all belong to D2. (Stages 0–2.)
   - **Deliverable 2 — Durable Remote-L2.** LMCache integration,
     key→LBA metadata, WAL (Appendix A) or equivalent, idempotency;
     crash / reconnect recovery, overwrite generations, allocator
-    safety. **Exit:** an ACKed cache entry is recoverable and
-    integrity-verified. (Stages 3–5.)
-- CX7 exits Deliverable 2 first. MEV then repeats both deliverables
-  against the environment in Appendix D.5.
+    safety; CX7 host-CPU baseline (T7) captured under the integrated
+    workload (T6). **Exit:** an ACKed cache entry is recoverable and
+    integrity-verified, and the T7 CX7 baseline is complete enough
+    for the follow-on MEV / MMG plans to compare against. (Stages
+    3–5.)
+- This plan finishes at CX7 D2 exit. The follow-on MEV plan then
+  runs both deliverables against the environment in Appendix D.5;
+  MMG follows once its environment (Appendix D.6) is real.
 
 **Claim-scope rule.** Deliverable 1 results may claim NVMe-oF
 connectivity, lifecycle safety, and block-level performance /
@@ -47,10 +59,12 @@ safety. Those claims start only after Deliverable 2 exit.
 
 Architecture A is the customer-requested path to measure whether an
 IPU can reduce transport CPU cost without degrading cache behavior.
-Success on CX7 + MEV means passing the functional and durability
-gates in Section 9.5 on both platforms and producing enough evidence
-to pick one of the three Architecture A outcomes in Section 3.1
-(advance A, optimize A, or abandon A).
+Success for this plan means passing the functional and durability
+gates in Section 9.5 on CX7 and producing a T7 CX7 baseline the
+follow-on MEV / MMG plans can compare against. The Architecture A
+outcome (advance A, optimize A, or abandon A; Section 3.1) is not
+finalized by this plan alone — it requires the MEV / MMG platform
+evidence a subsequent plan will produce.
 
 **Definitions used throughout:** L0 = GPU HBM; L1 = initiator host DRAM;
 L2 = remote NVMe namespace via NVMe-oF/RDMA. Architecture A places all
@@ -64,20 +78,20 @@ it explicit (Appendix D).
 
 ## 2. Customer Requirements and Traceability
 
-Each requirement is categorized by source and has an owner and
-acceptance evidence.
+Each requirement is categorized by source and has acceptance
+evidence.
 
-| ID | Requirement | Source | Owner | Acceptance evidence |
-|---|---|---|---|---|
-| R1 | LMCache runs only on the initiator (compute) host. | Customer requirement | Architecture | No LMCache process on target; verified at kickoff. |
-| R2 | Storage node exposes NVMe namespaces over NVMe-oF/RDMA with no LMCache agent. | Customer requirement | Architecture | `nvmet-rdma` config listing + `ps` on target free of LMCache processes. |
-| R3 | One initiator has exclusive ownership of one unused namespace. | Customer requirement | Lab operator | ACL restricts to single host NQN; namespace listed as unused pre-attach. |
-| R4 | Lifecycle (attach/use/detach) is idempotent and leaks no state. | LMCache architectural decision | LMCache engineering | Lifecycle test T1: 3× repeat cycles + negative tests; final `nvme list-subsys` empty. |
-| R5 | Data-plane fabric is isolated from management plane; management SSH is never at risk. | Lab/security constraint | Lab operator | Target refuses management-plane listen IP; management plane MTU/config unchanged across the POC. |
-| R6 | Store ACK implies durability across crash/reconnect. | LMCache architectural decision | LMCache engineering | WAL commit + flush ordering (Appendix A); fault-matrix tests T4, T5. |
-| R7 | Every load matches its committed checksum; no torn/stale value is lookup-visible. | Customer requirement | LMCache engineering | BLAKE3 verification on every read; recovery invariants (Appendix A). |
-| R8 | Results are reproducible from a versioned manifest. | POC measurement objective | LMCache engineering | Run manifest schema (Section 8); every artifact tagged `initiator-owned-nvmeof` in the manifest. |
-| R9 | POC evidence produces the CX7 baseline required to evaluate IPU offload in the later MEV / MMG platform plans. | POC measurement objective | LMCache engineering | Test T7 on CX7 captures host-CPU-per-GB and kernel `nvme_rdma` MR/QP churn tables. |
+| ID | Requirement | Source | Acceptance evidence |
+|---|---|---|---|
+| R1 | LMCache runs only on the initiator (compute) host. | Customer requirement | No LMCache process on target; verified at kickoff. |
+| R2 | Storage node exposes NVMe namespaces over NVMe-oF/RDMA with no LMCache agent. | Customer requirement | `nvmet-rdma` config listing + `ps` on target free of LMCache processes. |
+| R3 | One initiator has exclusive ownership of one unused namespace. | Customer requirement | ACL restricts to single host NQN; namespace listed as unused pre-attach. |
+| R4 | Lifecycle (attach/use/detach) is idempotent and leaks no state. | LMCache architectural decision | Lifecycle test T1: 3× repeat cycles + negative tests; final `nvme list-subsys` empty. |
+| R5 | Data-plane fabric is isolated from management plane; management SSH is never at risk. | Lab/security constraint | Target refuses management-plane listen IP; management plane MTU/config unchanged across the POC. |
+| R6 | Store ACK implies durability across crash/reconnect. | LMCache architectural decision | WAL commit + flush ordering (Appendix A); fault-matrix tests T4, T5. |
+| R7 | Every load matches its committed checksum; no torn/stale value is lookup-visible. | Customer requirement | BLAKE3 verification on every read; recovery invariants (Appendix A). |
+| R8 | Results are reproducible from a versioned manifest. | POC measurement objective | Run manifest schema (Section 8); every artifact tagged `initiator-owned-nvmeof` in the manifest. |
+| R9 | POC evidence produces the CX7 baseline required to evaluate IPU offload in the later MEV / MMG platform plans. | POC measurement objective | Test T7 on CX7 captures host-CPU-per-GB and kernel `nvme_rdma` MR/QP churn tables. |
 
 **Requirement → stage/test trace:** R1/R2 → kickoff and T1; R3 → kickoff
 and T1; R4 → T1; R5 → guardrails and T1 negatives; R6 → T3, T4, T5;
@@ -113,21 +127,24 @@ ready (Appendix D.6).
 | IPU/Falcon offload opportunity | Initiator HCA (verbs/MR/QP) + target `nvmet-rdma` fabric termination | Target-side LMCache agent + admission control |
 | Evidence to justify choosing | Simplicity, safety, offload of transport surface | Dedup benefit, admission benefit, multi-initiator scale |
 
-### 3.1 Architecture A outcomes (what CX7 + MEV delivery decides)
+### 3.1 Architecture A outcomes (framework for the full multi-plan decision)
 
-CX7 and MEV together answer whether Architecture A itself passes its
-functional, durability, and offload-evidence gates. Three possible
-outcomes after CX7 validation and MEV Falcon-offload runs:
+CX7 (this plan), MEV (follow-on plan), and MMG (follow-on plan)
+together answer whether Architecture A itself passes its functional,
+durability, and offload-evidence gates. This plan is the CX7 input to
+that framework; the outcome is finalized only after the follow-on
+platform plans land. Three possible outcomes after all platform
+evidence is in:
 
 - **Advance A** as the primary path: correctness, durability, and the
-  offload measurements from CX7 (T7) plus MEV all support it.
+  offload measurements from CX7 (T7) plus MEV / MMG all support it.
 - **Optimize A** first: A passes correctness, but needs targeted work
   (WAL fast-path, allocator batching, or further IPU offload delivery)
   before the customer can claim performance numbers.
 - **Abandon A**: A fails a functional/durability gate (Section 9.5) or
-  neither the CX7 baseline nor the MEV offload delta shows realistic
-  headroom for MMG to build on. Any pivot to a different architecture
-  is a follow-on decision, not an output of this plan.
+  neither the CX7 baseline nor the IPU-platform offload delta shows
+  realistic headroom for MMG to build on. Any pivot to a different
+  architecture is a follow-on decision, not an output of this plan.
 
 ## 4. Architecture A Topology and Component Roles
 
@@ -202,18 +219,22 @@ lab. MEV and MMG runs use different hosts and network planes.
 ### 5.2 Operational guardrails (preconditions and hard no-gos)
 
 The POC does not begin destructive I/O or benchmarking until every
-condition below is recorded in the run manifest. Each is a hard gate;
-failure suspends the schedule.
+condition below is recorded in the run manifest. All gates are hard
+gates (schedule stops until met) **except the Fabric MTU row**,
+which is a performance gate — functional stages (T1, T3 correctness,
+T4/T5) may proceed labeled `mtu:degraded`, but no timed number (T2b,
+T3 latency budget, T6 throughput, T7 baseline) is customer-reportable
+until the MTU gate is satisfied.
 
-| Gate | Required evidence | If unmet |
-|---|---|---|
-| Target kernel modules | `nvmet` and `nvmet_rdma` load cleanly on the target host. | Target owner rebuilds module or boots compatible kernel before Stage 1 starts. See Section 7. |
-| Fabric MTU | `active_mtu=IBV_MTU_4096` on both HCAs; link MTU ≥ 4200 (lab: 9000); bidirectional `ping -M do -s 4000` passes. See Appendix C. | Functional stages proceed labeled `mtu:degraded`; performance stages stop and escalate. |
-| Management-plane isolation | Target refuses management-plane listen IP; management MTU/config unchanged. | Provisioning refuses to proceed. |
-| Dedicated media | A named `/dev/disk/by-id/...` namespace is unused, unmounted, and not a system/data device. | Target provisioning script fails closed. |
-| Target isolation | Target binds only data-subnet address, unique configfs port, single-host-NQN ACL. | Target provisioning script fails closed. |
-| Lifecycle safety | Setup, status, connect, discover, disconnect, teardown are idempotent; failed setup leaves no residue. | Lifecycle test T1 fails; Stage does not exit. |
-| Observability | Initiator kernel/NVMe logs, target `nvmet` logs, `nvme list-subsys --json`, controller statistics, namespace identity captured per run. | Run manifest is incomplete; results not customer-reportable. |
+| Gate | Type | Required evidence | If unmet |
+|---|---|---|---|
+| Target kernel modules | Hard | `nvmet` and `nvmet_rdma` load cleanly on the target host. | Target owner rebuilds module or boots compatible kernel before Stage 1 starts. See Section 7. |
+| Fabric MTU | Performance | `active_mtu=IBV_MTU_4096` on both HCAs; link MTU ≥ 4200 (lab: 9000); bidirectional `ping -M do -s 4000` passes. See Appendix C. | Functional stages proceed labeled `mtu:degraded`; timed / performance runs stop and escalate — no customer-reportable numbers until the gate is met. |
+| Management-plane isolation | Hard | Target refuses management-plane listen IP; management MTU/config unchanged. | Provisioning refuses to proceed. |
+| Dedicated media | Hard | A named `/dev/disk/by-id/...` namespace is unused, unmounted, and not a system/data device. | Target provisioning script fails closed. |
+| Target isolation | Hard | Target binds only data-subnet address, unique configfs port, single-host-NQN ACL. | Target provisioning script fails closed. |
+| Lifecycle safety | Hard | Setup, status, connect, discover, disconnect, teardown are idempotent; failed setup leaves no residue. | Lifecycle test T1 fails; Stage does not exit. |
+| Observability | Hard | Initiator kernel/NVMe logs, target `nvmet` logs, `nvme list-subsys --json`, controller statistics, namespace identity captured per run. | Run manifest is incomplete; results not customer-reportable. |
 
 ## 6. Scope, Exclusions, and Workload Assumptions
 
@@ -284,7 +305,7 @@ separate and follows Appendix D.
 | D1 | Stage 2 | Baseline block I/O tests T2a / T2b (direct fio/dd against the attached namespace — no LMCache in the path). Establishes remote-NVMe latency/bandwidth baseline. **D1 exit.** | Stage 1 exit; workload assumptions confirmed | LMCache engineering |
 | D2 — Durable Remote-L2 | Stage 3 | LMCache remote-L2 integration + WAL implementation + test T3 (Appendix A). First stage at which durable `store()` ACK is claimable. | Stage 2 exit (D1); WAL design frozen | LMCache engineering |
 | D2 | Stage 4 | Fault + recovery matrix tests T4, T5 across all c1–c6 cutpoints (Appendix A.3); exercise first-write and overwrite generation semantics (A.1/A.4). | Stage 3 exit | LMCache engineering |
-| D2 | Stage 5 | Integrated workload T6 with T7 instrumentation captured in the same run (or a re-run if the harness cannot instrument in-line), results review, Architecture A outcome decision (Section 3.1). **D2 exit.** | T4/T5 exit | LMCache engineering + customer review |
+| D2 | Stage 5 | Integrated workload T6 with T7 instrumentation captured in the same run (or a re-run if the harness cannot instrument in-line), results review, and CX7 evidence packaged as inputs to the Architecture A outcome (Section 3.1; the outcome itself is finalized after MEV / MMG follow-on plans land, not by this plan alone). **D2 exit.** | T4/T5 exit | LMCache engineering + customer review |
 
 **Claim-scope gate.** Results emitted before Stage 3 exit are labeled
 `deliverable:D1` in the run manifest and may not appear in
@@ -346,8 +367,13 @@ T2b captures the direct block-I/O baseline on the CX7 platform:
 - L2 read aggregate bandwidth at each QD sweep point.
 - L2 write p50/p99 latency (block-I/O lower bound; no WAL, no
   checksum, no map publication).
-- Attach-to-first-I/O time.
-- Reconnect time after transient link loss.
+
+Timed attach-to-first-I/O and reconnect-after-link-loss numbers are
+**not** part of T2b (D1). T1 exercises attach and reconnect as
+lifecycle steps for correctness (idempotency, no residue); timed
+metrics for those steps are captured in the T7 lifecycle-latency
+breakdown (D2, Section 8.1) so they land against the integrated
+workload rather than a raw-block point.
 
 T2b numbers are the **bare block-I/O baseline**, not the T3/T6
 targets. T3 (WAL normal path) and T6 (integrated LMCache workload)
@@ -420,7 +446,7 @@ effect.
 | Evidence | Every result reproducible from the manifest and tagged `initiator-owned-nvmeof`. |
 | CX7 comparison baseline | Test T7 delivers the CX7 measurements the later MEV / MMG platform plans compare against. |
 
-### 9.5 Final decision criteria (go/no-go and A vs B outcome)
+### 9.5 Final decision criteria (go/no-go and Architecture A outcome)
 
 T2 (block-I/O baseline) and T3 (WAL normal path) run per the Section 7
 timeline once T1 exits. Publishable **customer performance claims** —
@@ -434,9 +460,11 @@ A lifecycle-safety failure, any torn-key exposure, any post-replay
 allocator collision, or a missing manifest is a no-go for customer
 performance claims.
 
-At the end of the CX7 + MEV delivery, pick one Architecture A outcome:
-**advance A**, **optimize A**, or **abandon A** (see Section 3.1 for
-the criteria behind each).
+At CX7 D2 exit, record the CX7 evidence needed to inform the
+Architecture A outcome — **advance A**, **optimize A**, or **abandon
+A** (see Section 3.1 for the criteria behind each). The outcome
+itself is finalized only after the follow-on MEV / MMG platform
+evidence lands; this plan is not the sole input to that decision.
 
 ## 10. Risks
 
@@ -581,8 +609,8 @@ Section A.1 steps is explicit.
 | c2 | After WAL intent flush, before payload FUA | Intent durable; payload not durable | Key must not appear; intent is a GC candidate |
 | c3 | After payload FUA, before checksum FUA | Payload durable; no checksum record | Key must not appear; payload orphan is a GC candidate |
 | c4 | After checksum FUA, before WAL commit flush (A.1 step 4a) | Payload and checksum durable; no `COMMITTED` record | Key at new `gen` must not appear; matched payload+checksum is a GC candidate. Overwrite: prior committed generation remains authoritative |
-| **c5** | **Any crash point after WAL commit flush (A.1 step 4a) but before the `RELEASED` flush (A.1 step 4e). Covers three in-memory sub-states — pre-publish (before 4b), post-publish/pre-quiesce (during 4c/4d), and post-quiesce/pre-RELEASED — all of which have the same on-media state after restart.** | **`COMMITTED` record for new `gen` durable on media; no `RELEASED` for prior `gen` (overwrite); in-memory map/L1 is wiped by restart** | **Key MUST appear after restart with digest match on read at the new `gen` — recovery reconstructs the new value from the WAL exactly once; for overwrites, replay emits a synthetic `RELEASED` for the prior `gen` and returns its extent to GC (see A.4)** |
-| c6 | After `RELEASED` flush (A.1 step 4e; skipped for first-write) and terminal ACK (A.1 step 4f) | Fully durable and visible; prior extent (if any) retired | Key MUST appear with digest match at the new `gen`; prior extent GC-eligible |
+| **c5** | **Any crash point after WAL commit flush (A.1 step 4a) but before the terminal ACK returns (A.1 step 4f). Covers three in-memory sub-states — pre-publish (before 4b), post-publish/pre-quiesce (during 4c/4d), and (overwrite only) post-quiesce/pre-RELEASED. On the first-write path there is no 4d/4e, so the c5 window ends when 4c completes and the map is publish-visible; on the overwrite path the window ends when the 4e `RELEASED` flush returns. In both cases the on-media state after restart is the same for a given crash point within the window.** | **`COMMITTED` record for new `gen` durable on media; no `RELEASED` for prior `gen` (overwrite only); in-memory map/L1 is wiped by restart** | **Key MUST appear after restart with digest match on read at the new `gen` — recovery reconstructs the new value from the WAL exactly once. On the overwrite path, replay additionally emits a synthetic `RELEASED` for the prior `gen` and returns its extent to GC (see A.4). First-write has no prior extent to release.** |
+| c6 | Post-final-publication and terminal ACK returned (A.1 step 4f). On the overwrite path this additionally requires the `RELEASED` flush (A.1 step 4e) to have returned before 4f; first-write skips 4d/4e entirely and reaches c6 directly from 4c. | Fully durable and visible; prior extent (overwrite only) retired | Key MUST appear with digest match at the new `gen`; prior extent (overwrite only) GC-eligible. First-write has no prior extent to reclaim. |
 
 Cutpoint c5 is the most important boundary because durability is fully
 established on media but not yet visible in the running process's data
@@ -738,9 +766,11 @@ Run tests T4 and T5 against the six WAL cutpoints defined in
 Appendix A.3 (c1: before WAL intent; c2: after intent before
 payload; c3: after payload before checksum; c4: after checksum
 before WAL commit flush; **c5: after WAL commit flush, anywhere
-before `RELEASED` flush** — sampled at the three sub-boundaries in
-Appendix E.1; c6: after `RELEASED` flush and ACK). Exit conditions,
-matching A.3:
+before the terminal ACK returns** — sampled at the sub-boundaries
+in Appendix E.1 (first-write skips the quiesce/`RELEASED`
+sub-boundaries); c6: post-final-publication and ACK, which on the
+overwrite path additionally requires the `RELEASED` flush to have
+returned). Exit conditions, matching A.3:
 
 - **First-write case** (key had no prior committed value): c1–c4
   yield the key absent after recovery; c5 and c6 yield the fully
@@ -960,8 +990,8 @@ that cannot demonstrate all three is not acceptable evidence.
 | c2 (after intent, before payload) | Kill after fsync returns, before payload `io_uring_submit` returns |
 | c3 (after payload FUA, before checksum FUA) | Kill after payload CQE handler observes success, before checksum submit |
 | c4 (after checksum FUA, before WAL commit flush) | Kill after checksum CQE observed, before commit-record fsync returns |
-| **c5 (after WAL commit flush, before `RELEASED` flush)** | **Sample all three c5 sub-boundaries in separate runs: (i) kill AFTER commit-record fsync returns, BEFORE the map/L1 flip (4b); (ii) kill AFTER 4b/4c publish, BEFORE the 4d reader-quiesce completes; (iii) overwrite only — kill AFTER quiesce, BEFORE `RELEASED` fsync returns. All three have the same on-media state after restart, but exercise different in-memory races** |
-| c6 (after RELEASED flush and ACK) | Kill after ACK enqueue to caller |
+| **c5 (after WAL commit flush, before terminal ACK)** | **Sample all c5 sub-boundaries in separate runs: (i) kill AFTER commit-record fsync returns, BEFORE the map/L1 flip (4b); (ii) kill AFTER 4b/4c publish, BEFORE the 4d reader-quiesce completes (overwrite only); (iii) kill AFTER quiesce, BEFORE `RELEASED` fsync returns (overwrite only). First-write exercises only (i) — the quiesce/RELEASED sub-boundaries do not exist on that path. All sampled sub-boundaries have the same on-media state after restart for their respective path but exercise different in-memory races** |
+| c6 (post-final-publication and ACK; overwrite also requires `RELEASED` flush) | Kill after ACK enqueue to caller |
 
 ### E.2 Fabric-side faults (T5, CX7 baseline)
 
