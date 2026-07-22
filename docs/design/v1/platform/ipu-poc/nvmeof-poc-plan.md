@@ -16,10 +16,11 @@ rollout.
     stack and produce the T7 kernel-path baseline.
   - **MEV** — Intel IPU with Falcon offload on the IPU, Gen4 NVMe
     pool. First IPU-offload measurement against the CX7 T7 baseline.
-  - **MMG** — Xeon (Granite Rapids AP) storage host with **16× Gen5
-    NVMe SSDs and 4× Intel MMG-400 IPUs**, Falcon offload on the IPU.
-    Follow-on integration when silicon and Falcon enabling are ready
-    (anticipated early August 2026; see Appendix D.6).
+  - **MMG** — Xeon storage platform with Intel MMG-400 IPUs and Falcon
+    offload. The IPU/SSD count and host topology are a pre-run decision
+    in Appendix D.3. Follow-on integration begins when silicon and
+    Falcon enabling are ready (anticipated early August 2026; see
+    Appendix D.6).
 
   They are not sequential stages.
 - **Delivery scope of this plan:** CX7 end-to-end (Deliverables 1
@@ -78,25 +79,13 @@ it explicit (Appendix D).
 
 ## 2. Customer Requirements and Traceability
 
-Each requirement is categorized by source and has acceptance
-evidence.
-
-| ID | Requirement | Source | Acceptance evidence |
-|---|---|---|---|
-| R1 | LMCache runs only on the initiator (compute) host. | Customer requirement | No LMCache process on target; verified at kickoff. |
-| R2 | Storage node exposes NVMe namespaces over NVMe-oF/RDMA with no LMCache agent. | Customer requirement | `nvmet-rdma` config listing + `ps` on target free of LMCache processes. |
-| R3 | One initiator has exclusive ownership of one unused namespace. | Customer requirement | ACL restricts to single host NQN; namespace listed as unused pre-attach. |
-| R4 | Lifecycle (attach/use/detach) is idempotent and leaks no state. | LMCache architectural decision | Lifecycle test T1: 3× repeat cycles + negative tests; final `nvme list-subsys` empty. |
-| R5 | Data-plane fabric is isolated from management plane; management SSH is never at risk. | Lab/security constraint | Target refuses management-plane listen IP; management plane MTU/config unchanged across the POC. |
-| R6 | Store ACK implies durability across crash/reconnect. | LMCache architectural decision | WAL commit + flush ordering (Appendix A); fault-matrix tests T4, T5. |
-| R7 | Every load matches its committed checksum; no torn/stale value is lookup-visible. | Customer requirement | BLAKE3 verification on every read; recovery invariants (Appendix A). |
-| R8 | Results are reproducible from a versioned manifest. | POC measurement objective | Run manifest schema (Section 8); every artifact tagged `initiator-owned-nvmeof` in the manifest. |
-| R9 | POC evidence produces the CX7 baseline required to evaluate IPU offload in the later MEV / MMG platform plans. | POC measurement objective | Test T7 on CX7 captures host-CPU-per-GB and kernel `nvme_rdma` MR/QP churn tables. |
-
-**Requirement → stage/test trace:** R1/R2 → kickoff and T1; R3 → kickoff
-and T1; R4 → T1; R5 → guardrails and T1 negatives; R6 → T3, T4, T5;
-R7 → T3, T4, T5; R8 → all tests via the manifest; R9 → T7 on CX7, then
-MEV / MMG platform plans.
+| ID | Requirement | Evidence |
+|---|---|---|
+| R1 | LMCache runs only on the initiator; the target exports NVMe-oF namespaces and runs no LMCache agent. | Target process and `nvmet-rdma` configuration at kickoff. |
+| R2 | One initiator exclusively owns one unused namespace. | Single-host NQN ACL and pre-attach namespace check. |
+| R3 | Every successful load matches its recorded BLAKE3 checksum. | Read-path integrity verification. |
+| R4 | Results are reproducible from a versioned manifest. | Manifest records topology, software versions, commands, and artifacts. |
+| R5 | CX7 results provide the baseline for later IPU platform comparisons. | T7 captures host CPU, `nvme_rdma` MR/QP churn, and CQ event rate. |
 
 ## 3. Architecture A vs B — Context
 
@@ -234,6 +223,7 @@ until the MTU gate is satisfied.
 | Dedicated media | Hard | A named `/dev/disk/by-id/...` namespace is unused, unmounted, and not a system/data device. | Target provisioning script fails closed. |
 | Target isolation | Hard | Target binds only data-subnet address, unique configfs port, single-host-NQN ACL. | Target provisioning script fails closed. |
 | Lifecycle safety | Hard | Setup, status, connect, discover, disconnect, teardown are idempotent; failed setup leaves no residue. | Lifecycle test T1 fails; Stage does not exit. |
+| Benchmark harness | Hard | Direct-I/O runner, LMCache trace harness, and manifest collector complete a dry run and produce a readable artifact. | Stop at Stage 0; select and document an alternate harness before any Stage 1 work. |
 | Observability | Hard | Initiator kernel/NVMe logs, target `nvmet` logs, `nvme list-subsys --json`, controller statistics, namespace identity captured per run. | Run manifest is incomplete; results not customer-reportable. |
 
 ## 6. Scope, Exclusions, and Workload Assumptions
@@ -247,6 +237,16 @@ until the MTU gate is satisfied.
 | Initiator-owned L0/L1/L2 tiering on the CX7 platform | IPU/Falcon offload software delivery on MEV and MMG platforms |
 | Durable store, load, restart, and reconnect behavior | Comparison against Architecture B raw-verbs figures as if same experiment |
 | WAL-based durable publication of data, checksum, and key→LBA mapping | Copy-on-write publication (deferred; see Future Work) |
+| Standard NVMe behavior across qualified SSDs | OEM selection, procurement, and vendor-specific SSD features such as CMB |
+
+**Transport and offload boundary.** CX7 measurements use NVMe-oF/RDMA.
+TSO/GSO is a TCP-path offload concern, not an RDMA payload-path
+criterion; any TCP fallback must state its packetization and offload
+evidence in a separate experiment. The IPU platform contract in
+Appendix D defines the corresponding data path.
+
+PTP is optional and is used only for approximate cross-host trace
+alignment. It is not the source of latency or packet-pacing timestamps.
 
 ### 6.2 Workload assumptions
 
@@ -258,7 +258,7 @@ kickoff.
 | Attribute | Value |
 |---|---|
 | Model / profile | DeepSeek-V3 KV-cache page geometry (or any single model whose page size ≥ 4 KiB). |
-| Page size (I/O request size) | 4 KiB for latency runs; 256 KiB for bandwidth runs. |
+| Page size (I/O request size) | 4 KiB for latency runs; 128 KiB and 256 KiB for bandwidth runs. |
 | Namespace capacity | ≥ 100 GiB usable; ≥ 2× the intended working set. |
 | Queue-depth sweep | QD ∈ {1, 4, 16, 32, 64} for both read and write. |
 | Test duration | ≥ 60 s per QD point for latency; ≥ 5 min per point for bandwidth. |
@@ -280,6 +280,7 @@ what the pass criterion checks.
 | Warmup | Pre-populate L2 with the full key population, then run for a warmup window equal to 2× the L1 fill time before starting measurement. |
 | Cache-clear / reset between runs | Restart the LMCache process AND detach/reattach the NVMe-oF namespace between L1-hit-rate points so L1 starts empty and L2 starts with the pre-populated set. Every T6 run manifest records the pre-run L1/L2 hit counters as zero. |
 | Promotion policy | L2-hit → promote to L1 with LRU eviction; recorded in the run manifest. |
+| Read/write mix | Reads:writes ≥ 5:1 in a named steady-state run; record observed TX:RX bytes and the achieved operation mix. |
 | Test duration | ≥ 15 min sustained per L1-hit-rate point after warmup. |
 | Observed-counter assertions | For each target rate, the observed L1 hit ratio must fall within a customer-agreed tolerance of the target; L2 hit ratio is recorded separately. Deviations are recorded and analyzed rather than silently accepted. |
 
@@ -325,10 +326,10 @@ Stage 1 resumes.
 |---|---|---|---|---|---|---|
 | T1 | D1 | Lifecycle safety | Target NQN, host NQN, listen IP, namespace device; management-plane IP as negative input | 3× repeat setup→connect→I/O→disconnect→teardown all succeed; 5 negative cases fail closed; no residue | Script logs, `nvme list-subsys` before/after, configfs snapshot | LMCache engineering |
 | T2a | D1 | Integrity-validation pass | Deterministic pattern writes across the QD sweep; **every** I/O verified via external SHA-256 write/read; measurement NOT timed | Zero mismatch; zero controller reset or unexpected error | Integrity log, controller stats, manifest | LMCache engineering |
-| T2b | D1 | Timed performance pass | Page size ∈ {4K, 256K}; QD ∈ {1, 4, 16, 32, 64}; direction ∈ {read, write}; ≥ 60 s per point. Pre-run seed + post-run digest verify only — no per-I/O readback in the measurement window | Zero unexpected controller resets; pre/post digests match | fio/bench logs, controller stats, manifest | LMCache engineering |
-| T3 | D2 | WAL durability (normal path) | 4 KiB and 256 KiB stores; QD 1 and 32; BLAKE3 verify on read | Every load hash-matches; PENDING never lookup-visible; ACK follows WAL commit flush (Appendix A step 4a) | Bench logs, WAL replay tool output, manifest | LMCache engineering |
+| T2b | D1 | Timed performance pass | Page size ∈ {4K, 128K, 256K}; QD ∈ {1, 4, 16, 32, 64}; direction ∈ {read, write}; ≥ 60 s per point. Pre-run seed + post-run digest verify only — no per-I/O readback in the measurement window | Zero unexpected controller resets; pre/post digests match | fio/bench logs, controller stats, manifest | LMCache engineering |
+| T3 | D2 | WAL durability (normal path) | 4 KiB, 128 KiB, and 256 KiB stores; QD 1 and 32; BLAKE3 verify on read | Every load hash-matches; PENDING never lookup-visible; ACK follows WAL commit flush (Appendix A step 4a) | Bench logs, WAL replay tool output, manifest | LMCache engineering |
 | T4 | D2 | Fault matrix — crash | Controlled in-flight fault harness (Appendix E) at each of **6 WAL cutpoints** (Appendix A.3) — including c5, the committed-but-not-yet-visible boundary; cold restart | On replay: old or new value only; no torn key; no committed extent re-allocated; **every commit-record-durable case reconstructs the new value exactly once, no duplicate map entry** | Fault-matrix report (1 row per cutpoint) with recorded NVMe status per injection, replay tool output | LMCache engineering |
-| T5 | D2 | Fault matrix — fabric-side fault | Controlled data-plane fault injection (Appendix E) that provably fires before the relevant NVMe completion; management plane never disturbed | Same invariants as T4; every injection records observed NVMe status; reconnect completes within timeout | Fault-matrix report with injection-timing evidence, kernel logs | LMCache + lab operator |
+| T5 | D2 | Fault matrix — fabric-side fault | Controlled data-plane fault injection (Appendix E) that provably fires before the relevant NVMe completion; management plane never disturbed | Same invariants as T4; every injection records observed NVMe status; in-flight I/O fails visibly before reconnect, and no degraded-rate operation is accepted | Fault-matrix report with injection-timing evidence, kernel logs | LMCache + lab operator |
 | T6 | D2 | Integrated LMCache workload | **KV trace targeting fixed L1 hit rates** (see workload assumptions §6.2): L1 hit rates ∈ {0%, 20%, 50%, 80%}, mixed R/W, ≥ 15 min sustained. Assertions on observed L1 hit counters vs target; L2 hit and eviction rate recorded separately | All functional scenarios pass with recovery guarantees; L1 hit ratio, L2 hit ratio, eviction rate, promotion count, bytes-written-per-reused-prefix, time-to-usable-KV-after-restart all measured and publishable | Bench report, hit-ratio and eviction histograms, controller metrics | LMCache engineering |
 | T7 | D2 | CX7 measurements for later IPU comparisons | Instrumented re-run of T6 (or T6 with instrumentation enabled if the harness supports it in a single pass): capture host-CPU (kernel/user/interrupt), initiator-kernel `nvme_rdma` MR/QP churn (path a future IPU platform would replace), CQ event rate, lifecycle-latency breakdown | Baseline sufficient for MEV and MMG platform plans to compare against once each defines its endpoint contract (Appendix D) | T7 baseline report — host-CPU-per-GB and MR/QP churn tables | LMCache engineering |
 
@@ -866,6 +867,28 @@ choice is fixed for the duration of its runs.
   responsibilities in the CX7 baseline).
 - **Preservation vs replacement of Linux NVMe-oF / block-I/O
   implementation.** Explicit statement per platform.
+- **Hardware topology.** Record IPUs and SSDs per socket/host, host
+  count, link rate, and whether the IPU data path spans hosts. Resolve
+  the current `2 IPUs + 8 SSDs per host/socket` and "no multi-host
+  IPU" statement against the older `4 IPUs + 16 SSDs` MMG assumption
+  before the platform run begins.
+- **Data-touch contract.** "Zero CPU data touch" means that, after
+  buffer registration and descriptor setup, host CPUs do not load,
+  store, or memcpy KV payload bytes. It does **not** mean DRAM bypass:
+  registered host DRAM remains the DMA staging area. The IPU must
+  stream payloads rather than treat its approximately 32 KiB cache as
+  a KV-page store. Evidence includes host CPU profiles and IPU/NIC DMA
+  counters for the measured run.
+- **Transport and packetization.** State the payload sweep (128 KiB
+  and 256 KiB) and the selected transport. For a TCP path, record
+  TSO/GSO state and segmentation evidence; for an RDMA path, do not
+  use TCP offload counters as data-path evidence.
+- **Link-failure policy.** A contracted link failure is fail-fast:
+  surface the in-flight I/O error, do not operate at a reduced rate,
+  and reconnect only after the link returns at its contracted
+  parameters. The fault harness records this ordering.
+- **Time correlation.** PTP may align traces approximately across
+  hosts, but it is not a latency clock or packet-pacing mechanism.
 - **Baseline vs. IPU comparison** — CX7 T2b/T6/T7 numbers are the fixed
   comparison target for both platforms.
 - **Success thresholds** the customer sets before each platform runs:

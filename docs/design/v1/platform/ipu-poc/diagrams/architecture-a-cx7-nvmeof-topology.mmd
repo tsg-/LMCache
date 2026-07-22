@@ -1,36 +1,40 @@
-%%{init: {"theme": "default", "flowchart": {"htmlLabels": true}}}%%
-graph LR
-    subgraph INIT ["Initiator / Compute Node (CX7 platform: Xeon + CX7)"]
-        direction TB
-        GPU["GPU HBM<br/>(L0)"]
-        CPU_I["Xeon host<br/>LMCache Engine + StorageManager<br/>WAL, allocator, key→LBA map"]
-        L1["Initiator DRAM<br/>(L1)<br/>pinned MR buffers"]
-        NVME_I["Linux kernel<br/>nvme_rdma initiator"]
-        HCA_I["Initiator HCA<br/>CX7 mlx5_1<br/>(MEV / MMG platforms: may replace the selected<br/>transport endpoint; see D-init / D-tgt / D-both)"]
-        GPU --- CPU_I
-        CPU_I --- L1
-        CPU_I --- NVME_I
-        NVME_I --- HCA_I
-    end
+%%{init: {"theme": "default"}}%%
+block-beta
+    columns 3
 
-    subgraph TARGET ["Storage / NVMe-oF Target Node (CX7 platform: Xeon + CX7)"]
-        direction TB
-        HCA_T["Target HCA<br/>CX7 rocep153s0f0<br/>(MEV / MMG platforms: may replace the selected<br/>transport endpoint; see D-init / D-tgt / D-both)"]
-        NVMET["Linux kernel<br/>nvmet_rdma<br/>NQN ACL + namespace export"]
-        TDRAM["Target DRAM<br/>(staging only —<br/>NOT an LMCache tier)"]
-        SSD["Dedicated NVMe<br/>namespace (L2 media)"]
-        HCA_T --- NVMET
-        NVMET --- TDRAM
-        NVMET --- SSD
-    end
+    INIT_HDR["Initiator / Compute Node<br/>CX7 platform: Xeon + CX7"]:1
+    space:1
+    TARGET_HDR["Storage / NVMe-oF Target Node<br/>CX7 platform: Xeon + CX7"]:1
 
-    HCA_I ==>|"NVMe-oF/RDMA (RoCEv2)<br/>192.168.200 data plane<br/>active_mtu=IBV_MTU_4096"| HCA_T
+    GPU["GPU/TPU HBM<br/>(L0)"]:1
+    space:1
+    SSD["Dedicated NVMe<br/>namespace (L2 media)"]:1
 
-    classDef owned fill:#c8e6c9,stroke:#2e7d32;
-    classDef remote fill:#fff9c4,stroke:#f9a825;
-    classDef staging fill:#e0e0e0,stroke:#616161,color:#424242;
-    classDef offload fill:#e3f2fd,stroke:#1976d2,stroke-dasharray:5 3;
-    class L1 owned;
-    class SSD remote;
-    class TDRAM staging;
-    class HCA_I,HCA_T offload;
+    CPU_I["Xeon host CPU<br/>Runs: LMCache Engine + StorageManager<br/>WAL, allocator, key→LBA map"]:1
+    space:1
+    CPU_T["Xeon host CPU<br/>Runs: nvmet configfs + nvmet_rdma<br/>SSD block layer<br/>No LMCache agent"]:1
+
+    L1["Initiator DRAM (L1)<br/>pinned MR buffers"]:1
+    space:1
+    TDRAM["Target DRAM<br/>(staging only -<br/>NOT an LMCache tier)"]:1
+
+    NVME_I["Linux kernel<br/>nvme_rdma initiator"]:1
+    space:1
+    NVMET["Linux kernel<br/>nvmet_rdma<br/>NQN ACL + namespace export"]:1
+
+    HCA_I["Initiator HCA<br/>CX7 mlx5_1"]:1
+    FABRIC["NVMe-oF/RDMA (RoCEv2)<br/>192.168.200 data plane<br/>active_mtu=IBV_MTU_4096"]:1
+    HCA_T["Target HCA<br/>CX7 rocep153s0f0"]:1
+
+    GPU --> CPU_I
+    CPU_I --> L1
+    L1 --> NVME_I
+    NVME_I --> HCA_I
+
+    CPU_T --> NVMET
+    NVMET --> TDRAM
+    NVMET --> SSD
+    NVMET --> HCA_T
+
+    HCA_I --> FABRIC
+    FABRIC --> HCA_T
