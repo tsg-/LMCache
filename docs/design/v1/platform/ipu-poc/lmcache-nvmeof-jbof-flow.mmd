@@ -11,6 +11,7 @@ sequenceDiagram
     participant GPU as GPU Connector<br/>(DMA to HBM)
 
     Note over vLLM,JBOF: Initiator-owned + remote-NVMe-oF-L2 alt track.<br/>Storage node runs no LMCache agent — only nvmet-rdma exports namespaces.<br/>Semantic admission, key→LBA map, integrity metadata, and durable-commit ordering all live on the initiator.
+    Note over K,JBOF: NVMe-oF transport direction follows the command: target-side RDMA Reads commonly carry write payloads<br/>and target-side RDMA Writes commonly return read payloads. This does not restore storage-owned cache-level pull semantics.
 
     Note over vLLM,JBOF: === RETRIEVE (Cache Lookup) ===
 

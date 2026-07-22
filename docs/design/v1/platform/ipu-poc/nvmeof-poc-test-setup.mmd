@@ -1,0 +1,25 @@
+graph LR
+    subgraph INIT ["Initiator / Compute Node"]
+        direction TB
+        GPU["GPU / HBM (L0)"]
+        CPU_I["Xeon host<br/>LMCache Engine + StorageManager"]
+        L1["Initiator DRAM (L1)<br/>key map, WAL/COW, checksums"]
+        NVME_I["Linux NVMe-oF initiator"]
+        GPU --- CPU_I
+        CPU_I --- L1
+        CPU_I --- NVME_I
+    end
+
+    subgraph TARGET ["Storage / NVMe-oF Target Node"]
+        direction TB
+        NVMET["nvmet-rdma<br/>NQN ACL + namespace export"]
+        SSD["Dedicated NVMe namespace (L2)"]
+        NVMET --- SSD
+    end
+
+    NVME_I ==>|"NVMe-oF/RDMA over isolated data fabric"| NVMET
+
+    classDef owned fill:#c8e6c9,stroke:#2e7d32;
+    classDef remote fill:#fff9c4,stroke:#f9a825;
+    class L1 owned;
+    class SSD remote;

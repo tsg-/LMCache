@@ -201,3 +201,5 @@ Frame this as an **alternative architecture**, not a tweak to M1:
 - `ipu-poc.md` — top-level POC design
 - `ipu-poc-opens.md` — open questions deck
 - `lmcache-nvmeof-jbof-flow.mmd` — JBOF flow diagram
+- `nvmeof-poc-test-setup.mmd` — initiator-owned hardware topology
+- `nvmeof-poc-plan.md` — phased POC plan and customer acceptance gates

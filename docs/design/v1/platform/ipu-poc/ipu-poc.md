@@ -190,5 +190,9 @@ Hardware topology: [ipu-poc-test-setup.mmd](ipu-poc-test-setup.mmd)
 - [Combined Store+Retrieve Flow](../rdma/diagrams/lmcache-ipu-pull-model-flow.mmd) — end-to-end sequence diagram
 - [Open Questions / Architecture Decisions](ipu-poc-opens.md) — stakeholder alignment deck (NVMe-oF vs RDMA, phasing)
 - [Hardware Test Topology](ipu-poc-test-setup.mmd) — two-node lab setup diagram
+- [NVMe-oF Alternative Topology](nvmeof-poc-test-setup.mmd) — initiator-owned
+  L1 plus remote NVMe L2 topology
+- [NVMe-oF Alternative POC Plan](nvmeof-poc-plan.md) — scope, execution
+  phases, evidence, and customer acceptance gates
 - [IPU Traffic Benchmark Configs](../../tools/ipu_traffic_benchmarks/README.md) — all 9 scenarios, model configs, monitoring
 - [Benchmark Scenario Diagrams](../../tools/ipu_traffic_benchmarks/diagrams.md) — Mermaid sequence diagrams
