@@ -186,121 +186,303 @@ answered by the two-track split. Retained here as historical context.
   tracks are now measured independently. See
   [nvmeof-initiator-only-alternative.md](nvmeof-initiator-only-alternative.md)
   for the initiator-only + remote NVMe-oF path.
-- Is Phase 1 scope = bandwidth/offload proof over NVMe-oF? → No.
-  Phase 1 = storage-owned RDMA baselines (M1 verbs, done). The
-  NVMe-oF alternative is a parallel track with its own durability +
-  recovery gate before any headline number is claimed.
+- Was the early storage-owned baseline intended as an NVMe-oF
+  bandwidth/offload proof? → No. That work was the storage-owned RDMA
+  baseline (M1 raw-verbs, done). The NVMe-oF alternative is a
+  parallel track with its own durability + recovery gate before any
+  headline number is claimed.
 - Or do they want to see the full cache serving model (dedup, admission)? →
   Full cache serving lives on the storage-owned track (M2+).
 
 ---
 <!-- _footer: "IPU KV Cache PoC" -->
 
-# Architecture A vs B (2026-07-21 update)
+# Three Namespaces Used Throughout This Deck
 
-| | A: Initiator-owned + remote NVMe-oF L2 | B: Storage-owned RDMA + LMCache server (primary) |
+Everything in the Architecture A section below refers to one of three
+independent namespaces. They are not synonyms and they are not
+sequential.
+
+| Namespace | What it names | Values used here |
 |---|---|---|
-| Storage role | Passive NVMe-oF namespace | Smart cache (hash, admission, eviction) |
-| Initiator role | Owns cache metadata + WAL/COW durability | Thin (expose MR, request by hash) |
-| Code readiness | Raw-block I/O exists; NVMe-oF target provisioning, initiator attach/reconnect, atomic durable commits, and crash recovery are all **unbuilt** | M1 verbs baseline done; M2 admission gating in progress |
-| Multi-initiator dedup | Requires shared allocator + mapping authority (deferred) | Yes (global hash index on server) |
-| NVMe framing | Yes (command capsules + nvmet-rdma) | No (raw RDMA verbs) |
-| Cache-level admission / lease / BLAKE3-on-commit | Gone — no target agent | Present |
-| Track status | Alt track (`ipu-poc-nvmeof-alt` branch, `LMCache-msm` epic) | Primary track (`ipu-poc` branch) |
+| **Architecture A / B** | Software ownership model — where cache semantics (hash, admission, allocator, WAL, map) live | A = initiator-owned, B = storage-owned |
+| **Platform** | Hardware platforms evaluated separately under Architecture A | CX7 (Mellanox baseline, this POC), MEV (Intel IPU / Falcon), MMG (Intel IPU / MMG-400 / IPT) |
+| **Stage 0–5** | CX7 delivery milestones only | Stage 0 kickoff → Stage 5 workload evidence |
+
+<br/>
+
+**Reading rule:** MEV and MMG are follow-on platform integrations
+under Architecture A, not "later CX7 stages" and not "Architecture C
+or D." Each IPU platform independently chooses which endpoint(s) it
+offloads (D-init, D-tgt, or D-both — see the plan doc's Appendix D).
+
+**On every MMG slide:** endpoint offload is pending D-init / D-tgt /
+D-both. **MMG never owns cache semantics** in any option — it is a
+transport engine.
+
+---
+<!-- _footer: "IPU KV Cache PoC" -->
+
+# Initiator-Owned Cache Semantics, Remote NVMe-oF L2
+
+## Architecture A vs B
+
+| | A: Initiator-owned + remote NVMe-oF L2 | B: Storage-owned RDMA + LMCache server |
+|---|---|---|
+| Storage role | Passive NVMe-oF namespace (`nvmet-rdma`) | Smart cache (hash, admission, eviction) |
+| Initiator role | Owns cache metadata, allocator, WAL durability | Thin (expose MR, request by hash) |
+| Durable-commit protocol | WAL (intent → payload+FUA → checksum+FUA → commit record + flush → map publish → ACK). COW deferred post-POC. | BLAKE3-on-commit gated by target-side admission |
+| Multi-initiator dedup | Out of scope (single-initiator exclusive namespace) | Yes (global hash index on server) |
+| NVMe framing | Yes (command capsules + `nvmet-rdma`) | No (raw RDMA verbs) |
+| Cache-level admission / lease / BLAKE3-on-commit | Initiator-local admission and checksum verification; no target-side admission, lease, or verifier | Present |
+| IPU offload surfaces | Initiator `nvme_rdma` and/or target `nvmet-rdma` termination (MEV: Falcon reliable transport; MMG: IPT) — endpoint pending D-init / D-tgt / D-both | Target-side LMCache + admission control |
+| Track status | Initiator-owned NVMe-oF POC | Storage-owned track |
+
+**Architecture A is the customer-requested lower-risk path.** The
+concrete measurement objective is host-CPU-per-GB reduction and
+`nvme_rdma` / `nvmet_rdma` MR/QP churn removal on the offloaded
+endpoint(s), against the CX7 T7 baseline. Architecture B remains the
+alternative if target-side cache admission, deduplication, or
+multi-initiator cache semantics prove necessary.
 
 **Do not read Architecture A as "works today."** The `raw_block` L2 adapter
 publishes its in-memory index immediately after writing header + payload;
 durable metadata is a periodic mirrored checkpoint with no fsync/FLUSH/FUA
-ordering against payload writes. That path cannot claim durable cache
-correctness across a crash without new WAL/COW machinery.
+ordering against payload writes. Architecture A therefore requires the WAL
+commit-record + map-publish machinery specified in `nvmeof-poc-plan.md`
+before it can claim durable cache correctness across a crash.
 
 ---
 <!-- _footer: "IPU KV Cache PoC" -->
 
-# Block vs KV Command Set
+# Architecture A — Host vs IPU Roles (per node)
 
-- If NVMe is in the picture, KV cmd set is the natural fit
-- Block requires hash-to-LBA mapping layer (new code, no benefit)
-- LMCache addresses everything by token hash, not LBA
+<pre>
+INITIATOR NODE                              TARGET (NVMe-oF) NODE
+──────────────                              ─────────────────────
 
----
-<!-- _footer: "IPU KV Cache PoC" -->
+Initiator Xeon (full cache brain):          Target Xeon (transport + block only):
+ • LMCache engine, token hashing              • Linux nvmet + nvmet-rdma, NQN ACL, namespace export
+ • Local {key,digest} idempotency (§A.5)      • Linux kernel block layer, SSD driver
+ • L1 (initiator DRAM) management + LRU       • No LMCache, no hash table, no admission
+ • L2 allocator + key→LBA map                 • No LRU, no cache DRAM tier
+ • WAL: intent, checksum, commit, recovery    • SSD is the durable L2 medium
+ • Issues NVMe-oF I/O; returns final ACK
 
-# Backpressure at 32 SSDs
-
-- 16x2 Gen5 NVMe = ~450 GB/s aggregate write
-- Network delivers 50 GB/s; SSDs absorb 9x that
-- "Pipe overwhelms storage" does not apply here
+Initiator IPU (D-init or D-both, MEV/MMG):  Target IPU (D-tgt or D-both, MEV/MMG):
+ • Terminates NVMe-oF initiator path          • Terminates NVMe-oF target path
+   (replaces / accelerates nvme_rdma)           (replaces / accelerates nvmet-rdma)
+ • MRs registered by LMCache                  • Drives SSD via NVMe-oF passthrough
+ • No cache logic, no WAL, no map             • No cache logic, no WAL, no map
+</pre>
 
 <br/>
-Pull model value shifts to:
-1. Dedup before transfer (80%+ prefix reuse workloads)
-2. Multi-initiator dedup (N writers, same prefix = 1 copy)
-3. Tiering control (admission decides what stays in DRAM L1 vs spills to SSD L2)
+
+**Endpoint offload is pending D-init / D-tgt / D-both** (see plan
+Appendix D.2). MMG never owns cache semantics in any option — it is a
+transport engine.
 
 ---
 <!-- _footer: "IPU KV Cache PoC" -->
 
-# Second LMCache on Initiator?
+# Architecture A — STORE (Initiator-Owned Durable Commit)
 
-- Local HBM/DRAM as L0/L1, remote node as L2
-- Hot prefixes served locally (no network RTT)
-- Architecturally clean, not needed for initial PoC
-- Decision: defer to production phase or include in Phase 2?
+<pre>
+LMCache (Initiator Xeon)          Initiator nvme_rdma        NVMe-oF/RDMA         Target nvmet-rdma          SSD (L2 media)
+────────────────────────          ───────────────────        ────────────         ─────────────────          ──────────────
+1. store(tokens, kv_tensor)
+2. GPU HBM → initiator DRAM (fence)
+3. Hash tokens; BLAKE3 digest D;
+   {key,digest} idempotency check (§A.5)
+4. L1 put(key, PENDING)              ← not lookup-visible
+5. WAL intent {key, LBA, D} + FLUSH
+                                    ─── NVMe WRITE + FLUSH ────►                  ─── write + flush ──►      intent durable
+
+6. Payload write, FUA, 256 KiB
+                                    ─── NVMe WRITE command ────►
+                                    ◄── RDMA READ request ─────                    target pulls initiator MR
+                                    ─── 256 KiB payload ───────►
+                                                                                ─── block write + FUA ──►      payload durable
+
+7. Checksum-record write, FUA
+                                    ─── NVMe WRITE (FUA) ──────►                  ─── write + FUA ────►      checksum durable
+
+8. WAL COMMITTED record + FLUSH
+                                    ─── NVMe WRITE + FLUSH ────►                  ─── write + flush ──►      commit durable
+                                    ◄── flush completion ──────                   ◄── completion ─────       (c5 BEGINS on completion)
+
+9. Publish key→LBA map ATOMICALLY  ◄── c5 ENDS
+   with L1 PENDING → VISIBLE flip
+10. Terminal ACK to caller
+</pre>
+
+<h3>Three contract details the diagram assumes</h3>
+
+- **c5 window** (step 8 flush completion → step 9): the COMMITTED
+  record is durable on media but the in-memory map/L1 has not yet
+  flipped. Recovery reconstructs the new value from the WAL exactly
+  once. Fault-matrix test T4 exercises this boundary.
+- **ACK-loss retry (§A.5).** Client retry keyed on `{key, digest}`:
+  absent → start; matches PENDING → join / retryable; matches VISIBLE
+  → no-op success; different digest for same key → reject. Never
+  allocate or WAL-write twice.
+- **Wire direction ≠ pull semantics.** The target's `nvmet-rdma`
+  issues an RDMA Read as its normal transport implementation of the
+  NVMe Write at step 6. No target-side cache decision precedes it.
+  Architecture B is the pull-with-admission model.
 
 ---
 <!-- _footer: "IPU KV Cache PoC" -->
 
-# Suggested PoC Phasing
+# Architecture A — RETRIEVE (Initiator-Owned Lookup)
 
-**Phase 1: Bandwidth proof (Architecture A)**
-- NVMe-oF + IPU, existing raw_block code path
-- Proves: line rate, CPU offload
-- Aligns with flow Nima confirmed
+<pre>
+LMCache (Initiator Xeon)          Initiator nvme_rdma        NVMe-oF/RDMA         Target nvmet-rdma          SSD (L2 media)
+────────────────────────          ───────────────────        ────────────         ─────────────────          ──────────────
+1. retrieve(tokens)
+2. Hash tokens → chunk keys (BLAKE3)
+3. L1 lookup (initiator DRAM, exclude PENDING)
+
+├── L1 HIT (page in initiator DRAM):
+│    4. get from L1 → DMA to GPU HBM → resume        (no fabric traffic)
+│
+├── L1 MISS → initiator key→LBA map lookup:
+│    │
+│    ├── L2 HIT (map entry present):
+│    │    5. io_uring NVMe read (O_DIRECT, 256 KiB)
+│    │                              ─── NVMe READ ─────►                    ─── read ──────►                 return block
+│    │                              ◄── 256 KiB RDMA WRITE ──                target writes block into initiator MR
+│    │    6. Recompute BLAKE3; compare to committed digest
+│    │       ├── OK:   optional promote to L1, DMA to GPU HBM
+│    │       └── FAIL: mark stale, discard map entry, return miss
+│    │
+│    └── L2 MISS (no map entry):
+│         return miss → caller recomputes KV
+</pre>
 
 <br/>
-**Phase 2: Smart cache (Architecture B)**
-- RDMA + LMCache server, new transport code
-- Proves: dedup, admission, multi-initiator scaling
-- Intel's value-add pitch
+
+**No target-side lookup, no target hash table, no target admission,
+no target-side L1 hit/miss branches.** The target only serves NVMe-oF
+commands and moves blocks to/from the SSD.
+
+---
+<!-- _footer: "IPU KV Cache PoC" -->
+
+# Architecture A — CX7 Delivery Stages (2026-07-22)
+
+Stages 0–5 are the CX7 platform delivery for Architecture A.
+MEV and MMG are separate platform integrations. See `nvmeof-poc-plan.md`.
+
+- **Stage 0** — Freeze contract (namespace, NQNs, ownership boundary)
+- **Stage 1** — Prove safe NVMe-oF lifecycle (idempotent attach/detach,
+  ACL/media guards). Hard no-go: `nvmet` / `nvmet_rdma` must load.
+- **Stage 2** — Remote-L2 I/O baseline (block-I/O sweep, SHA-256 verify)
+- **Stage 3** — WAL-based durable publication (intent → payload+FUA →
+  checksum+FUA → commit record + flush → map publish → ACK)
+- **Stage 4** — Fault + recovery matrix at all 6 WAL cutpoints, incl.
+  c5 committed-but-not-visible and allocator-collision check on replay
+- **Stage 5** — LMCache integration + workload evidence; T7 baseline
+  measurements for the later MEV / MMG platform plans
+
+<br/>
+
+Architecture B (storage-owned pull) proceeds on its own track with M1
+raw-verbs baselines done and M2 admission gating in progress.
 
 ---
 <!-- _footer: "IPU KV Cache PoC" -->
 
 # Open Questions for Anthropic
 
+**Architecture choice:**
+- Does the target need to make cache-level decisions (dedup,
+  admission, LRU) BEFORE serving data, or is a passive NVMe-oF
+  namespace acceptable?
+  Note: an NVMe-oF target issuing an RDMA Read to fetch a Write
+  payload is standard transport behavior, not cache-semantic pull.
+  → If cache-level admission is required, prioritize B.
+  → If not, A stays eligible.
+
+**Software implementation for Architecture A:**
+- Linux kernel `nvme_rdma` / `nvmet_rdma` (fastest validation), or
+  SPDK userspace (max control over polling, queueing, CPU)?
+- Preference may differ per endpoint (initiator vs target).
+
+**Performance and operational success criteria:**
+- Minimum host-CPU reduction at comparable throughput
+- Maximum p99 latency regression for small, latency-sensitive I/O
+- Maximum sustained-throughput regression for large, concurrent I/O
+- Reconnect-timeout ceiling; time-to-cache-online after cold restart
+
+**Decision workload:**
+- Read-heavy retrieval, write-heavy durable store, or the mixed
+  KV-cache trace from plan §6.2?
+
+---
+<!-- _footer: "IPU KV Cache PoC" -->
+
+# Architecture B — Raw-Verbs Test Plan (Parallel Track)
+
+Storage-owned RDMA path, shown here for completeness. Not part of the
+Architecture A NVMe-oF POC — its test plan is `nvmeof-poc-plan.md`
+Stages 0–5.
+
+<div class="cols">
+<div class="card card-blue">
+
+### Hard gates (non-zero exit)
+
+- **Manifest preflight** — NUMA, MTU 4096, GID, port active
+- **RC-QP connect + completions** — READ/WRITE actually finish
+- **Digest match** — payload integrity
+
 <br/>
 
-**Transport architecture:**
-- Is NVMe-on-initiator (NVMe-oF fabric) a hard requirement, or are you open to direct RDMA between registered memory regions?
-- If NVMe: block command set or KV command set? LMCache addresses by token hash natively, not LBA.
+### Diagnostic (JSON + `eligible_for_baseline=false`)
+
+- NIC counters ±10% wire-byte comparison
+- MR-flag evidence
+- `BENCH_RDMA_CONTROL` split
 
 <br/>
 
-**PoC outcomes:**
-- Bandwidth/offload proof only (IPU sustains 400G line rate, CPU out of data path)?
-- Or full disaggregated cache serving (server-side dedup, admission control, multi-initiator scaling)?
+Row persisted; ingestion filters on `eligible_for_baseline` — no silent promotion.
+
+</div>
+<div class="card card-purple">
+
+### Sweep families
+
+- **CX7 baseline** — READ 72 / 128 / 144 / 256 KiB × qd 1, 4, 16
+- **Asymmetric** — CX7 source ↔ IPU storage, same shape
 
 <br/>
 
-**Initiator-side caching:**
-- Should the compute node run its own local cache tier (HBM/DRAM as L0/L1, remote KV Cache Node as L2)?
-- Or single-tier remote only for the PoC?
+### IPU progression
+
+- **MEV IPU** — 2× 100 GbE, first Falcon-offload target
+- **MMG IPU** — 1× 400 GbE, single-port line-rate proof
+- **MMG next-gen** — 4× 400 GbE, aggregate scaling
 
 <br/>
 
-**Hardware config:**
-- Confirm target SSD config on KV Cache Node (16x2 Gen5 NVMe assumed)
-- Multi-initiator (N compute nodes to 1 KV Cache Node) in scope, or single pair?
+Runner scope freezes after M1: two sweeps, one runner. Transport-neutral verifier and NIXL publish deferred to M4.
+
+</div>
+</div>
 
 ---
 <!-- _footer: "IPU KV Cache PoC" -->
 
 # Next Steps
 
-1. Confirm with Nima: Phase 1 scope sufficient for initial demo?
-2. Align internally on phasing (A then B, or B directly?)
+1. Confirm with Nima: is the initial demo scope (Architecture A on
+   CX7, Stages 0–5) sufficient for the customer decision review?
+2. Align internally on track ordering (A first, or B directly?)
 3. Draft technical one-pager for account team
-4. Scope hardware needs (2-node testbed, 32 SSDs, MMG-400 connectivity)
+4. Scope hardware needs for Architecture A CX7 delivery (2-node
+   testbed, one exclusive namespace; SSD count TBD with customer).
+   MEV / MMG platform hardware scoped separately per plan Appendix D.
 
 ---
