@@ -1,22 +1,24 @@
-# IPU RDMA KV Cache Transfer — POC Scope
+# Architecture B — Storage-Owned Pull POC
 
 Proof-of-concept for IPU-accelerated KV cache transfer between a GPU Node
-and a KV Cache Node over MMG-400 RDMA at 400 Gb/s.
+and a KV Cache Node over MMG-400 RDMA at 400 Gb/s under the
+**storage-owned pull** design (Architecture B).
 
 ## Scope boundary
 
-This document describes the **storage-owned pull architecture**: LMCache
+This document describes **Architecture B — storage-owned pull**: LMCache
 runs on both the compute node and the storage node, and the storage-side
 LMCache agent owns semantic admission, target-side BLAKE3 verification, MR
 leases, and the two-phase L1/L2 eviction contract.
 
-An alternative architecture in which LMCache runs **only on the compute
-(initiator) side** and the storage node exports NVMe SSDs over NVMe-oF/RDMA
-(no target-side LMCache agent) is under evaluation as a separate track. It
-is a different design, not a variant of the storage-owned pull model. See
-[nvmeof-initiator-only-alternative.md](nvmeof-initiator-only-alternative.md)
-for the impact analysis. Do not conflate its numbers or design decisions
-with those in this doc.
+**Architecture A** — initiator-owned LMCache with the storage node exporting
+NVMe SSDs over NVMe-oF/RDMA (no target-side LMCache agent) — is a
+separate track. Its scope, phased plan, and customer acceptance gates
+live in [nvmeof-poc-plan.md](nvmeof-poc-plan.md); its impact analysis vs
+this pull model lives in
+[nvmeof-initiator-only-alternative.md](nvmeof-initiator-only-alternative.md).
+Do not conflate Architecture A numbers or design decisions with those in
+this doc.
 
 ## Goals
 
@@ -149,13 +151,17 @@ POC configuration (DeepSeek-V3 proxy):
 
 ## Architecture (POC)
 
-See [ipu.md](../rdma/ipu.md) for the full architecture (layer map, wrapper, transport
-protocol) and [lmcache-ipu-pull-model-flow.mmd](../rdma/diagrams/lmcache-ipu-pull-model-flow.mmd)
-for the detailed combined store + retrieve sequence diagram. For the
-decision-oriented overview, see
-[lmcache-ipu-pull-model-flow-hl.mmd](../rdma/diagrams/lmcache-ipu-pull-model-flow-hl.mmd).
+The RDMA transport implementation for Architecture B is documented in
+[ipu.md](../rdma/ipu.md) (IPU RDMA platform backend) and
+[verbs-transport.md](../rdma/verbs-transport.md) (libibverbs
+implementation spec). Wire-level design lives in the diagrams:
 
-Hardware topology: [ipu-poc-test-setup.mmd](ipu-poc-test-setup.mmd)
+- [Architecture B high-level flow](diagrams/architecture-b-storage-owned-pull-high-level.mmd)
+  — decision-oriented overview
+- [Architecture B store + retrieve sequence](diagrams/architecture-b-storage-owned-pull-sequence.mmd)
+  — full wire-level detail
+- [Architecture B MMG-400 topology](diagrams/architecture-b-mmg400-topology.mmd)
+  — two-node hardware layout
 
 
 ## Dependencies
@@ -184,15 +190,23 @@ Hardware topology: [ipu-poc-test-setup.mmd](ipu-poc-test-setup.mmd)
 
 ## Related Documents
 
+Architecture B (this doc):
+
 - [IPU RDMA Platform Backend](../rdma/ipu.md) — full design doc (architecture, wrapper, transport protocol)
 - [VerbsRdmaTransport Spec](../rdma/verbs-transport.md) — libibverbs implementation spec (QP state machine, lock protocol, buffer quarantine)
-- [High-Level Store+Retrieve Flow](../rdma/diagrams/lmcache-ipu-pull-model-flow-hl.mmd) — admission, retrieval, and commit decisions
-- [Combined Store+Retrieve Flow](../rdma/diagrams/lmcache-ipu-pull-model-flow.mmd) — end-to-end sequence diagram
-- [Open Questions / Architecture Decisions](ipu-poc-opens.md) — stakeholder alignment deck (NVMe-oF vs RDMA, phasing)
-- [Hardware Test Topology](ipu-poc-test-setup.mmd) — two-node lab setup diagram
-- [NVMe-oF Alternative Topology](nvmeof-poc-test-setup.mmd) — initiator-owned
-  L1 plus remote NVMe L2 topology
-- [NVMe-oF Alternative POC Plan](nvmeof-poc-plan.md) — scope, execution
-  phases, evidence, and customer acceptance gates
-- [IPU Traffic Benchmark Configs](../../tools/ipu_traffic_benchmarks/README.md) — all 9 scenarios, model configs, monitoring
+- [Architecture B high-level flow](diagrams/architecture-b-storage-owned-pull-high-level.mmd) — admission, retrieval, and commit decisions
+- [Architecture B store + retrieve sequence](diagrams/architecture-b-storage-owned-pull-sequence.mmd) — end-to-end wire-level sequence
+- [Architecture B MMG-400 topology](diagrams/architecture-b-mmg400-topology.mmd) — two-node lab setup
+
+Architecture A (separate track):
+
+- [NVMe-oF POC Plan](nvmeof-poc-plan.md) — Architecture A scope, phased execution, evidence, and customer acceptance gates
+- [Initiator-only alternative — impact analysis](nvmeof-initiator-only-alternative.md) — why Architecture A is not a variant of Architecture B
+- [Architecture A CX7 NVMe-oF topology](diagrams/architecture-a-cx7-nvmeof-topology.mmd) — initiator-owned L1 plus remote NVMe L2
+- [Architecture A WAL sequence](diagrams/architecture-a-nvmeof-wal-sequence.mmd) — durable commit + recovery flow
+
+Shared:
+
+- [Open Questions / Architecture Decisions](ipu-poc-opens.md) — stakeholder alignment deck (A vs B, phasing)
+- [IPU Traffic Benchmark Configs](../../tools/ipu_traffic_benchmarks/README.md) — all scenarios, model configs, monitoring
 - [Benchmark Scenario Diagrams](../../tools/ipu_traffic_benchmarks/diagrams.md) — Mermaid sequence diagrams
