@@ -4,9 +4,7 @@
 
 This plan gets the initiator-owned NVMe-oF software stack working on
 CX7 hardware and produces a baseline the later IPU platforms (MEV,
-MMG) will be measured against. That is the entire scope. We are not
-deciding Architecture A vs B here, and we are not putting an IPU on
-the data path.
+MMG) will be measured against. CX7 is the only data path in scope.
 
 **Architecture A** puts all cache semantics on the initiator:
 key->LBA map, WAL, allocator, admission. The target is a dumb
@@ -39,6 +37,15 @@ contracts in Appendix D.5/D.6, not milestones here.
 | CX7 | Mellanox CX7 on Xeon (Granite Rapids AP) | RoCEv2 | This plan |
 | MEV | Intel IPU, MEV release | Falcon reliable transport | Follow-on plan; lab available now |
 | MMG | Intel IPU, MMG-400 | IPT on Falcon cores | Follow-on plan; ~August 2026 |
+
+**Principal risks.** The customer-reportable baseline stops if the
+fabric cannot negotiate `IBV_MTU_4096`, or if the fault harness cannot
+prove it interrupted established NVMe-oF I/O in the stated order.
+
+**Decisions needed.** At CX7 kickoff, the customer confirms any
+workload alternate and the T6 L1-hit-rate tolerance. Before an MEV or
+MMG lab booking, Nima selects the offloaded endpoint and resolves the
+platform topology in Appendix D.
 
 The three possible outcomes after all platform evidence is in:
 **advance A** (it works, ship it), **optimize A** (correctness
@@ -199,6 +206,7 @@ MTU gate is satisfied.
 | Lifecycle safety | Hard | Setup, status, connect, discover, disconnect, teardown are idempotent; failed setup leaves no residue | Lifecycle test T1 fails; stage does not exit |
 | Benchmark harness | Hard | Direct-I/O runner, LMCache trace harness, and manifest collector complete a dry run and produce a readable artifact | Stop at Stage 0; pick and document an alternate harness before Stage 1 |
 | Observability | Hard | Initiator kernel/NVMe logs, target `nvmet` logs, `nvme list-subsys --json`, controller statistics, namespace identity captured per run | Run manifest incomplete; results not customer-reportable |
+| Fabric fault-injection capability | Hard (blocks T5 only) | Chosen injection method (§E.2) demonstrably intercepts an established RC-QP mid-transfer: run active NVMe-oF read/write, apply the injection, and show (a) qdisc/drop counters increment or the fabric-side counter equivalent, (b) at least one NVMe command completes with an unexpected status, and (c) the initiator reconnects cleanly after the injection is removed | T5 does not start until an alternate method (fabric-side ACL drop, cable-pull rig, in-line drop appliance) passes the same three checks. `tc netem` on the initiator interface is a candidate but is **not** presumed to work — on mlx5 RoCEv2 the HCA TX path can bypass the qdisc |
 
 
 ## 6. Scope, Exclusions, and Workload Assumptions
@@ -276,7 +284,7 @@ MEV and MMG stages are separate; see Appendix D.
 | D1 | Stage 1 | Lifecycle test T1: 3× repeat cycles + all negative tests | Stage 0 exit | LMCache engineering |
 | D1 | Stage 2 | Baseline block I/O T2a/T2b (direct fio/dd against the attached namespace — no LMCache in the path). **D1 exit.** | Stage 1 exit; workload assumptions confirmed | LMCache engineering |
 | D2 | Stage 3 | LMCache remote-L2 integration + WAL + T3 (Appendix A). First stage where durable `store()` ACK is claimable | Stage 2 exit; WAL design frozen | LMCache engineering |
-| D2 | Stage 4 | Fault + recovery matrix T4, T5 across c1-c6 (Appendix A.3); exercise first-write and overwrite generations (A.1/A.4) | Stage 3 exit | LMCache engineering |
+| D2 | Stage 4 | Two independent tracks: T4 crash matrix (six A.3 cutpoints, first-write + overwrite paths) and T5 fabric-fault matrix (named in-flight NVMe operations, §E.2). T5 additionally requires the §5.2 Fabric fault-injection capability gate | Stage 3 exit; §5.2 Fabric fault-injection gate passed (for T5) | LMCache engineering |
 | D2 | Stage 5 | Integrated workload T6 with T7 instrumentation in the same run (or a re-run if the harness cannot instrument in-line); results review; CX7 evidence packaged as input to the outcome decision (§1). **D2 exit.** | T4/T5 exit | LMCache engineering + customer review |
 
 **Claim-scope gate.** Results emitted before Stage 3 exit are labeled
@@ -299,8 +307,8 @@ target owner rebuilds the module or boots a compatible kernel first.
 | T2a | D1 | Integrity-validation pass | Deterministic pattern writes across the QD sweep; **every** I/O verified via external SHA-256 write/read; measurement NOT timed | Zero mismatch; zero controller reset or unexpected error | Integrity log, controller stats, manifest | LMCache engineering |
 | T2b | D1 | Timed performance pass | Page size ∈ {4K, 128K, 256K}; QD ∈ {1, 4, 16, 32, 64}; direction ∈ {read, write}; ≥ 60 s per point. Pre-run seed + post-run digest verify only — no per-I/O readback in the measurement window | Zero unexpected controller resets; pre/post digests match | fio/bench logs, controller stats, manifest | LMCache engineering |
 | T3 | D2 | WAL durability (normal path) | 4 KiB, 128 KiB, 256 KiB stores; QD 1 and 32; BLAKE3 verify on read | Every load hash-matches; PENDING never lookup-visible; ACK follows WAL commit flush (Appendix A step 4a) | Bench logs, WAL replay tool output, manifest | LMCache engineering |
-| T4 | D2 | Fault matrix — crash | Controlled in-flight fault harness (Appendix E) at each of 6 WAL cutpoints (Appendix A.3) — including c5, the committed-but-not-yet-visible boundary; cold restart | On replay: old or new value only; no torn key; no committed extent re-allocated; every commit-record-durable case reconstructs the new value exactly once, no duplicate map entry | Fault-matrix report (1 row per cutpoint) with recorded NVMe status per injection, replay tool output | LMCache engineering |
-| T5 | D2 | Fault matrix — fabric-side | Controlled data-plane fault injection (Appendix E) that provably fires before the relevant NVMe completion; management plane never disturbed | Same invariants as T4; every injection records observed NVMe status; in-flight I/O fails visibly before reconnect, no degraded-rate operation is accepted | Fault-matrix report with injection-timing evidence, kernel logs | LMCache + lab operator |
+| T4 | D2 | Crash matrix (6 process-crash cutpoints) | Controlled process-kill harness (§E.1) at each of the 6 WAL cutpoints in A.3, both first-write and overwrite paths; cold restart | On replay: old or new value only; no torn key; no committed extent re-allocated; every commit-record-durable case reconstructs the new value exactly once, no duplicate map entry | Crash-matrix report (1 row per cutpoint × path) with recorded on-media state per injection, replay tool output | LMCache engineering |
+| T5 | D2 | Fabric-fault matrix (in-flight NVMe operations) | Controlled data-plane fault injection (§E.2) targeting named in-flight NVMe operations: (a) payload transfer capsule mid-flight, (b) WAL-commit-record fsync round-trip, (c) integrity-checksum FUA round-trip; injection method must first pass the §5.2 Fabric fault-injection gate. Management plane never disturbed | For each named operation: in-flight I/O fails visibly with a recorded NVMe status; reconnect re-establishes the QP; post-reconnect replay leaves the key state consistent with the corresponding A.3 crash outcome (no torn key, no post-replay allocator collision); no degraded-rate operation accepted | Fabric-fault report (1 row per named operation) with injection-timing evidence, qdisc / drop counters, kernel logs | LMCache + lab operator |
 | T6 | D2 | Integrated LMCache workload | KV trace targeting fixed L1 hit rates (see §6.2): L1 hit rates ∈ {0%, 20%, 50%, 80%}, mixed R/W, ≥ 15 min sustained. Assertions on observed L1 hit counters vs target; L2 hit and eviction rate recorded separately | All functional scenarios pass with recovery guarantees; L1/L2 hit ratio, eviction rate, promotion count, bytes-written-per-reused-prefix, time-to-usable-KV-after-restart all measured and publishable | Bench report, hit-ratio and eviction histograms, controller metrics | LMCache engineering |
 | T7 | D2 | CX7 baseline for IPU comparisons | Instrumented re-run of T6 (or T6 with instrumentation if the harness supports a single pass): host-CPU (kernel/user/interrupt), initiator-kernel `nvme_rdma` MR/QP churn, CQ event rate, lifecycle-latency breakdown | Baseline sufficient for MEV and MMG plans to compare against once each defines its endpoint contract (Appendix D) | T7 baseline report — host-CPU-per-GB and MR/QP churn tables | LMCache engineering |
 
@@ -440,8 +448,7 @@ outcome itself is finalized only after MEV / MMG land.
 | Initiator HCA/driver refuses MR or MKEY creation | T1 blocks on transport, not lifecycle. Hand off to the fabric team with BDF-scoped diagnostics before iterating on lifecycle scripts |
 | FUA/FLUSH mistaken for an atomic transaction | WAL commit record + flush is the durable barrier. Fault-matrix evidence required before claiming durability |
 | Post-replay extent collision | Allocator is a derived view of committed WAL records; GC touches only unreferenced extents; explicit `RELEASED` records gate reclamation (Appendix A) |
-| Overclaiming an IPU demonstration | CX7 does not put an IPU on the data path. MEV and MMG are separate platform plans. Reports label offload data with the specific platform name |
-| Results compared to Architecture B raw verbs | A and B measure different things (§6.1); this plan does not decide A vs B |
+| Overclaiming an IPU demonstration | Reports name the measured platform and selected offload endpoint; CX7 scope is defined in §1 |
 | Later multi-initiator request expands the design | Treat as a separate coordinator/lease/allocator project, not a POC extension |
 
 
@@ -566,8 +573,12 @@ extent reuse from colliding with the current committed value.
 
 ### A.3 Fault-matrix cutpoints (6 boundaries)
 
-Each cutpoint is exercised in T4 and T5. Mapping to A.1 steps is
-explicit.
+Each cutpoint is exercised in T4 (crash matrix). T5 (fabric-fault
+matrix) uses a different taxonomy of named in-flight operations
+defined in §E.2 — the c-numbers are process-crash windows and do not
+apply verbatim to fabric injections. Mapping to A.1 steps below is
+explicit; the six windows are exhaustive and non-overlapping across
+the 4a→ACK-delivered range.
 
 | ID | Cutpoint | On-media state | Required recovery outcome |
 | --- | --- | --- | --- |
@@ -575,8 +586,8 @@ explicit.
 | c2 | After WAL intent flush, before payload FUA | Intent durable; payload not durable | Key must not appear; intent is a GC candidate |
 | c3 | After payload FUA, before checksum FUA | Payload durable; no checksum record | Key must not appear; payload orphan is a GC candidate |
 | c4 | After checksum FUA, before WAL commit flush (A.1 step 4a) | Payload and checksum durable; no `COMMITTED` record | Key at new `gen` must not appear; matched payload+checksum is a GC candidate. Overwrite: prior committed generation remains authoritative |
-| **c5** | **Any crash point after WAL commit flush (A.1 step 4a) but before the terminal ACK returns (A.1 step 4f). Covers three in-memory sub-states — pre-publish (before 4b), post-publish/pre-quiesce (during 4c/4d), and (overwrite only) post-quiesce/pre-RELEASED. First-write skips 4d/4e; the c5 window ends when 4c completes and the map is publish-visible. On the overwrite path the window ends when the 4e `RELEASED` flush returns. In both cases the on-media state after restart is the same for a given crash point within the window.** | **`COMMITTED` record for new `gen` durable on media; no `RELEASED` for prior `gen` (overwrite only); in-memory map/L1 is wiped by restart** | **Key MUST appear after restart with digest match on read at the new `gen` — recovery reconstructs the new value from the WAL exactly once. On the overwrite path, replay additionally emits a synthetic `RELEASED` for the prior `gen` and returns its extent to GC (see A.4). First-write has no prior extent to release.** |
-| c6 | Post-final-publication and terminal ACK returned (A.1 step 4f). On the overwrite path this additionally requires the `RELEASED` flush (A.1 step 4e) to have returned before 4f; first-write skips 4d/4e and reaches c6 directly from 4c | Fully durable and visible; prior extent (overwrite only) retired | Key MUST appear with digest match at the new `gen`; prior extent (overwrite only) GC-eligible |
+| c5 | Crash after 4a flush returns and before c6 begins. For first-write c6 begins after 4c completes; for overwrite, after 4e returns. See E.1 for sub-boundary sampling. | New `COMMITTED` record is durable; an overwrite has no `RELEASED` record for the prior generation. | Recover the new generation exactly once with a digest match. On overwrite, replay retires the prior extent. |
+| **c6** | **Crash after c5's last durability step completes and before/at/after terminal ACK is delivered to the client. For first-write, this is any crash from 4c-completion onward. For overwrite, this is any crash from 4e-flush-return onward. Covers 4f (ACK enqueue) and post-ACK crashes.** | **Fully durable and visible; prior extent (overwrite only) retired via on-media `RELEASED`** | **Key MUST appear with digest match at the new `gen`; prior extent (overwrite only) GC-eligible via the on-media `RELEASED` (no synthetic emission required). Client-side idempotency of a post-ACK retry is covered separately by §A.5.** |
 
 c5 is the important boundary: durability is fully established on
 media but not yet visible in the running process's data structures.
@@ -709,17 +720,29 @@ to mean durable, recoverable cache state.
 
 ### B.5 Stage 4 — Fault and recovery matrix [D2]
 
-Run T4 and T5 against the six WAL cutpoints in A.3, sampled at the
-sub-boundaries in E.1 (first-write skips the quiesce/`RELEASED`
-sub-boundaries). Exit conditions, matching A.3:
+Two independent test tracks, both required for Stage 4 exit.
 
-- **First-write case:** c1-c4 yield the key absent after recovery;
-  c5 and c6 yield the fully published new value with digest match.
-- **Overwrite case:** c1-c4 yield the prior committed value; c5 and
-  c6 yield the fully published new value with digest match.
-- In both cases: no committed extent is observed being re-allocated
-  by the post-restart allocator, and c5 reconstructs the new value
+**T4 — crash matrix.** Run the process-kill harness (§E.1) at each
+of the six A.3 cutpoints, both first-write and overwrite paths,
+sampled at the sub-boundaries in E.1. Exit conditions match A.3:
+
+- **First-write:** c1-c4 yield the key absent after recovery; c5
+  and c6 yield the fully published new value with digest match.
+- **Overwrite:** c1-c4 yield the prior committed value; c5 and c6
+  yield the fully published new value with digest match.
+- Both paths: no committed extent is observed being re-allocated by
+  the post-restart allocator, and c5 reconstructs the new value
   exactly once.
+
+**T5 — fabric-fault matrix.** Precondition: the §5.2 Fabric
+fault-injection capability gate has passed for the chosen method.
+Inject each of the three named in-flight NVMe operations (payload
+transfer, WAL commit-record round-trip, integrity-checksum
+round-trip) on both first-write and overwrite paths. Exit when the
+observed NVMe status is recorded per injection, the initiator
+reconnects cleanly, and the post-reconnect replay leaves the key
+in a state consistent with the corresponding A.3 crash outcome for
+the interrupted step.
 
 ### B.6 Stage 5 — Integration and workload evidence [D2 exit]
 
@@ -815,7 +838,8 @@ choice is fixed for the duration of its runs.
   link rate, and whether the IPU data path spans hosts. Resolve the
   current `2 IPUs + 8 SSDs per host/socket` and "no multi-host IPU"
   statement against the older `4 IPUs + 16 SSDs` MMG assumption
-  before the platform run begins.
+  before the platform run begins. **Owner: Nima; decision due before
+  MMG lab booking.**
 - **Data-touch contract.** "Zero CPU data touch" means that, after
   buffer registration and descriptor setup, host CPUs do not load,
   store, or memcpy KV payload bytes. It does NOT mean DRAM bypass:
@@ -956,30 +980,49 @@ harness that cannot demonstrate all three is not acceptable evidence.
 
 ### E.2 Fabric-side faults (T5)
 
-Preferred method: a data-plane-only fault that faults **established**
+The T5 target is a data-plane fault that interrupts **established**
 RC-QP traffic mid-transfer, not just new connection establishment.
+The fault is applied to one of the named in-flight NVMe operations
+in the T5 test matrix row: (a) a payload transfer, (b) the WAL
+commit-record round-trip, or (c) the integrity-checksum round-trip.
+The c1-c6 crash taxonomy of A.3 is not the fault-selector here —
+T5 selects by named NVMe operation, and correlates the post-fault
+outcome against the corresponding A.3 crash outcome for the same
+step.
 
-- **Primary — `tc netem` on the fabric interface.** Selectively drop
-  NVMe capsules or RDMA READ responses via `tc netem` loss (or a
-  scheduled drop of a single PSN range) on the data-plane interface
-  (`ens1f1np1` on initiator, `ens1f0np0` on target), timed to fire
-  between an A.3 checkpoint entry and the next completion. Only
-  method here that interrupts an already-established QP mid-transfer,
-  which is what T5 is designed to exercise.
-- **Secondary — `nvme disconnect` for reconnect-path coverage only.**
-  Once a controlled in-flight fault via `tc netem` is demonstrated,
-  `nvme disconnect` is valid as an additional injection to test the
-  reconnect path itself. Not an in-flight torn-I/O generator because
-  it drains the initiator queue before the failure reaches the
-  target.
-- **Not acceptable as a T5 primary — `iptables` DROP on the
-  target-side RDMA CM listener port.** The RDMA CM listener handles
-  connection establishment only; once a QP is established the data
-  path bypasses the listener. Dropping the listener port prevents
-  new connections but does not interrupt in-flight I/O on existing
-  QPs, and cannot substantiate the T5 in-flight-fault claim. Retain
-  only as a connection-attempt-time negative test if desired,
-  clearly labeled as such in the run manifest.
+**Injection candidates.** No method is presumed to work on the CX7
+fabric a priori; each must pass the §5.2 Fabric fault-injection
+capability gate before it can be used for T5 evidence.
+
+- **`tc netem` on the data-plane interface (`ens1f1np1` on
+  initiator, `ens1f0np0` on target).** Candidate. On mlx5 RoCEv2 the
+  HCA TX path can bypass the qdisc, so `tc netem` on the initiator
+  interface may not intercept established RC-QP TX at all.
+  Verification path: apply the rule, run active RC I/O, and confirm
+  that qdisc drop counters increment AND at least one in-flight
+  NVMe command completes with an unexpected status. If neither is
+  observable, the method fails the gate for this fabric.
+- **Fabric-side drop on the intermediate switch or cable rig.**
+  Candidate. Managed-switch ACL drop or an in-line bump-in-the-wire
+  drop appliance intercepts packets regardless of host-side qdisc
+  behavior. Requires switch access or additional hardware.
+- **Physical link-down / cable pull.** Candidate for reconnect-path
+  coverage. Deterministic but coarse: cannot select a specific
+  in-flight operation, only "everything currently in flight."
+
+**Not acceptable as a T5 primary.**
+
+- **`nvme disconnect`.** Drains the initiator queue before the
+  failure reaches the target — produces a clean lifecycle result,
+  not a torn-I/O result. Valid as an additional reconnect-path
+  injection after a real in-flight fault has been demonstrated by a
+  gated method above.
+- **`iptables` DROP on the target-side RDMA CM listener port.** The
+  RDMA CM listener handles connection establishment only; once a QP
+  is established, the data path bypasses the listener. Cannot
+  substantiate a T5 in-flight-fault claim. Retain only as a
+  connection-attempt negative test if desired, clearly labeled in
+  the run manifest.
 
 MEV and MMG must call out the equivalent management-plane
 constraint for their own network planes.
