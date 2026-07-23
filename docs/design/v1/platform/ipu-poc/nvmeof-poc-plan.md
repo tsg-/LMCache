@@ -975,8 +975,8 @@ harness that cannot demonstrate all three is not acceptable evidence.
 | c2 (after intent, before payload) | Kill after fsync returns, before payload `io_uring_submit` returns |
 | c3 (after payload FUA, before checksum FUA) | Kill after payload CQE handler observes success, before checksum submit |
 | c4 (after checksum FUA, before WAL commit flush) | Kill after checksum CQE observed, before commit-record fsync returns |
-| **c5 (after WAL commit flush, before terminal ACK)** | **Sample all c5 sub-boundaries in separate runs: (i) kill AFTER commit-record fsync returns, BEFORE the map/L1 flip (4b); (ii) kill AFTER 4b/4c publish, BEFORE 4d reader-quiesce completes (overwrite only); (iii) kill AFTER quiesce, BEFORE `RELEASED` fsync returns (overwrite only). First-write exercises only (i). All sub-boundaries share the same on-media state after restart for their respective path but exercise different in-memory races** |
-| c6 (post-final-publication and ACK; overwrite also requires `RELEASED` flush) | Kill after ACK enqueue to caller |
+| c5 (after WAL commit flush, before c6) | Sample separately: (i) after commit-record fsync returns, before the map/L1 flip; (ii) after map/L1 publish, before reader quiesce (overwrite only); (iii) after quiesce, before `RELEASED` fsync returns (overwrite only). First-write exercises only (i). |
+| c6 (after final durability step) | First-write: kill after 4c completes, before terminal ACK. Overwrite: kill after 4e flush returns, before terminal ACK. Separately simulate ACK loss after ACK enqueue for A.5 retry coverage. |
 
 ### E.2 Fabric-side faults (T5)
 
