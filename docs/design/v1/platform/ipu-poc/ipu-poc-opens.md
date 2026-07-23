@@ -179,7 +179,7 @@ style: |
 
 # Inference KV Cache Offload with Intel IPU
 
-## LMCache remote tiering over RDMA/Falcon; CX7 baseline to IPU prototype
+## LMCache remote tiering over RDMA/Falcon; preliminary MEV bring-up against the completed CX7 reference baseline
 
 <div class="byline">
 July 2026
@@ -217,15 +217,16 @@ sequential.
 | Namespace | What it names | Values used here |
 |---|---|---|
 | **Architecture A / B** | Software ownership model — where cache semantics (hash, admission, allocator, WAL, map) live | A = initiator-owned, B = storage-owned |
-| **Platform** | Hardware platforms evaluated separately under Architecture A | CX7 (Mellanox baseline, this POC), MEV (Intel IPU / Falcon), MMG (Intel IPU / MMG-400 / IPT) |
-| **Stage 0–5** | CX7 delivery milestones only | Stage 0 kickoff → Stage 5 workload evidence |
+| **Platform** | Hardware platforms evaluated under Architecture A | CX7 (Mellanox reference, completed), **MEV (Intel IPU / Falcon — this plan)**, MMG (Intel IPU / MMG-400 / IPT, follow-on ~Aug 2026) |
+| **Stage 0–5** | MEV kernel-path delivery milestones | Stage 0 kickoff → Stage 5 workload evidence |
 
 <br/>
 
-**Reading rule:** MEV and MMG are follow-on platform integrations
-under Architecture A, not "later CX7 stages" and not "Architecture C
-or D." Each IPU platform independently chooses which endpoint(s) it
-offloads (D-init, D-tgt, or D-both — see the plan doc's Appendix D).
+**Reading rule:** the plan of record is now the MEV kernel-path
+bring-up. CX7 is a completed cross-platform reference (retained for
+sanity); the IPU offload phase (D-init / D-tgt / D-both, endpoint TBD)
+runs against the MEV T7 kernel-path baseline on the same hosts. MMG is
+a follow-on when silicon lands.
 
 **On every MMG slide:** endpoint offload is pending D-init / D-tgt /
 D-both. **MMG never owns cache semantics** in any option — it is a
@@ -251,9 +252,10 @@ transport engine.
 
 **Customer-requested lower-risk path.** Measurement objective:
 host-CPU-per-GB reduction and MR/QP churn removal on the offloaded
-endpoint(s), against the CX7 T7 baseline. B remains the alternative
-if target admission, dedup, or multi-initiator semantics prove
-necessary.
+endpoint(s), against the **MEV kernel-path T7 baseline** produced
+by this plan (same hardware). CX7 T7 is retained as a cross-platform
+reference. B remains the alternative if target admission, dedup, or
+multi-initiator semantics prove necessary.
 
 **Not "works today."** The `raw_block` L2 adapter publishes its
 in-memory index right after header+payload writes; durable metadata
@@ -375,21 +377,29 @@ the SSD.
 ---
 <!-- _footer: "IPU KV Cache PoC" -->
 
-# Architecture A — CX7 Delivery Stages (2026-07-23)
+# Architecture A — MEV Kernel-Path Delivery Stages (2026-07-23)
 
-Stages 0–5 are the CX7 platform delivery for Architecture A.
-MEV and MMG are separate platform integrations.
+Stages 0–5 land on the MEV lab (Intel IPU, PCIe Gen4, 1x 100 GbE
+Falcon; 2x Samsung PM9A3 Gen4 SSDs on the target — sized to saturate
+100 GbE on the read path). CX7 is a completed reference baseline; the
+IPU offload phase and MMG are separate follow-on plans.
 
-- **Stage 0** — Freeze contract (namespace, NQNs, ownership boundary)
-- **Stage 1** — Prove safe NVMe-oF lifecycle (idempotent attach/detach,
-  ACL/media guards). Hard no-go: `nvmet` / `nvmet_rdma` must load.
+- **Stage 0** — Freeze contract (namespaces, NQNs, ownership); pass all
+  §5.2 gates including Falcon/perftest sanity and fabric fault-injection
+  capability
+- **Stage 1** — Prove safe NVMe-oF lifecycle over `irdma`/Falcon (T1).
+  **Two-week abort rule:** if `nvme_rdma`/`nvmet_rdma` over `irdma`
+  doesn't work in that window, D2-kernel-path aborts and the plan
+  pivots to a userspace-target/initiator revision
 - **Stage 2** — Remote-L2 I/O baseline (block-I/O sweep, SHA-256 verify)
 - **Stage 3** — WAL-based durable publication (intent → payload+FUA →
-  checksum+FUA → commit record + flush → map publish → ACK)
-- **Stage 4** — Fault + recovery matrix at all 6 WAL cutpoints, incl.
-  c5 committed-but-not-visible and allocator-collision check on replay
-- **Stage 5** — LMCache integration + workload evidence; T7 baseline
-  measurements for the later MEV / MMG platform plans
+  checksum+FUA → commit+flush → publish → ACK)
+- **Stage 4** — Two tracks: T4 crash matrix at all 6 A.3 cutpoints
+  (incl. c5 committed-but-not-visible) + T5 fabric-fault matrix on
+  named in-flight NVMe operations
+- **Stage 5** — LMCache integration + workload evidence; **T7 MEV
+  kernel-path baseline** for the follow-on offload phase (same
+  hardware) and MMG (cross-platform reference)
 
 <br/>
 
@@ -507,12 +517,18 @@ Runner scope freezes after M1: two sweeps, one runner. Transport-neutral verifie
 
 # Next Steps
 
-1. Confirm with Nima: is the initial demo scope (Architecture A on
-   CX7, Stages 0–5) sufficient for the customer decision review?
-2. Align internally on track ordering (A first, or B directly?)
-3. Draft technical one-pager for account team
-4. Scope hardware needs for Architecture A CX7 delivery (2-node
-   testbed, one exclusive namespace; SSD count TBD with customer).
-   MEV / MMG platform hardware scoped separately.
+1. **Customer sign-off on the platform shift.** D2 exit moves from
+   CX7 to MEV (see the plan's §1 revision note); CX7 becomes a
+   completed reference baseline (D.5). Needs an explicit ack before
+   the plan is published as the plan of record.
+2. Confirm with Nima: is the MEV kernel-path scope (Stages 0–5) plus
+   the two-week Stage-1 abort rule sufficient for the customer
+   decision review?
+3. Align internally on track ordering (A first, or B directly?)
+4. Draft technical one-pager for account team
+5. Confirm MEV lab readiness for Architecture A: 2-node Inspur
+   NF5280M7 testbed with 2x Samsung PM9A3 SSDs, single 100 GbE
+   Falcon link, feature-pack pinned in the run manifest. MMG lab
+   hardware (16x NVMe, 400 GbE) scoped separately.
 
 ---
