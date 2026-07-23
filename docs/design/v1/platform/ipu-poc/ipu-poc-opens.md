@@ -56,6 +56,17 @@ style: |
     padding-top: 0.9em;
   }
 
+  /* Small — dense slides (long <pre>, wide tables, deep card grids).
+     Scales everything proportionally by dropping the base font size. */
+  section.small {
+    font-size: 15px;
+    padding: 28px 40px 76px 40px;
+  }
+  section.small pre { font-size: 0.70em; line-height: 1.35; padding: 0.7em 0.9em; }
+  section.small ul li { margin: 0.18em 0; line-height: 1.30; }
+  section.small table { font-size: 0.78em; }
+  section.small .card { font-size: 0.80em; padding: 0.6em 0.85em; }
+
   /* Headings */
   h1 {
     font-size: 1.5em;
@@ -221,6 +232,7 @@ D-both. **MMG never owns cache semantics** in any option — it is a
 transport engine.
 
 ---
+<!-- _class: small -->
 <!-- _footer: "IPU KV Cache PoC" -->
 
 # Initiator-Owned Cache Semantics, Remote NVMe-oF L2
@@ -231,26 +243,23 @@ transport engine.
 |---|---|---|
 | Storage role | Passive NVMe-oF namespace (`nvmet-rdma`) | Smart cache (hash, admission, eviction) |
 | Initiator role | Owns cache metadata, allocator, WAL durability | Thin (expose MR, request by hash) |
-| Durable-commit protocol | WAL (intent → payload+FUA → checksum+FUA → commit record + flush → map publish → ACK). COW deferred post-POC. | BLAKE3-on-commit gated by target-side admission |
-| Multi-initiator dedup | Out of scope (single-initiator exclusive namespace) | Yes (global hash index on server) |
-| NVMe framing | Yes (command capsules + `nvmet-rdma`) | No (raw RDMA verbs) |
-| Cache-level admission / lease / BLAKE3-on-commit | Initiator-local admission and checksum verification; no target-side admission, lease, or verifier | Present |
-| IPU offload surfaces | Initiator `nvme_rdma` and/or target `nvmet-rdma` termination (MEV: Falcon reliable transport; MMG: IPT) — endpoint pending D-init / D-tgt / D-both | Target-side LMCache + admission control |
-| Track status | Initiator-owned NVMe-oF POC | Storage-owned track |
+| Durable commit | WAL: intent → payload+FUA → checksum+FUA → commit+flush → publish → ACK. COW deferred. | BLAKE3-on-commit gated by target admission |
+| Multi-initiator dedup | Out of scope | Yes (global hash index on server) |
+| NVMe framing | Yes (`nvmet-rdma` capsules) | No (raw RDMA verbs) |
+| Target admission / lease | None; initiator-local BLAKE3 verify only | Present |
+| IPU offload surface | `nvme_rdma` and/or `nvmet-rdma` (D-init / D-tgt / D-both) | Target LMCache + admission |
 
-**Architecture A is the customer-requested lower-risk path.** The
-concrete measurement objective is host-CPU-per-GB reduction and
-`nvme_rdma` / `nvmet_rdma` MR/QP churn removal on the offloaded
-endpoint(s), against the CX7 T7 baseline. Architecture B remains the
-alternative if target-side cache admission, deduplication, or
-multi-initiator cache semantics prove necessary.
+**Customer-requested lower-risk path.** Measurement objective:
+host-CPU-per-GB reduction and MR/QP churn removal on the offloaded
+endpoint(s), against the CX7 T7 baseline. B remains the alternative
+if target admission, dedup, or multi-initiator semantics prove
+necessary.
 
-**Do not read Architecture A as "works today."** The `raw_block` L2 adapter
-publishes its in-memory index immediately after writing header + payload;
-durable metadata is a periodic mirrored checkpoint with no fsync/FLUSH/FUA
-ordering against payload writes. Architecture A therefore requires the WAL
-commit-record + map-publish machinery specified in `nvmeof-poc-plan.md`
-before it can claim durable cache correctness across a crash.
+**Not "works today."** The `raw_block` L2 adapter publishes its
+in-memory index right after header+payload writes; durable metadata
+is a periodic mirrored checkpoint with no fsync/FLUSH/FUA ordering
+against payload. A requires the WAL commit-record + map-publish
+machinery before it can claim durable cache correctness on crash.
 
 ---
 <!-- _footer: "IPU KV Cache PoC" -->
@@ -263,7 +272,7 @@ INITIATOR NODE                              TARGET (NVMe-oF) NODE
 
 Initiator Xeon (full cache brain):          Target Xeon (transport + block only):
  • LMCache engine, token hashing              • Linux nvmet + nvmet-rdma, NQN ACL, namespace export
- • Local {key,digest} idempotency (§A.5)      • Linux kernel block layer, SSD driver
+ • Local {key,digest} idempotency             • Linux kernel block layer, SSD driver
  • L1 (initiator DRAM) management + LRU       • No LMCache, no hash table, no admission
  • L2 allocator + key→LBA map                 • No LRU, no cache DRAM tier
  • WAL: intent, checksum, commit, recovery    • SSD is the durable L2 medium
@@ -278,101 +287,98 @@ Initiator IPU (D-init or D-both, MEV/MMG):  Target IPU (D-tgt or D-both, MEV/MMG
 
 <br/>
 
-**Endpoint offload is pending D-init / D-tgt / D-both** (see plan
-Appendix D.2). MMG never owns cache semantics in any option — it is a
-transport engine.
+**Endpoint offload is pending D-init / D-tgt / D-both.** MMG never
+owns cache semantics in any option — it is a transport engine.
 
 ---
+<!-- _class: small -->
 <!-- _footer: "IPU KV Cache PoC" -->
 
 # Architecture A — STORE (Initiator-Owned Durable Commit)
 
 <pre>
-LMCache (Initiator Xeon)          Initiator nvme_rdma        NVMe-oF/RDMA         Target nvmet-rdma          SSD (L2 media)
-────────────────────────          ───────────────────        ────────────         ─────────────────          ──────────────
-1. store(tokens, kv_tensor)
-2. GPU HBM → initiator DRAM (fence)
-3. Hash tokens; BLAKE3 digest D;
-   {key,digest} idempotency check (§A.5)
-4. L1 put(key, PENDING)              ← not lookup-visible
-5. WAL intent {key, LBA, D} + FLUSH
-                                    ─── NVMe WRITE + FLUSH ────►                  ─── write + flush ──►      intent durable
-
-6. Payload write, FUA, 256 KiB
-                                    ─── NVMe WRITE command ────►
-                                    ◄── RDMA READ request ─────                    target pulls initiator MR
-                                    ─── 256 KiB payload ───────►
-                                                                                ─── block write + FUA ──►      payload durable
-
-7. Checksum-record write, FUA
-                                    ─── NVMe WRITE (FUA) ──────►                  ─── write + FUA ────►      checksum durable
-
-8. WAL COMMITTED record + FLUSH
-                                    ─── NVMe WRITE + FLUSH ────►                  ─── write + flush ──►      commit durable
-                                    ◄── flush completion ──────                   ◄── completion ─────       (c5 BEGINS on completion)
-
-9. Publish key→LBA map ATOMICALLY  ◄── c5 ENDS
-   with L1 PENDING → VISIBLE flip
-10. Terminal ACK to caller
+LMCache (Init Xeon)         Init nvme_rdma      NVMe-oF/RDMA      Target nvmet-rdma        SSD (L2)
+───────────────────         ──────────────      ────────────      ─────────────────        ────────
+1. store(tokens, kv)
+2. GPU HBM → init DRAM
+3. Hash → BLAKE3 D;
+   {key,D} idempotency
+4. L1 put(key, PENDING)     (not lookup-visible)
+5. WAL intent + FLUSH  ──► NVMe WRITE+FLUSH ──►                ──► write+flush ──►         intent durable
+6. Payload (FUA, 256K) ──► NVMe WRITE ────────►
+                           ◄── RDMA READ ─────                 (target pulls init MR)
+                           ──── 256K payload ─►                ──► block write+FUA ─►      payload durable
+7. Checksum (FUA)     ───► NVMe WRITE (FUA) ──►                ──► write+FUA ─────►       cksum durable
+8. WAL COMMIT + FLUSH ───► NVMe WRITE+FLUSH ──►                ──► write+flush ──►         commit durable
+                           ◄── flush cqe ─────                                              c5 BEGINS
+9. Publish key→LBA + L1 PENDING→VISIBLE (atomic)                                            c5 ENDS
+10. Terminal ACK
 </pre>
 
-<h3>Three contract details the diagram assumes</h3>
+<div class="cols">
+<div class="card card-blue">
 
-- **c5 window** (step 8 flush completion → step 9): the COMMITTED
-  record is durable on media but the in-memory map/L1 has not yet
-  flipped. Recovery reconstructs the new value from the WAL exactly
-  once. Fault-matrix test T4 exercises this boundary.
-- **ACK-loss retry (§A.5).** Client retry keyed on `{key, digest}`:
-  absent → start; matches PENDING → join / retryable; matches VISIBLE
-  → no-op success; different digest for same key → reject. Never
-  allocate or WAL-write twice.
-- **Wire direction ≠ pull semantics.** The target's `nvmet-rdma`
-  issues an RDMA Read as its normal transport implementation of the
-  NVMe Write at step 6. No target-side cache decision precedes it.
-  Architecture B is the pull-with-admission model.
+### c5 window (step 8 cqe → step 9)
+
+COMMITTED record durable on media, map/L1 not yet flipped. Recovery
+reconstructs the new value from the WAL exactly once. Fault-matrix
+test T4 exercises this boundary.
+
+</div>
+<div class="card card-purple">
+
+### ACK-loss retry
+
+Keyed on `{key, digest}`: absent → start; PENDING → join / retry;
+VISIBLE → no-op success; different digest for same key → reject.
+Never allocate or WAL-write twice.
+
+</div>
+</div>
+
+**Wire direction ≠ pull semantics.** `nvmet-rdma` issues the RDMA
+Read at step 6 as its normal transport implementation of the NVMe
+Write. No target-side cache decision precedes it. Architecture B is
+the pull-with-admission model.
 
 ---
+<!-- _class: small -->
 <!-- _footer: "IPU KV Cache PoC" -->
 
 # Architecture A — RETRIEVE (Initiator-Owned Lookup)
 
 <pre>
-LMCache (Initiator Xeon)          Initiator nvme_rdma        NVMe-oF/RDMA         Target nvmet-rdma          SSD (L2 media)
-────────────────────────          ───────────────────        ────────────         ─────────────────          ──────────────
+LMCache (Init Xeon)         Init nvme_rdma      NVMe-oF/RDMA      Target nvmet-rdma        SSD (L2)
+───────────────────         ──────────────      ────────────      ─────────────────        ────────
 1. retrieve(tokens)
-2. Hash tokens → chunk keys (BLAKE3)
-3. L1 lookup (initiator DRAM, exclude PENDING)
+2. Hash tokens → BLAKE3 keys
+3. L1 lookup (exclude PENDING)
 
-├── L1 HIT (page in initiator DRAM):
-│    4. get from L1 → DMA to GPU HBM → resume        (no fabric traffic)
-│
-├── L1 MISS → initiator key→LBA map lookup:
-│    │
-│    ├── L2 HIT (map entry present):
-│    │    5. io_uring NVMe read (O_DIRECT, 256 KiB)
-│    │                              ─── NVMe READ ─────►                    ─── read ──────►                 return block
-│    │                              ◄── 256 KiB RDMA WRITE ──                target writes block into initiator MR
-│    │    6. Recompute BLAKE3; compare to committed digest
-│    │       ├── OK:   optional promote to L1, DMA to GPU HBM
-│    │       └── FAIL: mark stale, discard map entry, return miss
-│    │
-│    └── L2 MISS (no map entry):
-│         return miss → caller recomputes KV
+L1 HIT:  get from L1 → DMA to GPU HBM → resume    (no fabric traffic)
+
+L1 MISS → key→LBA map lookup:
+  L2 HIT:  4. io_uring NVMe read (O_DIRECT, 256K)
+                          ─── NVMe READ ────►                    ── read ──►                return block
+                          ◄── 256K RDMA WRITE ──                 (target → init MR)
+           5. Recompute BLAKE3; compare to committed digest
+              OK:   optional promote to L1, DMA to GPU HBM
+              FAIL: mark stale, discard map entry, return miss
+  L2 MISS: return miss → caller recomputes KV
 </pre>
 
 <br/>
 
-**No target-side lookup, no target hash table, no target admission,
-no target-side L1 hit/miss branches.** The target only serves NVMe-oF
-commands and moves blocks to/from the SSD.
+**No target-side lookup, hash table, admission, or L1 branch.**
+The target only serves NVMe-oF commands and moves blocks to/from
+the SSD.
 
 ---
 <!-- _footer: "IPU KV Cache PoC" -->
 
-# Architecture A — CX7 Delivery Stages (2026-07-22)
+# Architecture A — CX7 Delivery Stages (2026-07-23)
 
 Stages 0–5 are the CX7 platform delivery for Architecture A.
-MEV and MMG are separate platform integrations. See `nvmeof-poc-plan.md`.
+MEV and MMG are separate platform integrations.
 
 - **Stage 0** — Freeze contract (namespace, NQNs, ownership boundary)
 - **Stage 1** — Prove safe NVMe-oF lifecycle (idempotent attach/detach,
@@ -391,42 +397,66 @@ Architecture B (storage-owned pull) proceeds on its own track with M1
 raw-verbs baselines done and M2 admission gating in progress.
 
 ---
+<!-- _class: small -->
 <!-- _footer: "IPU KV Cache PoC" -->
 
 # Open Questions for Anthropic
 
-**Architecture choice:**
-- Does the target need to make cache-level decisions (dedup,
-  admission, LRU) BEFORE serving data, or is a passive NVMe-oF
-  namespace acceptable?
-  Note: an NVMe-oF target issuing an RDMA Read to fetch a Write
-  payload is standard transport behavior, not cache-semantic pull.
-  → If cache-level admission is required, prioritize B.
-  → If not, A stays eligible.
+<div class="cols">
+<div class="card card-blue">
 
-**Software implementation for Architecture A:**
-- Linux kernel `nvme_rdma` / `nvmet_rdma` (fastest validation), or
-  SPDK userspace (max control over polling, queueing, CPU)?
-- Preference may differ per endpoint (initiator vs target).
+### Architecture choice
 
-**Performance and operational success criteria:**
-- Minimum host-CPU reduction at comparable throughput
-- Maximum p99 latency regression for small, latency-sensitive I/O
-- Maximum sustained-throughput regression for large, concurrent I/O
+Does the target need cache-level decisions (dedup, admission, LRU)
+BEFORE serving data, or is a passive NVMe-oF namespace acceptable?
+
+An NVMe-oF target's RDMA Read to fetch a Write payload is standard
+transport behavior, not cache-semantic pull.
+
+→ Cache-level admission required: prioritize B.
+→ Otherwise: A stays eligible.
+
+</div>
+<div class="card card-purple">
+
+### Software stack for A
+
+Linux kernel `nvme_rdma` / `nvmet_rdma` (fastest validation), or
+SPDK userspace (max control over polling, queueing, CPU)?
+
+Preference may differ per endpoint (initiator vs target).
+
+</div>
+</div>
+
+<div class="cols">
+<div class="card card-green">
+
+### Success criteria
+
+- Min host-CPU reduction at comparable throughput
+- Max p99 latency regression for small I/O
+- Max sustained-throughput regression for large I/O
 - Reconnect-timeout ceiling; time-to-cache-online after cold restart
 
-**Decision workload:**
-- Read-heavy retrieval, write-heavy durable store, or the mixed
-  KV-cache trace from plan §6.2?
+</div>
+<div class="card card-amber">
+
+### Decision workload
+
+Read-heavy retrieval, write-heavy durable store, or a mixed
+KV-cache trace?
+
+</div>
+</div>
 
 ---
 <!-- _footer: "IPU KV Cache PoC" -->
 
 # Architecture B — Raw-Verbs Test Plan (Parallel Track)
 
-Storage-owned RDMA path, shown here for completeness. Not part of the
-Architecture A NVMe-oF POC — its test plan is `nvmeof-poc-plan.md`
-Stages 0–5.
+Storage-owned RDMA path, shown here for completeness. Not part of
+the Architecture A NVMe-oF POC (Stages 0–5).
 
 <div class="cols">
 <div class="card card-blue">
@@ -483,6 +513,6 @@ Runner scope freezes after M1: two sweeps, one runner. Transport-neutral verifie
 3. Draft technical one-pager for account team
 4. Scope hardware needs for Architecture A CX7 delivery (2-node
    testbed, one exclusive namespace; SSD count TBD with customer).
-   MEV / MMG platform hardware scoped separately per plan Appendix D.
+   MEV / MMG platform hardware scoped separately.
 
 ---
