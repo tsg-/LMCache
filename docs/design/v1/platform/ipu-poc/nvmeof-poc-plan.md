@@ -1,4 +1,6 @@
-# Initiator-Owned NVMe-oF L2 POC Plan
+# Inference KV Cache Offload with Intel IPU
+
+*LMCache remote tiering over RDMA/Falcon; CX7 baseline to IPU prototype*
 
 ## 1. Executive Summary
 

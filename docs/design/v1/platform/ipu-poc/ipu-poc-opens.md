@@ -177,9 +177,9 @@ style: |
 <!-- _class: title -->
 <!-- _paginate: false -->
 
-# KV Cache Offload over RDMA
+# Inference KV Cache Offload with Intel IPU
 
-## Details on LMCache based prototype with IPU as RDMA/Falcon NIC
+## LMCache remote tiering over RDMA/Falcon; CX7 baseline to IPU prototype
 
 <div class="byline">
 July 2026
