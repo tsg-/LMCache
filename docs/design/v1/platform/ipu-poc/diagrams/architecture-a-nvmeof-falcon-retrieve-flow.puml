@@ -1,0 +1,50 @@
+@startuml
+title NVMe-oF/RDMA over Falcon — RETRIEVE (Read) Flow
+
+' ─── IPU HOST (initiator side) ──────────────────────────────────
+box "<size:20><b>IPU host (initiator)</b></size>" #F0F6FF
+participant "Application\n(LMCache)" as APP
+participant "NVMe-oF Initiator\n(nvme_rdma on Xeon)" as INIT
+participant "Initiator IPU\n(Falcon / irdma verbs)" as IFAL
+end box
+
+' ─── KV Cache node (target side) ────────────────────────────────
+box "<size:20><b>KV Cache node (target)</b></size>" #FFF8E8
+participant "Target IPU\n(Falcon / irdma verbs)" as TFAL
+participant "Target Xeon\n(nvmet-rdma + block layer)" as CPU
+participant "Target DRAM" as TDDR
+participant "NVMe SSD\n(namespace)" as SSD
+end box
+
+APP -> INIT: retrieve(tokens); L1 miss, key→LBA hit
+INIT -> INIT: Register RX MR; build SGL\npointing at initiator buffer
+INIT -> IFAL: SEND (NVMe READ command capsule + SGL)
+IFAL -> TFAL: Falcon reliable transport\n(wire)
+TFAL -> CPU: Deliver NVMe-oF command\n(nvmet-rdma dispatch)
+
+CPU -> SSD: NVMe READ
+SSD --> TDDR: DMA payload into target DRAM
+SSD --> CPU: Completion
+
+CPU -> TFAL: Post RDMA WRITE\n(target DRAM → initiator RX MR)
+TFAL -> IFAL: Falcon reliable transport\n(wire, RDMA WRITE push)
+IFAL --> INIT: Payload placed in RX MR;\nCQE observed
+
+CPU -> TFAL: SEND (NVMe completion capsule)
+TFAL -> IFAL: Falcon reliable transport\n(wire, SEND)
+IFAL --> INIT: Completion capsule received
+
+INIT -> APP: NVMe command complete;\nBLAKE3 verify → deliver from MR
+
+note over IFAL, TFAL
+  Boundary: Falcon RDMA link (100 GbE, MTU 4096).
+  Both IPUs do fabric offload only — no NVMe logic.
+end note
+
+note over CPU, SSD
+  Standard nvmet-rdma read path.
+  Target-issued RDMA WRITE places payload directly into
+  the initiator's pre-registered RX MR; no host-side
+  post-completion transfer step (unlike NVMe/TCP C2H PDUs).
+end note
+@enduml
