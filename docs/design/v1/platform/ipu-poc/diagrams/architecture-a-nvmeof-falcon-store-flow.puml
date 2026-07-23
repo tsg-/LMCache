@@ -1,15 +1,16 @@
 @startuml
+skinparam TitleFontSize 20
 title NVMe-oF/RDMA over Falcon — STORE (Write) Flow
 
 ' ─── IPU HOST (initiator side) ──────────────────────────────────
-box "<size:20><b>IPU host (initiator)</b></size>" #F0F6FF
+box "<size:18><b>IPU host (initiator)</b></size>" #F0F6FF
 participant "Application\n(LMCache)" as APP
 participant "NVMe-oF Initiator\n(nvme_rdma on Xeon)" as INIT
 participant "Initiator IPU\n(Falcon / irdma verbs)" as IFAL
 end box
 
 ' ─── KV Cache node (target side) ────────────────────────────────
-box "<size:20><b>KV Cache node (target)</b></size>" #FFF8E8
+box "<size:18><b>KV Cache node (target)</b></size>" #FFF8E8
 participant "Target IPU\n(Falcon / irdma verbs)" as TFAL
 participant "Target Xeon\n(nvmet-rdma + block layer)" as CPU
 participant "Target DRAM" as TDDR
