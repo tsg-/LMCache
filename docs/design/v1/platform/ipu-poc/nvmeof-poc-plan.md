@@ -1,12 +1,25 @@
 # Inference KV Cache Offload with Intel IPU
 
-*LMCache remote tiering over RDMA/Falcon; CX7 baseline to IPU prototype*
+*LMCache remote tiering over RDMA/Falcon; preliminary MEV bring-up
+against the completed CX7 reference baseline*
 
 ## 1. Executive Summary
 
-This plan gets the initiator-owned NVMe-oF software stack working on
-CX7 hardware and produces a baseline the later IPU platforms (MEV,
-MMG) will be measured against. CX7 is the only data path in scope.
+This plan brings up the initiator-owned NVMe-oF software stack on the
+MEV platform (Intel IPU, PCIe Gen4, 1x 100 GbE, Falcon transport):
+two hosts, kernel `nvme_rdma`/`nvmet_rdma` over `irdma` verbs, and
+**2x Samsung PM9A3 Gen4 SSDs** on the target -- the count needed to
+saturate the 100 GbE link on the read path (sizing math in §5.1). No IPU
+offload endpoint is on the data path yet -- this preliminary work
+proves Architecture A runs correctly on MEV silicon and captures the
+MEV kernel-path baseline (T7) that the later offload phase (D-init /
+D-tgt / D-both, Appendix D) compares against on the same hardware.
+
+The CX7 work that preceded this plan is retained as a completed
+reference baseline (environment in D.5). Its T7 numbers remain
+useful as a cross-platform sanity reference, but the offload
+comparison that matters is same-platform: MEV offloaded path vs the
+MEV kernel path measured here.
 
 **Architecture A** puts all cache semantics on the initiator:
 key->LBA map, WAL, allocator, admission. The target is a dumb
@@ -14,47 +27,55 @@ nvmet-rdma exporter. This is the customer-requested path to test
 whether an IPU can reduce transport CPU cost without degrading cache
 behavior.
 
-**What we ship.** Two deliverables, both on CX7:
+**What we ship.** Two deliverables, both on the MEV lab:
 
 - **D1 -- Raw NVMe-oF Baseline.** Can we safely attach, detach, and
-  reconnect a remote namespace and push deterministic I/O through
-  it at known latency/throughput? No LMCache in the path. No
-  durability claims. Stages 0-2.
+  reconnect remote namespaces and push deterministic I/O through
+  them at known latency/throughput -- over `irdma` on Falcon? No
+  LMCache in the path. No durability claims. Stages 0-2.
 
 - **D2 -- Durable Remote-L2.** LMCache integration with the WAL
   commit protocol (Appendix A), crash recovery across all six
-  cutpoints, an integrated workload (T6), and the CX7 host-CPU
-  baseline (T7) the IPU plans will compare against. Stages 3-5.
+  cutpoints, an integrated workload (T6), and the MEV kernel-path
+  host-CPU baseline (T7) the offload phase compares against.
+  Stages 3-5.
 
-**What happens after this plan.** MEV re-hosts Architecture A on an
-available Intel IPU with Falcon transport. MMG follows when its
-silicon and Falcon enabling are ready (anticipated early August
-2026). Both are separate plans; the environments are captured as
-contracts in Appendix D.5/D.6, not milestones here.
+**What happens after this plan.** The MEV offload phase selects an
+endpoint (D-init / D-tgt / D-both, Appendix D.2) and re-runs the
+comparison workloads against this plan's T7 baseline on identical
+hardware. MMG follows when its silicon and Falcon enabling are ready
+(anticipated early August 2026). Both are separate plans; the
+contract items are in Appendix D, not milestones here.
 
 **Platforms at a glance:**
 
 | Platform | Silicon | Wire transport | Status |
 | --- | --- | --- | --- |
-| CX7 | Mellanox CX7 on Xeon (Granite Rapids AP) | RoCEv2 | This plan |
-| MEV | Intel IPU, MEV release | Falcon reliable transport | Follow-on plan; lab available now |
+| CX7 | Mellanox CX7 on Xeon (Granite Rapids AP) | RoCEv2 | Completed reference baseline (D.5) |
+| MEV | Intel IPU, MEV release | Falcon reliable transport | **This plan** (kernel path, 2 SSDs); offload phase follows |
 | MMG | Intel IPU, MMG-400 | IPT on Falcon cores | Follow-on plan; ~August 2026 |
 
-**Principal risks.** The customer-reportable baseline stops if the
-fabric cannot negotiate `IBV_MTU_4096`, or if the fault harness cannot
-prove it interrupted established NVMe-oF I/O in the stated order.
+**Principal risks.** The customer-reportable baseline stops if
+kernel `nvme_rdma`/`nvmet_rdma` do not run correctly over `irdma`
+verbs on Falcon (the MEV stack has been proven with perftest, not
+with the kernel NVMe-oF path), if the fabric cannot negotiate
+`IBV_MTU_4096`, or if the fault harness cannot prove it interrupted
+established NVMe-oF I/O in the stated order. MEV-TS feature-pack and
+driver churn can invalidate in-progress runs; the manifest pins the
+release per run.
 
-**Decisions needed.** At CX7 kickoff, the customer confirms any
-workload alternate and the T6 L1-hit-rate tolerance. Before an MEV or
-MMG lab booking, Nima selects the offloaded endpoint and resolves the
-platform topology in Appendix D.
+**Decisions needed.** At kickoff, the customer confirms any workload
+alternate and the T6 L1-hit-rate tolerance. Before the offload phase starts, Nima selects
+the offloaded endpoint (D.2) and resolves the production-topology
+question in D.3; neither blocks this plan's bring-up.
 
 The three possible outcomes after all platform evidence is in:
 **advance A** (it works, ship it), **optimize A** (correctness
 passes but WAL fast-path or allocator batching needs targeted work),
 or **abandon A** (fails a functional/durability gate or neither
 baseline nor IPU delta shows realistic headroom). This plan produces
-the CX7 input; the call itself waits for MEV/MMG.
+the MEV kernel-path input; the call itself waits for the offload
+phase and MMG.
 
 **Terminology.** L0 = GPU HBM. L1 = initiator host DRAM. L2 = remote
 NVMe namespace via NVMe-oF/RDMA. These labels are stable throughout
@@ -66,10 +87,10 @@ the doc and across all three platforms.
 | ID | Requirement | Evidence |
 | --- | --- | --- |
 | R1 | LMCache runs only on the initiator; target exports NVMe-oF namespaces, no LMCache agent | Target process list and `nvmet-rdma` config at kickoff |
-| R2 | One initiator exclusively owns one unused namespace | Single-host NQN ACL + pre-attach namespace check |
+| R2 | One initiator exclusively owns the exported namespaces (2 SSDs, one namespace each; no other host NQN on the ACL) | Single-host NQN ACL + pre-attach namespace check on both namespaces |
 | R3 | Every successful load matches its recorded BLAKE3 checksum | Read-path integrity verification |
 | R4 | Results reproducible from a versioned manifest | Manifest records topology, versions, commands, artifacts |
-| R5 | CX7 results are the baseline for later IPU comparisons | T7 captures host CPU, `nvme_rdma` MR/QP churn, CQ event rate |
+| R5 | MEV kernel-path results are the baseline for the offload-phase comparison | T7 captures host CPU, `nvme_rdma` MR/QP churn, CQ event rate on the `irdma` path |
 
 
 ## 3. Architecture A vs B
@@ -111,11 +132,12 @@ initiator's WAL replays to a consistent state. If the fabric drops, the
 initiator reconnects and replays. The target never needs to know what
 a KV cache is.
 
-This is true across all three platforms. What can differ on MEV and
-MMG is whether the Linux NVMe-oF/block-I/O path underneath gets
-preserved or replaced by IPU-hosted transport -- but that's a
-software-architecture choice each platform makes explicitly
-(Appendix D), not something Architecture A dictates.
+This is true across all three platforms. In this plan the Linux
+NVMe-oF/block-I/O path is preserved end to end -- kernel `nvme_rdma`
+and `nvmet_rdma` over `irdma` verbs, with Falcon underneath as the
+wire transport. Whether the offload phase replaces that path with
+IPU-hosted transport is an explicit software-architecture choice made
+per endpoint in Appendix D, not something Architecture A dictates.
 
 One thing worth calling out about wire direction: on an NVMe Write,
 `nvmet-rdma` issues an RDMA Read to pull the payload from the
@@ -125,11 +147,14 @@ behavior, not target-side admission. The target never decides
 Target-side cache semantics (the admission-then-pull model) is
 Architecture B.
 
-![Architecture A — CX7 hardware topology](diagrams/architecture-a-cx7-hardware-topology.svg)
+![Architecture A — MEV hardware topology](diagrams/architecture-a-mev-hardware-topology.svg)
 
-*Two identical Xeon + CX7 servers connected over a single RoCEv2 link
-on the 192.168.200 data plane. Media in blue, host CPU in purple,
-DRAM in green, RoCEv2 hardware in amber.*
+*Two Xeon + MEV IPU servers (Inspur NF5280M7, PCIe Gen4) connected
+over a single 100 GbE Falcon RDMA link; the target carries 2x
+Samsung PM9A3 Gen4 x4 SSDs, one namespace each. Media in blue, host
+CPU in purple, DRAM in green, IPU/fabric hardware in amber. The CX7
+reference topology is
+`diagrams/architecture-a-cx7-hardware-topology.svg`.*
 
 
 ### 4.1 Initiator (compute) host
@@ -139,8 +164,8 @@ DRAM in green, RoCEv2 hardware in amber.*
 | Xeon host CPU | Runs LMCache engine, StorageManager, WAL/map authority, allocator, admission. The brain. |
 | GPU HBM (L0) | Consumes KV pages via DMA from initiator DRAM. Not on the NVMe-oF path. |
 | Initiator DRAM (L1) | Pinned buffers for RDMA MR registration and GPU DMA. |
-| HCA (CX7 / MEV `irdma` / MMG IPU) | Terminates NVMe-oF/RDMA transport. Registers MRs for I/O buffers and the WAL log. |
-| Linux NVMe-oF initiator | `nvme-cli`, `nvme_rdma`. Fabric attach, path discovery, reconnect. Kernel-owned on CX7; MEV/MMG decide whether to keep or replace this (Appendix D). |
+| MEV IPU (`irdma` verbs device) | Terminates NVMe-oF/RDMA transport over Falcon. Registers MRs for I/O buffers and the WAL log. CX7 HCA fills this role in the reference baseline. |
+| Linux NVMe-oF initiator | `nvme-cli`, `nvme_rdma`. Fabric attach, path discovery, reconnect. Kernel-owned in this plan; the offload phase decides per endpoint whether to keep or replace it (Appendix D). |
 
 
 ### 4.2 Target (storage) host
@@ -150,43 +175,61 @@ DRAM in green, RoCEv2 hardware in amber.*
 | Xeon host CPU | Runs `nvmet-rdma`, configfs orchestration, SSD block layer. **No LMCache agent. No cache decisions.** |
 | Host DRAM | Payload staging for `nvmet-rdma` and block layer only. Not an LMCache tier. |
 | Target HCA | Terminates NVMe-oF/RDMA target transport. |
-| NVMe SSD(s) (L2) | Durable authority for stored bytes. Wear-leveling, GC, FUA/FLUSH are the drive's problem. |
+| 2x Samsung PM9A3 1.92 TB (L2) | Gen4 x4 U.2, one namespace per SSD (ns1, ns2), both ACL'd to the single initiator; ns1 is the primary durability-test namespace, ns2 joins the fabric-saturation sweeps and proves dual-namespace export/lifecycle. Count sized to saturate 100 GbE on reads (§5.1). Durable authority for stored bytes; wear-leveling, GC, FUA/FLUSH are the drive's problem. |
 
 
 ### 4.3 Fabric and non-participants
 
-CX7 data plane: 192.168.200 RDMA, RoCEv2. Management plane:
-192.168.100 -- SSH only, never touched, never a fault-injection
-target. MEV and MMG have their own network planes (Appendix D).
+MEV data plane: single 100 GbE direct-attach link (the MEV IPU
+exposes one 100 GbE port), Falcon reliable transport on the wire
+with RoCE-style verbs on top. Management access stays off the data
+path and is never reconfigured or used as a fault-injection target.
+Management plane: 10.166.87.x / 10.166.86.x -- SSH only, never
+touched, never a fault-injection target. The CX7 reference planes
+are in D.5; MMG defines its own (D.6).
 
 **Not participating:** target-side LMCache agent (removed by design),
-IPU/Falcon offload software (MEV/MMG scope), multi-initiator
+IPU offload endpoints (offload-phase scope -- the IPU here acts only
+as the `irdma` verbs device under the kernel path), multi-initiator
 coordinator (out of scope and likely a separate project if we ever
 need it).
 
-Topology diagram: `diagrams/architecture-a-cx7-nvmeof-topology.mmd`.
+Topology diagram: `diagrams/architecture-a-mev-hardware-topology.mmd`
+(MMG anticipated: `diagrams/architecture-a-mmg-hardware-topology.mmd`;
+CX7 reference: `diagrams/architecture-a-cx7-nvmeof-topology.mmd`).
 WAL sequence: `diagrams/architecture-a-nvmeof-wal-sequence.mmd`.
 
 
 ## 5. Test Environment and Operational Guardrails
 
-CX7 lab only. MEV and MMG environments live in D.5 and D.6. Every
-run manifest snapshots the version-sensitive rows below.
+MEV lab only. The CX7 reference environment lives in D.5; MMG in
+D.6. Every run manifest snapshots the version-sensitive rows below.
 
 ### 5.1 Hardware and software inventory
 
 | Attribute | Value |
 | --- | --- |
-| Initiator host | Xeon (bmg0-class), NVMe-oF initiator, GPU present for L0 DMA |
-| Target host | Xeon (bmg1-class), NVMe SSD(s), no LMCache software |
-| Initiator HCA | Mellanox CX7 (`mlx5_1` on bmg0), RoCEv2, GID index 4 (192.168.200.3) |
-| Target HCA | Mellanox CX7 (`rocep153s0f0` on bmg1 post-rename), RoCEv2, GID index 5 (192.168.200.4) |
-| Ethtool ifaces | Initiator `ens1f1np1`; target `ens1f0np0` |
-| Data plane | 192.168.200.0/24, direct-attach or dedicated switch, link MTU 9000, `active_mtu=IBV_MTU_4096` on both HCAs |
-| Management plane | 192.168.100.0/24 — SSH only, never reconfigured |
-| Kernel modules (target) | `nvmet`, `nvmet_rdma` — must load cleanly (hard no-go) |
-| Kernel modules (initiator) | `nvme_core`, `nvme_rdma`, `mlx5_core`, `mlx5_ib` |
-| Branch / repo | `ipu-poc-nvmeof-alt` |
+| Hosts | Inspur NF5280M7 (I-P00599 initiator, I-P00600 target), Xeon Gold 6430, 64C/128T each; IPU on PCIe Gen4 |
+| IPU | Intel IPU, MEV-TS release `IPU IMC MEV-HW-C1-ci-ts.release.2.1.0.11517` (manifest pins the exact release per run) |
+| RDMA device | `rocep69s0f0` (vendor `0x8086`, part `5202`), driven by `irdma`; host-IPU control plane via `idpf` |
+| Wire transport | Falcon reliable transport on the wire (not RoCEv2/UDP); RoCE-style verbs layered on top |
+| Target media | 2x Samsung PM9A3 1.92 TB (`MZQL21T9HCJR-00A07`, Gen4 x4 U.2), one namespace each (ns1, ns2), both on the single-host NQN ACL; ns1 primary durability namespace |
+| Data plane | 1x 100 GbE direct-attach; `active_mtu=IBV_MTU_4096` on both ends |
+| Kernel modules (target) | `nvmet`, `nvmet_rdma` — must load and bind over `irdma` cleanly (hard no-go) |
+| Kernel modules (initiator) | `nvme_core`, `nvme_rdma`, `irdma`, `idpf` |
+| Branch / repo | [`github.com/tsg-/LMCache`, branch `ipu-poc-nvmeof-alt`](https://github.com/tsg-/LMCache/tree/ipu-poc-nvmeof-alt) |
+
+**SSD-count sizing.** 100 GbE is 12.5 GB/s raw, ~11.5-12 GB/s as
+RDMA goodput. The PM9A3 1.92 TB is spec'd at 6,800 MB/s sequential
+read and 2,700 MB/s sequential write, so 2 drives give ~13.6 GB/s
+aggregate media read -- the minimum count that keeps the fabric, not
+the media, as the read-path ceiling (~10% margin). Aggregate
+sustained write (~5.4 GB/s) stays media-limited -- acceptable,
+because the write path is where WAL/durability behavior is under
+test, not peak bandwidth. Consequence for interpretation:
+read-bandwidth points are fabric-limited **by design**;
+write-bandwidth points are media-limited; and the baseline of record
+is host-CPU-per-GB and MR/QP/CQ behavior either way (see §9.2).
 
 ### 5.2 Operational guardrails
 
@@ -200,15 +243,16 @@ MTU gate is satisfied.
 
 | Gate | Type | Required evidence | If unmet |
 | --- | --- | --- | --- |
-| Target kernel modules | Hard | `nvmet` and `nvmet_rdma` load cleanly on the target host | Target owner rebuilds module or boots compatible kernel before Stage 1 |
-| Fabric MTU | Performance | `active_mtu=IBV_MTU_4096` on both HCAs; link MTU ≥ 4200 (lab: 9000); bidirectional `ping -M do -s 4000` passes. See Appendix C | Functional stages proceed labeled `mtu:degraded`; timed runs stop and escalate |
+| Target kernel modules | Hard | `nvmet` and `nvmet_rdma` load cleanly on the target host and bind the `irdma` device | Target owner rebuilds module or boots compatible kernel before Stage 1 |
+| Falcon/perftest sanity | Hard | Reproduce the D.5-era perftest RC baselines on the current feature pack (`ib_send_bw` ~96 Gb/s, `ib_write_bw` ~96 Gb/s, `ib_read_bw` ~93 Gb/s at 64 KiB) before any NVMe-oF work | Stop; debug Falcon/irdma bring-up with the platform team before Stage 1 |
+| Fabric MTU | Performance | `active_mtu=IBV_MTU_4096` on both ends; link MTU ≥ 4200; bidirectional `ping -M do -s 4000` passes. See Appendix C | Functional stages proceed labeled `mtu:degraded`; timed runs stop and escalate |
 | Management-plane isolation | Hard | Target refuses management-plane listen IP; management MTU/config unchanged | Provisioning refuses to proceed |
-| Dedicated media | Hard | A named `/dev/disk/by-id/...` namespace is unused, unmounted, and not a system/data device | Target provisioning script fails closed |
+| Dedicated media | Hard | Both named `/dev/disk/by-id/...` namespaces are unused, unmounted, and not system/data devices | Target provisioning script fails closed |
 | Target isolation | Hard | Target binds only data-subnet address, unique configfs port, single-host-NQN ACL | Target provisioning script fails closed |
 | Lifecycle safety | Hard | Setup, status, connect, discover, disconnect, teardown are idempotent; failed setup leaves no residue | Lifecycle test T1 fails; stage does not exit |
 | Benchmark harness | Hard | Direct-I/O runner, LMCache trace harness, and manifest collector complete a dry run and produce a readable artifact | Stop at Stage 0; pick and document an alternate harness before Stage 1 |
 | Observability | Hard | Initiator kernel/NVMe logs, target `nvmet` logs, `nvme list-subsys --json`, controller statistics, namespace identity captured per run | Run manifest incomplete; results not customer-reportable |
-| Fabric fault-injection capability | Hard (blocks T5 only) | Chosen injection method (§E.2) demonstrably intercepts an established RC-QP mid-transfer: run active NVMe-oF read/write, apply the injection, and show (a) qdisc/drop counters increment or the fabric-side counter equivalent, (b) at least one NVMe command completes with an unexpected status, and (c) the initiator reconnects cleanly after the injection is removed | T5 does not start until an alternate method (fabric-side ACL drop, cable-pull rig, in-line drop appliance) passes the same three checks. `tc netem` on the initiator interface is a candidate but is **not** presumed to work — on mlx5 RoCEv2 the HCA TX path can bypass the qdisc |
+| Fabric fault-injection capability | Hard (blocks T5 only) | Chosen injection method (§E.2) demonstrably intercepts an established RC-QP mid-transfer: run active NVMe-oF read/write, apply the injection, and show (a) qdisc/drop counters increment or the fabric-side counter equivalent, (b) at least one NVMe command completes with an unexpected status, and (c) the initiator reconnects cleanly after the injection is removed | T5 does not start until an alternate method (fabric-side ACL drop, cable-pull rig, in-line drop appliance) passes the same three checks. `tc netem` on the initiator interface is a candidate but is **not** presumed to work — RDMA TX can bypass the host qdisc on offloading devices (observed on mlx5; unverified on `irdma`/Falcon) |
 
 
 ## 6. Scope, Exclusions, and Workload Assumptions
@@ -217,15 +261,15 @@ MTU gate is satisfied.
 
 | In scope | Explicitly out of scope |
 | --- | --- |
-| One initiator with exclusive ownership of one unused namespace | Multiple initiators sharing a namespace |
+| One initiator with exclusive ownership of two unused namespaces (one per SSD) | Multiple initiators sharing a namespace |
 | NVMe-oF/RDMA target lifecycle: attach, reconnect, teardown | Target-side LMCache, cache-level admission, MR leases |
-| Initiator-owned L0/L1/L2 tiering on CX7 | IPU/Falcon offload software delivery on MEV and MMG |
+| Initiator-owned L0/L1/L2 tiering on the MEV kernel path (2-SSD target) | IPU offload endpoint software (D-init / D-tgt / D-both) and MMG delivery |
 | Durable store, load, restart, and reconnect behavior | Comparing Architecture B raw-verbs figures as if they were the same experiment |
 | WAL-based durable publication (data, checksum, key→LBA map) | Copy-on-write publication (deferred; Future Work) |
 | Standard NVMe behavior across qualified SSDs | OEM selection, procurement, vendor-specific SSD features like CMB |
 
-**Transport and offload boundary.** CX7 measurements use
-NVMe-oF/RDMA. TSO/GSO is a TCP-path offload concern, not an RDMA
+**Transport and offload boundary.** All measurements in this plan
+use NVMe-oF/RDMA over the kernel path. TSO/GSO is a TCP-path offload concern, not an RDMA
 payload-path criterion; any TCP fallback must state its packetization
 and offload evidence in a separate experiment. PTP is optional and
 only for approximate cross-host trace alignment -- it is not the
@@ -233,7 +277,7 @@ source of latency or packet-pacing timestamps.
 
 ### 6.2 Workload assumptions
 
-Fixed for CX7 unless the customer confirms alternates at kickoff.
+Fixed for this plan unless the customer confirms alternates at kickoff.
 
 **Block-I/O baseline (T2a/T2b):**
 
@@ -276,9 +320,9 @@ a clean lifecycle result rather than a torn-I/O result.
 
 ## 7. Delivery Sequence, Owners, Dependencies, Gates
 
-Ordered by dependency, not calendar. Stages 0-5 are the CX7
-implementation milestones, grouped into the two deliverables from §1.
-MEV and MMG stages are separate; see Appendix D.
+Ordered by dependency, not calendar. Stages 0-5 are the MEV
+kernel-path milestones, grouped into the two deliverables from §1.
+The offload phase and MMG are separate; see Appendix D.
 
 | Deliverable | Stage | Focus | Depends on | Owner |
 | --- | --- | --- | --- | --- |
@@ -287,7 +331,7 @@ MEV and MMG stages are separate; see Appendix D.
 | D1 | Stage 2 | Baseline block I/O T2a/T2b (direct fio/dd against the attached namespace — no LMCache in the path). **D1 exit.** | Stage 1 exit; workload assumptions confirmed | LMCache engineering |
 | D2 | Stage 3 | LMCache remote-L2 integration + WAL + T3 (Appendix A). First stage where durable `store()` ACK is claimable | Stage 2 exit; WAL design frozen | LMCache engineering |
 | D2 | Stage 4 | Two independent tracks: T4 crash matrix (six A.3 cutpoints, first-write + overwrite paths) and T5 fabric-fault matrix (named in-flight NVMe operations, §E.2). T5 additionally requires the §5.2 Fabric fault-injection capability gate | Stage 3 exit; §5.2 Fabric fault-injection gate passed (for T5) | LMCache engineering |
-| D2 | Stage 5 | Integrated workload T6 with T7 instrumentation in the same run (or a re-run if the harness cannot instrument in-line); results review; CX7 evidence packaged as input to the outcome decision (§1). **D2 exit.** | T4/T5 exit | LMCache engineering + customer review |
+| D2 | Stage 5 | Integrated workload T6 with T7 instrumentation in the same run (or a re-run if the harness cannot instrument in-line); results review; MEV kernel-path evidence packaged as input to the outcome decision (§1). **D2 exit.** | T4/T5 exit | LMCache engineering + customer review |
 
 **Claim-scope gate.** Results emitted before Stage 3 exit are labeled
 `deliverable:D1` in the run manifest and may not appear in
@@ -297,6 +341,18 @@ customer-facing durability or crash-safety narratives. Only Stages
 **Schedule dependency.** If `nvmet` / `nvmet_rdma` does not load
 cleanly on the target host at Stage 0, Stage 1 does not start. The
 target owner rebuilds the module or boots a compatible kernel first.
+
+**Stage 1 kernel-path abort rule.** The `nvme_rdma`/`nvmet_rdma`
+over `irdma` combination is the plan's load-bearing premise (§10).
+If T1 fails on that combination, the platform team gets a bounded
+debug window of **two weeks** from the failing run. If the
+combination is not functional at the end of that window, D2 on the
+kernel path is aborted -- not slipped -- and the plan pivots to the
+kernel-replace option in D.3 (SPDK-style userspace target/initiator
+on MEV) under a revised plan, with T7 redefined against the
+userspace path. Nima owns the abort/pivot call at the Stage 1 exit
+review; the finding itself is a deliverable either way, since it
+directly answers the offload phase's preserve-vs-replace question.
 
 
 ## 8. Test Matrix and Evidence Artifacts
@@ -312,7 +368,7 @@ target owner rebuilds the module or boots a compatible kernel first.
 | T4 | D2 | Crash matrix (6 process-crash cutpoints) | Controlled process-kill harness (§E.1) at each of the 6 WAL cutpoints in A.3, both first-write and overwrite paths; cold restart | On replay: old or new value only; no torn key; no committed extent re-allocated; every commit-record-durable case reconstructs the new value exactly once, no duplicate map entry | Crash-matrix report (1 row per cutpoint × path) with recorded on-media state per injection, replay tool output | LMCache engineering |
 | T5 | D2 | Fabric-fault matrix (in-flight NVMe operations) | Controlled data-plane fault injection (§E.2) targeting named in-flight NVMe operations: (a) payload transfer capsule mid-flight, (b) WAL-commit-record fsync round-trip, (c) integrity-checksum FUA round-trip; injection method must first pass the §5.2 Fabric fault-injection gate. Management plane never disturbed | For each named operation: in-flight I/O fails visibly with a recorded NVMe status; reconnect re-establishes the QP; post-reconnect replay leaves the key state consistent with the corresponding A.3 crash outcome (no torn key, no post-replay allocator collision); no degraded-rate operation accepted | Fabric-fault report (1 row per named operation) with injection-timing evidence, qdisc / drop counters, kernel logs | LMCache + lab operator |
 | T6 | D2 | Integrated LMCache workload | KV trace targeting fixed L1 hit rates (see §6.2): L1 hit rates ∈ {0%, 20%, 50%, 80%}, mixed R/W, ≥ 15 min sustained. Assertions on observed L1 hit counters vs target; L2 hit and eviction rate recorded separately | All functional scenarios pass with recovery guarantees; L1/L2 hit ratio, eviction rate, promotion count, bytes-written-per-reused-prefix, time-to-usable-KV-after-restart all measured and publishable | Bench report, hit-ratio and eviction histograms, controller metrics | LMCache engineering |
-| T7 | D2 | CX7 baseline for IPU comparisons | Instrumented re-run of T6 (or T6 with instrumentation if the harness supports a single pass): host-CPU (kernel/user/interrupt), initiator-kernel `nvme_rdma` MR/QP churn, CQ event rate, lifecycle-latency breakdown | Baseline sufficient for MEV and MMG plans to compare against once each defines its endpoint contract (Appendix D) | T7 baseline report — host-CPU-per-GB and MR/QP churn tables | LMCache engineering |
+| T7 | D2 | MEV kernel-path baseline for offload comparisons | Instrumented re-run of T6 (or T6 with instrumentation if the harness supports a single pass): host-CPU (kernel/user/interrupt), initiator-kernel `nvme_rdma` MR/QP churn, CQ event rate, lifecycle-latency breakdown | Baseline sufficient for the MEV offload phase (same hardware) and MMG to compare against once each defines its endpoint contract (Appendix D) | T7 baseline report — host-CPU-per-GB and MR/QP churn tables | LMCache engineering |
 
 ### 8.2 Evidence artifacts
 
@@ -329,7 +385,7 @@ track.
   recovered state.
 - Benchmark report separating L1, remote-L2, and lifecycle metrics.
 - T7 baseline report — host-CPU-per-GB and MR/QP churn tables. Feeds
-  the MEV and MMG plans as their comparison baseline.
+  the offload phase and the MMG plan as their comparison baseline.
 - Demo runbook with setup, test, teardown, rollback commands.
 
 
@@ -346,12 +402,20 @@ track.
 
 ### 9.2 Performance targets
 
-T2b is the direct block-I/O baseline on CX7:
+T2b is the direct block-I/O baseline on the MEV kernel path:
 
 - L2 read p50/p99 latency at each QD sweep point.
 - L2 read aggregate bandwidth at each QD sweep point.
 - L2 write p50/p99 latency (block-I/O lower bound; no WAL, no
   checksum, no map publication).
+
+Read T2b bandwidth points are fabric-limited **by design** (the SSD
+count in §5.1 is sized so the single 100 GbE link is the read
+ceiling); write points are media-limited. Neither is storage-
+bottleneck evidence, and no T2b bandwidth number may be presented as
+a media capability. The meaningful T2b/T7 signal is
+host-CPU-per-GB, MR/QP churn, and CQ behavior at a known, saturated
+transport load.
 
 Timed attach-to-first-I/O and reconnect-after-link-loss numbers are
 not part of T2b -- T1 exercises attach and reconnect as lifecycle
@@ -396,10 +460,10 @@ performance number is quoted in advance. Prior fabric measurements
 were on different topology/HCA generations and are not customer
 commitments for this POC.
 
-### 9.3 CX7 baseline for IPU comparisons (T7)
+### 9.3 MEV kernel-path baseline for offload comparisons (T7)
 
-Measurements that make the IPU offload case evaluable once the MEV or
-MMG plans are defined:
+Measurements that make the IPU offload case evaluable once the
+offload endpoint is selected (D.2):
 
 - Initiator host-CPU per GB transferred (kernel/user/interrupt).
 - Target host-CPU per GB transferred.
@@ -407,8 +471,10 @@ MMG plans are defined:
   `nvme_rdma` / `nvmet_rdma` path.
 - Reconnect and lifecycle-event latency breakdown.
 
-These are properties of the CX7 kernel path -- the baseline against
-which MEV and MMG measure their offload effect.
+These are properties of the MEV kernel path (`irdma` under
+`nvme_rdma`/`nvmet_rdma`) -- the same-hardware baseline against
+which the offload phase measures its effect. The CX7 T7 numbers
+remain a cross-platform reference only.
 
 ### 9.4 Customer acceptance criteria
 
@@ -420,7 +486,7 @@ which MEV and MMG measure their offload effect.
 | Durability | ACK means WAL commit record, payload, checksum, and map are all recoverable after restart |
 | Recovery | All crash and reconnect cutpoints recover without exposing torn or stale keys and without post-replay extent collisions |
 | Evidence | Every result reproducible from the manifest and tagged `initiator-owned-nvmeof` |
-| CX7 comparison baseline | T7 delivers the measurements the MEV / MMG plans compare against |
+| Kernel-path comparison baseline | T7 delivers the measurements the offload phase and MMG compare against |
 
 ### 9.5 Final decision criteria
 
@@ -435,7 +501,7 @@ A lifecycle-safety failure, any torn-key exposure, any post-replay
 allocator collision, or a missing manifest is a no-go for customer
 performance claims.
 
-At D2 exit, record the CX7 evidence needed to inform the
+At D2 exit, record the MEV kernel-path evidence needed to inform the
 Architecture A outcome (advance / optimize / abandon; §1). The
 outcome itself is finalized only after MEV / MMG land.
 
@@ -447,24 +513,26 @@ outcome itself is finalized only after MEV / MMG land.
 | Wrong namespace damages data | Require unused device-by-id path and fail closed on mount, partition, or holder detection |
 | Fabric or RDMA instability obscures storage behavior | Gate on bidirectional MTU/connectivity checks before lifecycle or benchmark work |
 | Target-side kernel modules fail to load (BTF / module-version mismatch) | §7 hard Stage-0 dependency. Target owner rebuilds `nvmet` / `nvmet_rdma` against the running kernel or boots a compatible kernel before Stage 1 resumes |
-| Initiator HCA/driver refuses MR or MKEY creation | T1 blocks on transport, not lifecycle. Hand off to the fabric team with BDF-scoped diagnostics before iterating on lifecycle scripts |
+| Kernel `nvme_rdma`/`nvmet_rdma` misbehaves over `irdma` verbs (untested combination on this stack) | This is the decision-driving risk of the plan. Perftest gate proves verbs; Stage 1 T1 proves the kernel NVMe-oF binding early, before any durability work is invested. Schedule consequence is bounded by the §7 Stage 1 abort rule: two-week debug window, then D2-kernel-path aborts and the plan pivots to the D.3 kernel-replace option. The finding feeds the offload phase's preserve-vs-replace decision either way |
+| `irdma` refuses MR or MKEY creation | T1 blocks on transport, not lifecycle. Hand off to the platform team with BDF-scoped diagnostics before iterating on lifecycle scripts |
+| MEV-TS feature-pack or driver churn invalidates in-progress runs | Manifest pins the feature-pack and IMC release per run; runs spanning a release change are discarded, not spliced |
 | FUA/FLUSH mistaken for an atomic transaction | WAL commit record + flush is the durable barrier. Fault-matrix evidence required before claiming durability |
 | Post-replay extent collision | Allocator is a derived view of committed WAL records; GC touches only unreferenced extents; explicit `RELEASED` records gate reclamation (Appendix A) |
-| Overclaiming an IPU demonstration | Reports name the measured platform and selected offload endpoint; CX7 scope is defined in §1 |
+| Overclaiming an IPU offload demonstration | No offload endpoint is on the data path in this plan; the IPU serves as the `irdma` verbs device only. Reports name the measured path (MEV kernel) and, later, the selected offload endpoint |
 | Later multi-initiator request expands the design | Treat as a separate coordinator/lease/allocator project, not a POC extension |
 
 
 ## 11. Future Work
 
-- **MEV platform integration.** Re-host Architecture A on the Intel
-  IPU MEV release (available today; Appendix D.5). Measure host-CPU
-  reduction, per-block CQ/MR churn reduction, and performance parity
-  or regression against the CX7 baseline.
-- **MMG platform integration.** Same Architecture A software on
-  MMG-400 silicon with IPT running on Falcon cores. Anticipated
-  availability early August 2026; Falcon enabling WIP. Same
-  measurements as MEV, plus the IPT-vs-Falcon-reliable-transport
-  comparison.
+- **IPU offload phase (MEV now; MMG when silicon lands, ~August
+  2026).** Both compare against this plan's T7 kernel-path baseline.
+  MEV: select the offload endpoint (D-init / D-tgt / D-both,
+  Appendix D.2), re-run the comparison workloads on the same hosts,
+  and measure host-CPU reduction, per-block CQ/MR churn reduction,
+  and performance parity or regression. MMG: same Architecture A
+  software and measurements on MMG-400 with IPT on Falcon cores,
+  adding the IPT-vs-Falcon-reliable-transport comparison; Falcon
+  enabling is WIP.
 - **Copy-on-write publication.** Alternative to WAL that flips a
   single generation pointer. Preserves the same durability
   invariants with different GC and space-overhead characteristics.
@@ -479,10 +547,11 @@ The POC commits to WAL as the durable-commit protocol, matching
 `diagrams/architecture-a-nvmeof-wal-sequence.mmd`. COW is deferred
 (Future Work).
 
-MEV and MMG must state whether they preserve or redefine this
-protocol given whatever they change in the initiator-side software
-path. All appendices below (A through E) apply to the CX7 baseline
-unless a per-appendix note says otherwise.
+The offload phase and MMG must state whether they preserve or
+redefine this protocol given whatever they change in the
+initiator-side software path. All appendices (A through E) apply to
+this plan's MEV kernel path unless a per-appendix note says
+otherwise.
 
 ### A.1 Store cutpoints
 
@@ -682,13 +751,13 @@ T3 and T4 include two retry cases:
 
 ## Appendix B: Stage-by-Stage Runbook
 
-Operator-level detail for CX7. §7 (delivery sequence) and §8 (test
-matrix) are the customer-facing view.
+Operator-level detail for the MEV lab (§5.1). §7 (delivery
+sequence) and §8 (test matrix) are the customer-facing view.
 
 ### B.1 Stage 0 — Lab Setup & Environment Snapshot [D1]
 
 Bring up the lab and record an environment snapshot: selected
-namespace, host NQN, target NQN, data-plane IPs, device-by-id path,
+namespaces, host NQN, target NQN, data-plane IPs, device-by-id paths,
 page size, queue depth, exclusive-ownership assumption. Confirm the
 target does not expose an LMCache service. Run all §5.2 gates. Exit
 when topology, command inventory, ownership boundary, and rollback
@@ -707,7 +776,8 @@ schemas returned by `nvme list-subsys --json`. Run T1. Hard no-go:
 
 Attach the namespace, run T2a and T2b directly against the block
 device (no LMCache in the path). These are NVMe-oF host-I/O
-measurements, not raw-verbs or IPU customer numbers. Performance
+measurements over the kernel path, not raw-verbs numbers and not
+IPU offload numbers. Performance
 targets used from Stage 3 forward are established here. **D1 exits
 after Stage 2:** reproducible remote-NVMe baseline captured, no
 durable-cache claims attached to D1 artifacts.
@@ -764,15 +834,18 @@ Ethernet link MTU only needs headroom for a 4096-byte RDMA payload
 plus RoCEv2/UDP/IP headers (~150 bytes), so link MTU ≥ 4200 works.
 The current lab fabric runs at 9000; this satisfies the precondition.
 
-**Why `IBV_MTU_4096` and not lower.** RoCEv2 negotiates the QP path
-MTU from the link MTU and enumerates only `IBV_MTU_{256, 512, 1024,
-2048, 4096}` -- there is no `IBV_MTU_9000`. At link MTU 1500 the QP
-falls back to `IBV_MTU_1024`; a 4 KiB KV page fragments into four
-PSN-numbered packets and shifts RC-QP retransmit-window behavior.
+**Why `IBV_MTU_4096` and not lower.** The verbs layer negotiates the
+QP path MTU from the link MTU and enumerates only `IBV_MTU_{256,
+512, 1024, 2048, 4096}` -- there is no `IBV_MTU_9000`. At link MTU
+1500 the QP falls back to `IBV_MTU_1024`; a 4 KiB KV page fragments
+into four packets and shifts retransmit-window behavior. This holds
+on MEV's RoCE-style verbs over Falcon exactly as it does on CX7
+RoCEv2; the MEV bring-up already confirmed `active_mtu=IBV_MTU_4096`
+on both ends (§5.1).
 
 **Why link MTU 9000 is not a functional improvement.** Link headroom
-above 4200 is unused by RDMA payloads because RoCEv2 caps path MTU
-at 4096. Measured wire-packet count per KV page is identical at link
+above 4200 is unused by RDMA payloads because the verbs path MTU
+caps at 4096. Measured wire-packet count per KV page is identical at link
 MTU 4200 and at link MTU 9000. Run at whichever the fabric is already
 provisioned for; do not change switch config for this POC.
 
@@ -789,31 +862,33 @@ fabric peers to confirm jumbo-frame headroom is real and not clamped
 by an intermediate hop.
 
 
-## Appendix D: Follow-on Platform Integration Contracts
+## Appendix D: Offload-Phase Contracts and Platform Environments
 
-MEV and MMG are separate integration experiments from CX7. Both keep
-Architecture A cache semantics on the initiator; each must define
-whether it preserves or replaces the Linux NVMe-oF/block-I/O
-implementation underneath. That is a software-architecture decision
-per platform, not just a transport swap.
+The MEV offload phase and MMG are separate experiments from this
+plan's kernel-path bring-up. Both keep Architecture A cache semantics
+on the initiator; each must define whether it preserves or replaces
+the Linux NVMe-oF/block-I/O implementation underneath. That is a
+software-architecture decision per endpoint, not just a transport
+swap.
 
-Before either platform starts, the team must approve the endpoint,
-API, ownership boundary, and success criteria in D.2 and D.3.
+Before either starts, the team must approve the endpoint, API,
+ownership boundary, and success criteria in D.2 and D.3.
 
 ### D.1 Platform overview
 
 | Platform | Silicon | Wire transport | Availability | Purpose |
 | --- | --- | --- | --- | --- |
-| MEV | Intel IPU, MEV release | Falcon reliable transport (RoCE-style verbs on top) | Available today (D.5) | First IPU offload measurement against the CX7 baseline |
+| MEV | Intel IPU, MEV release | Falcon reliable transport (RoCE-style verbs on top) | In use now (§5.1) | This plan: kernel-path bring-up + T7 baseline. Offload phase follows on the same hosts |
 | MMG | Intel IPU, MMG-400 | IPT (Intel patented transport, on Falcon cores) | Anticipated early August 2026; Falcon enabling WIP | Second IPU offload measurement; adds an IPT-vs-Falcon-reliable-transport comparison on top of the offload delta |
+| CX7 | Mellanox CX7 | RoCEv2/UDP | Completed | Reference baseline only; environment in D.5 |
 
-![Architecture A — IPU platform hardware topology](diagrams/architecture-a-ipu-hardware-topology.svg)
+![Architecture A — MMG hardware topology](diagrams/architecture-a-mmg-hardware-topology.svg)
 
-*Physical hardware view of the MEV / MMG IPU platform: Xeon + IPU on
-both initiator and target, connected by a Falcon RDMA link at
-`active_mtu=IBV_MTU_4096`. The IPU replaces the CX7 HCA on whichever
-side D.2 selects for offload; the rest of the host stack (CPU,
-DRAM, media) is unchanged from the CX7 view in §4.*
+*Anticipated MMG topology: Xeon + MMG-400 IPU (PCIe Gen5) on both
+sides, 1x 400 GbE IPT/Falcon link, 16x NVMe x2 SSDs on the target.
+The MEV topology used by this plan is in §4. In both cases the IPU
+is the verbs device under the unmodified kernel path until the
+offload phase moves the transport for whichever side D.2 selects.*
 
 ### D.2 Endpoint(s) offloaded — must choose per platform
 
@@ -821,7 +896,7 @@ DRAM, media) is unchanged from the CX7 view in §4.*
 | --- | --- | --- |
 | D-init | Initiator kernel `nvme_rdma` path | Initiator LMCache emits NVMe-oF commands through an IPU-hosted transport (API TBD) instead of the Linux block layer |
 | D-tgt | Target kernel `nvmet_rdma` path | Target host CPU is bypassed for the fabric-facing side; IPU on the target terminates RDMA and drives the SSD (via NVMe-oF passthrough or a target-side driver) |
-| D-both | Both endpoints | Both boundaries above; comparison baseline is the same CX7 run |
+| D-both | Both endpoints | Both boundaries above; comparison baseline is the same T7 kernel-path run |
 
 MEV and MMG may pick different endpoint options, but each platform's
 choice is fixed for the duration of its runs.
@@ -833,7 +908,8 @@ choice is fixed for the duration of its runs.
   library the LMCache process links against). May differ between MEV
   and MMG.
 - **What remains on each host CPU** after offload (LMCache engine,
-  allocator, WAL, map -- all initiator-CPU-side in the CX7 baseline).
+  allocator, WAL, map -- all initiator-CPU-side in this plan's
+  kernel-path baseline).
 - **Preservation vs replacement of Linux NVMe-oF / block-I/O**
   implementation, explicit per platform.
 - **Hardware topology.** IPUs and SSDs per socket/host, host count,
@@ -859,8 +935,9 @@ choice is fixed for the duration of its runs.
   parameters. Fault harness records this ordering.
 - **Time correlation.** PTP may align traces approximately across
   hosts, but it is not a latency clock or packet-pacing mechanism.
-- **Baseline vs IPU comparison** — CX7 T2b/T6/T7 numbers are the
-  fixed comparison target for both platforms.
+- **Baseline vs IPU comparison** — this plan's MEV kernel-path
+  T2b/T6/T7 numbers are the fixed comparison target; CX7 reference
+  numbers are cross-platform context only (D.7).
 - **Success thresholds** the customer sets before each platform runs:
   - Minimum host-CPU-per-GB reduction (e.g. ≥ 40% initiator kernel
     cycles removed).
@@ -868,19 +945,22 @@ choice is fixed for the duration of its runs.
     256 KiB).
   - Maximum acceptable latency regression (e.g. ≤ 20% at p99, 4 KiB,
     QD=1).
-  - Functional-parity constraint: all CX7 T3/T4/T5 invariants must
-    hold on the IPU path.
+  - Functional-parity constraint: all T3/T4/T5 invariants from this
+    plan must hold on the offloaded path.
 
-### D.4 CX7 comparison baseline for IPU platforms
+### D.4 Kernel-path comparison baseline for the offload phase
 
-T7 captures the full CX7 kernel-path baseline: per-GB host-CPU
-utilization (kernel/user/interrupt) on both hosts, initiator
-`nvme_rdma` MR/QP churn and CQ event rate, target `nvmet_rdma`
-counters, lifecycle-latency breakdown. Properties of the CX7 kernel
-path, not measurements of any IPU.
+T7 (this plan) captures the full MEV kernel-path baseline: per-GB
+host-CPU utilization (kernel/user/interrupt) on both hosts,
+initiator `nvme_rdma` MR/QP churn and CQ event rate, target
+`nvmet_rdma` counters, lifecycle-latency breakdown -- all over
+`irdma` on Falcon, on the same hosts the offload phase will use.
+That makes the offload comparison same-platform: silicon, fabric,
+feature pack, and workload held constant, with only the endpoint
+software changing.
 
-Each IPU platform compares against the subset of T7 metrics that
-correspond to its selected endpoint(s) in D.2:
+Each offload option compares against the subset of T7 metrics that
+corresponds to its selected endpoint(s) in D.2:
 
 - **D-init** (initiator-side offload): compare against T7's
   initiator-host CPU-per-GB and initiator `nvme_rdma` MR/QP/CQ
@@ -890,48 +970,53 @@ correspond to its selected endpoint(s) in D.2:
   unchanged reference.
 - **D-both:** compare against both halves.
 
-A platform that preserves the Linux path on a given side has no
-CPU-offload delta to demonstrate on that side. T7 remains the
-comparison baseline on the preserved side for transport-only effects
-(wire transport, MTU, congestion behavior) that traverse the kernel
-path unchanged; it just cannot substantiate a CPU-offload claim
-where no offload was applied.
+An endpoint option that preserves the Linux path on a given side has
+no CPU-offload delta to demonstrate on that side; T7 remains the
+reference there, but no offload claim can be made where no offload
+was applied. The CX7 T7 numbers (reference baseline, D.5) may be
+quoted alongside for cross-platform context, subject to the D.7
+attribution caveat.
 
-### D.5 MEV platform test environment (Intel IPU / MEV)
+### D.5 CX7 reference baseline environment (completed)
 
-Different lab from the CX7 setup.
+The environment behind the completed CX7 reference runs. Retained so
+CX7 T7 numbers quoted for cross-platform context remain reproducible.
 
 | Attribute | Value |
 | --- | --- |
-| Hosts | Inspur NF5280M7 (I-P00599 and I-P00600), Xeon Gold 6430, 64C/128T each |
-| IPU | Intel IPU, MEV-TS release `IPU IMC MEV-HW-C1-ci-ts.release.2.1.0.11517` |
-| RDMA device | `rocep69s0f0` (vendor `0x8086`, part `5202`), driven by `irdma`; control plane via `idpf` (host↔IPU) and Falcon MKP; ACC-side orchestration via `feature_pack.py` / `rtcmd` |
-| Wire transport | Falcon reliable transport on the wire (not RoCEv2/UDP). RoCE-style verbs layered on top of Falcon |
-| Data plane | 100 GbE direct-attach, `200.0.0.0/24`; `active_mtu=IBV_MTU_4096` on both ends |
-| Management plane | `10.166.87.x` (I-P00599) / `10.166.86.x` (I-P00600); not disturbed during MEV runs |
-| Pre-run sanity (perftest RC, 64 KiB) | `ib_send_bw` ≈ 96.4 Gb/s; `ib_write_bw` ≈ 95.9 Gb/s; `ib_read_bw` ≈ 92.8 Gb/s. Gate MEV runs on reproducing these before running NVMe-oF workloads |
-| Feature pack | FP 0.8 Drop 3 (`feature_pack_release_0_8_drop3.tar.gz`); config.yaml pre-loaded for both hosts to load P4, IDPF, irdma drivers and start Falcon rtcmd with correct PF MAC addresses |
-| Perftest | Built from `https://github.com/linux-rdma/perftest.git` per the setup runbook |
+| Initiator host | Xeon (bmg0-class), NVMe-oF initiator |
+| Target host | Xeon (bmg1-class), NVMe SSD, no LMCache software |
+| Initiator HCA | Mellanox CX7 (`mlx5_1` on bmg0), RoCEv2, GID index 4 (192.168.200.3) |
+| Target HCA | Mellanox CX7 (`rocep153s0f0` on bmg1 post-rename), RoCEv2, GID index 5 (192.168.200.4) |
+| Ethtool ifaces | Initiator `ens1f1np1`; target `ens1f0np0` |
+| Data plane | 192.168.200.0/24, direct-attach or dedicated switch, link MTU 9000, `active_mtu=IBV_MTU_4096` on both HCAs |
+| Management plane | 192.168.100.0/24 — SSH only, never reconfigured |
+| Kernel modules | Target: `nvmet`, `nvmet_rdma`. Initiator: `nvme_core`, `nvme_rdma`, `mlx5_core`, `mlx5_ib` |
 
 ### D.6 MMG platform test environment (Intel IPU / MMG-400 + IPT)
 
 Placeholder -- silicon and Falcon enabling are WIP; anticipated
-availability early August 2026. When the environment is fixed,
+availability early August 2026. Anticipated topology: PCIe Gen5
+hosts, 1x 400 GbE per IPU, 16x NVMe x2 SSDs on the target (diagram:
+`diagrams/architecture-a-mmg-hardware-topology.svg`); at Gen5 x2
+(~7.8 GB/s per drive ceiling) 16 drives comfortably out-run the
+~50 GB/s link on reads, keeping the fabric the ceiling as on MEV. When the environment is fixed,
 populate this section with the same schema as D.5 (hosts, silicon
 revision, RDMA device, wire transport, data plane, management plane,
 pre-run sanity baselines, driver/feature-pack pointer). Comparison
-target remains the CX7 T7 baseline.
+target remains this plan's MEV kernel-path T7 baseline, with CX7 as
+cross-platform reference.
 
 ### D.7 Platform-to-platform comparison caveat
 
-Every platform-vs-CX7 delta combines at least two effects, scoped to
-the selected endpoint(s) in D.2: (a) offload of the corresponding
-kernel path (`nvme_rdma` for D-init, `nvmet_rdma` for D-tgt, both
-for D-both), and (b) wire-transport difference between CX7
-(RoCEv2/UDP) and the target platform (Falcon reliable transport on
-MEV; IPT on MMG). For a platform that preserves the Linux path on a
-given side, there is no offload term for that side -- only the
-transport term applies.
+The MEV offload-vs-kernel comparison (against this plan's T7) is
+same-platform and attributes cleanly: the only variable is the
+endpoint software. Cross-platform deltas are messier. Any
+MEV-vs-CX7 delta combines the driver/transport difference
+(`irdma`/Falcon vs `mlx5`/RoCEv2) with everything else that differs
+between the labs (hosts, SSD count and models, link rate), and
+cannot isolate an offload effect at all when both sides ran the
+kernel path.
 
 MMG vs CX7 additionally reflects the IPT-vs-RoCEv2 gap. MMG vs MEV
 reflects the IPT-vs-Falcon-reliable-transport gap plus any
@@ -992,14 +1077,15 @@ T5 selects by named NVMe operation, and correlates the post-fault
 outcome against the corresponding A.3 crash outcome for the same
 step.
 
-**Injection candidates.** No method is presumed to work on the CX7
+**Injection candidates.** No method is presumed to work on this
 fabric a priori; each must pass the §5.2 Fabric fault-injection
 capability gate before it can be used for T5 evidence.
 
-- **`tc netem` on the data-plane interface (`ens1f1np1` on
-  initiator, `ens1f0np0` on target).** Candidate. On mlx5 RoCEv2 the
-  HCA TX path can bypass the qdisc, so `tc netem` on the initiator
-  interface may not intercept established RC-QP TX at all.
+- **`tc netem` on the data-plane interface (per the §5.1
+  inventory).** Candidate. RDMA TX can bypass the host qdisc on
+  offloading devices (observed on mlx5 RoCEv2; unverified on
+  `irdma`/Falcon), so `tc netem` on the initiator interface may not
+  intercept established RC-QP TX at all.
   Verification path: apply the rule, run active RC I/O, and confirm
   that qdisc drop counters increment AND at least one in-flight
   NVMe command completes with an unexpected status. If neither is
