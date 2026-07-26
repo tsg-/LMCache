@@ -19,10 +19,11 @@ end box
 
 APP -> INIT: store(tokens, kv_tensor)
 INIT -> INIT: Register TX MR containing payload;\nbuild SGL for target RDMA READ
-INIT -> IFAL: SEND (NVMe WRITE command capsule + SGL)
+INIT -> IFAL: SEND (NVMe-oF WRITE command capsule + SGL)
 IFAL -> TFAL: Falcon reliable transport\n(wire)
 TFAL -> CPU: Deliver NVMe-oF command\n(nvmet-rdma dispatch)
 
+CPU -> CPU: Allocate target DRAM buffers\n(gated by CPU policy:\nfree buffers, SSD utilization, QoS)
 CPU -> TFAL: Post RDMA READ\n(initiator TX MR → target DRAM)
 TFAL -> IFAL: Falcon reliable transport\n(wire, RDMA READ pull)
 IFAL -> INIT: Read from initiator TX MR
@@ -34,22 +35,25 @@ TFAL --> CPU: RDMA READ completion
 CPU -> SSD: NVMe WRITE (FUA)
 SSD --> TDDR: DMA payload from target DRAM
 SSD --> CPU: Completion
+CPU -> CPU: Return target DRAM buffers\nto free pool
 
-CPU -> TFAL: SEND (NVMe completion capsule)
+CPU -> TFAL: SEND (NVMe-oF completion capsule)
 TFAL -> IFAL: Falcon reliable transport\n(wire, SEND)
 IFAL --> INIT: Completion capsule received
 
-INIT -> APP: NVMe command complete
+INIT -> APP: NVMe-oF command complete
 
 note over IFAL, TFAL
-  Boundary: Falcon RDMA link (100 GbE, MTU 4096).
+  Boundary: Falcon RDMA link (400-1600Gbps, MTU 4096).
   Both IPUs do fabric offload only — no NVMe logic.
 end note
 
 note over CPU, INIT
-  Pull model: initiator sends NVMe WRITE command capsule;
-  target-side nvmet-rdma issues an RDMA READ back to the
-  initiator's pre-registered TX MR. The target RDMA engine
-  schedules the pull; there is no admission gate on target.
+  Pull model: initiator sends NVMe-oF WRITE command capsule;
+  target Xeon (nvmet-rdma) posts an RDMA READ against the
+  initiator's pre-registered TX MR. The CPU gates when to post
+  based on free target DRAM buffers, SSD utilization, and QoS;
+  the RDMA engine then executes the transfer. Buffers return to
+  the free pool after the SSD write completes.
 end note
 @enduml

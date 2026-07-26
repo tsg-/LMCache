@@ -19,10 +19,11 @@ end box
 
 APP -> INIT: retrieve(tokens); L1 miss, key→LBA hit
 INIT -> INIT: Register RX MR; build SGL\npointing at initiator buffer
-INIT -> IFAL: SEND (NVMe READ command capsule + SGL)
+INIT -> IFAL: SEND (NVMe-oF READ command capsule + SGL)
 IFAL -> TFAL: Falcon reliable transport\n(wire)
 TFAL -> CPU: Deliver NVMe-oF command\n(nvmet-rdma dispatch)
 
+CPU -> CPU: Allocate target DRAM buffers\n(gated by CPU policy)
 CPU -> SSD: NVMe READ
 SSD --> TDDR: DMA payload into target DRAM
 SSD --> CPU: Completion
@@ -30,15 +31,16 @@ SSD --> CPU: Completion
 CPU -> TFAL: Post RDMA WRITE\n(target DRAM → initiator RX MR)
 TFAL -> IFAL: Falcon reliable transport\n(wire, RDMA WRITE push)
 IFAL --> INIT: Payload placed in RX MR;\nCQE observed
+CPU -> CPU: Return target DRAM buffers\nto free pool
 
-CPU -> TFAL: SEND (NVMe completion capsule)
+CPU -> TFAL: SEND (NVMe-oF completion capsule)
 TFAL -> IFAL: Falcon reliable transport\n(wire, SEND)
 IFAL --> INIT: Completion capsule received
 
-INIT -> APP: NVMe command complete;\nBLAKE3 verify → deliver from MR
+INIT -> APP: NVMe-oF command complete;\nBLAKE3 verify → deliver from MR
 
 note over IFAL, TFAL
-  Boundary: Falcon RDMA link (100 GbE, MTU 4096).
+  Boundary: Falcon RDMA link (400-1600Gbps, MTU 4096).
   Both IPUs do fabric offload only — no NVMe logic.
 end note
 
