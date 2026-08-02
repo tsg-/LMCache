@@ -200,6 +200,178 @@ CX7 reference: `diagrams/architecture-a-cx7-nvmeof-topology.mmd`).
 WAL sequence: `diagrams/architecture-a-nvmeof-wal-sequence.mmd`.
 
 
+### 4.4 Namespace layout and LMCache consumption
+
+The target exports each SSD as its own NQN and namespace (`ns1`, `ns2`),
+both ACL'd to the single initiator per R2. No RAID, no LVM, no filesystem
+on the target — `nvmet-rdma` operates directly on the block device.
+
+The initiator sees the two remote namespaces as independent NVMe
+controllers via `nvme_rdma`. LMCache consumption is split by
+deliverable: D1 (throughput baseline) and D2 (durable-remote-L2 with
+Appendix A WAL) have **different storage-config requirements**, and
+this section treats them separately.
+
+#### 4.4.1 D1 throughput baseline — RAID 0 on the initiator
+
+For D1, kernel RAID 0 across the two remote namespaces is the
+throughput vehicle: `mdadm --level=0`, one filesystem on `/dev/md0`,
+`LMCACHE_LOCAL_DISK="/mnt/md0/kvcache"`. Uses `LocalDiskBackend`
+unchanged. Upstream docs
+(`docs/source/kv_cache/storage_backends/local_storage.rst`) endorse
+this for throughput. Rationale for D1 scope only:
+
+- Aggregates bandwidth across both drives for a single-worker
+  initiator without requiring any LMCache change.
+- Measured DDIO health on the direct block devices is clean at QD ≤ 64
+  (see `results/mkp1-mkp2-baseline-2026-08-02.md`); the RAID stripe
+  unit still needs to be validated with LMCache in the path before
+  citing DDIO friendliness under the actual workload.
+
+**Explicit D1-only limitations:**
+
+- `LocalDiskBackend` gives filesystem-durable file writes plus an
+  in-memory metadata map. It does **not** deliver the Appendix A
+  durable key→LBA map or WAL replay. This option is a throughput
+  vehicle, not a D2 durability path.
+- One namespace loss destroys the whole `md0` volume — every
+  acknowledged cache entry becomes unavailable. Compatible with
+  "ACK means recoverable" only if that guarantee is explicitly scoped
+  to **process and fabric failure with intact media**. Any
+  media-loss policy is out of scope for D1.
+
+#### 4.4.2 D2 durable path — separate design decision, not settled here
+
+D2 requires the Appendix A durable key→LBA map, WAL, and crash
+recovery. `LocalDiskBackend` in its current form does not provide
+this. Three shapes remain open, each with different LMCache-side
+work:
+
+- **D2-a:** Extend `LocalDiskBackend` with a durable metadata store
+  and WAL, keep RAID 0 for the payload region. Simplest to explain,
+  worst for media-loss failure domain.
+- **D2-b:** New backend that treats each remote namespace as its own
+  shard, per-shard WAL and metadata, key-hashed placement (see
+  4.4.3 option 3). Best failure domain, most implementation work.
+- **D2-c:** Raw-block backend (`lmcache/v1/storage_backend/raw_block/`)
+  bypasses the filesystem entirely and manages LBA allocation from
+  LMCache. Preserves durability model, requires plumbing for
+  multi-namespace layout.
+
+The D2 selection is not made in this document. It is a follow-on
+design decision informed by the D1 numbers and by whether upstream
+LMCache absorbs the required durability protocol. Filed as an open
+item in §11 Future Work.
+
+#### 4.4.3 Sharding strategy alternatives (not adopted for D1)
+
+Two initiator-side alternatives to RAID 0, documented for
+completeness:
+
+- **Upstream `by_gpu` sharding, one mount per namespace.**
+  `PathSharder` (`lmcache/v1/storage_backend/path_sharder.py`)
+  currently supports only the `by_gpu` strategy: at backend init it
+  selects `paths[device_id % len(paths)]` and never revisits.
+  Requires **N_workers ≥ N_drives** to use both drives. With one
+  worker (or none — e.g., a compute-less initiator like MKP1), it
+  selects `paths[0]` and leaves the remaining namespaces idle. Not
+  "degenerate to RAID 0" — significantly worse than RAID 0 for
+  capacity and bandwidth. Useful only in production deployments with
+  many GPU workers on the initiator.
+
+- **New `by_key` sharding strategy.** Route each chunk to
+  `paths[stable_hash(chunk_hash) % len(paths)]`, computed at every
+  put and get. Gives per-page independent-drive placement even with
+  a single worker, and turns drive loss into partial cache eviction
+  rather than tier outage. Not a trivial change:
+  - `PathSharder` must be extended from init-time selection to
+    per-operation selection (`select_for_key(chunk_hash) -> path`).
+  - Hash must be stable across processes and restarts. Python
+    `hash()` is `PYTHONHASHSEED`-salted; must use `hashlib` or the
+    existing BLAKE3 chunk hash.
+  - Every backend put/get callsite (`LocalDiskBackend`, `GdsBackend`,
+    `NIXLStorageBackend`) plumbs the chunk hash into the sharder
+    call.
+  - Metadata map keys become `(namespace_id, LBA)`; capacity and
+    eviction accounting must remain coherent across paths.
+  - Requires an upstream RFC or a fork; not zero-change.
+
+  Filed as bead LMCache-05n. Evaluated alternative; do not implement
+  pre-emptively.
+
+**Summary.** D1 storage plan of record is RAID 0 with the caveats
+above. D2 storage plan is unresolved and separate from D1. `by_gpu`
+does not solve the single-worker case; `by_key` is the only path to
+per-page placement in that case and is filed as follow-on work. See
+`results/mkp1-mkp2-baseline-2026-08-02.md` for the pre-flight
+throughput numbers on this hardware.
+
+#### 4.4.4 Scaling to 400 Gbps and 1.6 Tbps — not established
+
+The measurements in `results/mkp1-mkp2-baseline-2026-08-02.md` are
+FIO against raw remote block devices on 2 SSDs at 100 GbE. They do
+**not** validate the D1 stack (`md0` + XFS/ext4 + `LocalDiskBackend`)
+and they do **not** extrapolate to 400 Gbps / 1.6 Tbps rigs by any
+argument the block-layer numbers can support.
+
+Concrete concerns that get worse with wire speed:
+
+- At 200 GB/s and 256 KB pages, `LocalDiskBackend` runs ~780K
+  files/sec. It writes one flat-directory file per chunk with a
+  synchronous `open()`/`write()`/`close()` and does synchronous
+  `unlink()` on eviction. Filesystem inode/dentry allocation,
+  directory-lookup contention, journal, and writeback dominate long
+  before SSD bandwidth does. See `local_disk_backend.py:624` (write
+  path) and `:242` (eviction).
+- The Python control path has serialized data structures.
+  `LocalDiskBackend`'s in-flight tracker is a `list` under one lock
+  — membership and removal are O(N) in outstanding puts
+  (`local_disk_backend.py:307`, `pq_executor.py:136`). The batch API
+  loops single puts (`:374`). Default worker count is 4
+  (`disk_io_threads`); raising it helps I/O stalls but does not
+  remove these serialized paths.
+- Upstream has no evidenced multi-hundred-Gbps `LocalDiskBackend`
+  deployment; the codebase's high-throughput-oriented backend is
+  `raw_block` (`docs/source/mp/l2_storage/raw_block.rst`), with
+  fixed slots and optional `io_uring`, which avoids per-chunk
+  filesystem objects entirely.
+
+**Position:** treat the D1 RAID 0 + `LocalDiskBackend` configuration
+as an unproven experiment, not the assumed high-Gbps consumption
+model. A credible 400 Gbps or 1.6 Tbps design likely needs the
+`raw_block` backend (or an equivalent log-structured or slot-based
+backend) with per-shard placement and batched I/O submission — see
+§4.4.2 D2-c.
+
+**Validation gates before extrapolating D1 to higher wire speeds
+(filed as bead LMCache-3x2):**
+
+1. **`md0` filesystem ceiling.** FIO against `md0` + XFS/ext4 (no
+   LMCache), same matrix as the pre-flight run. Establishes what the
+   filesystem itself sustains vs. the direct-block ceiling.
+2. **`LocalDiskBackend` micro-benchmark.** Run
+   `benchmarks/storage_backend_io/storage_backend_io_benchmark.py`
+   (the direct storage-backend microbenchmark; `lmcache bench l2` is
+   insufficient because it benchmarks L2 adapters, not
+   `LocalDiskBackend`) against `LocalDiskBackend`. Note: the
+   harness's `--chunk-size` is a **token count**, not bytes; actual
+   bytes-per-op derive from the tensor geometry in `LMCacheMetadata`
+   (see `DEFAULT_KV_SHAPE` in the harness). Record emitted bytes per
+   op and compute throughput from that, not from an assumed chunk
+   size. The harness supports write-only (`--write_bench True`) or
+   write-then-read (`--write_bench False`); it does **not** support
+   sustained mixed R/W or steady-state — a bounded-working-set mixed
+   runner has to be added before Stage 3.
+3. **Integrated profile.** vLLM or `lmcache bench` at peak sustainable
+   throughput, with `py-spy record`, disk queue depth,
+   per-core CPU, file-op rate, and put-queue age. Attributes where
+   time is spent under a realistic control path.
+
+Only after these three land can we say what D1 actually sustains on
+this rig, and only then can we credibly project to 400 Gbps or
+above.
+
+
 ## 5. Test Environment and Operational Guardrails
 
 MEV lab only. The CX7 reference environment lives in D.5; MMG in
@@ -520,6 +692,9 @@ outcome itself is finalized only after MEV / MMG land.
 | Post-replay extent collision | Allocator is a derived view of committed WAL records; GC touches only unreferenced extents; explicit `RELEASED` records gate reclamation (Appendix A) |
 | Overclaiming an IPU offload demonstration | No offload endpoint is on the data path in this plan; the IPU serves as the `irdma` verbs device only. Reports name the measured path (MEV kernel) and, later, the selected offload endpoint |
 | Later multi-initiator request expands the design | Treat as a separate coordinator/lease/allocator project, not a POC extension |
+| D1 uses RAID 0 (§4.4.1); single namespace loss destroys the whole array and every acknowledged cache entry becomes unavailable | Scope "ACK means recoverable" to process/fabric failure with intact media only. Media-loss policy for D1 is out of scope. Any D2 shape that inherits RAID 0 must define a cache-loss/invalidation policy or move to per-shard placement (§4.4.3) |
+| RAID stripe unit fragments I/Os larger than the stripe across both namespaces, moving the DDIO knee under LMCache workload | Validate with LMCache + XFS on md0 + PMU on the target before citing option 1 as DDIO-friendly. Pre-flight measurements on direct block devices are not sufficient |
+| `--nr-io-queues=16` workaround for irdma ENOMEM at default 128 queues per controller | Record in every run manifest; hold constant across compared runs (local vs wire, kernel vs offload); attribute any queue-count-driven delta explicitly |
 
 
 ## 11. Future Work
@@ -539,6 +714,20 @@ outcome itself is finalized only after MEV / MMG land.
 - **Multi-initiator shared namespace.** Shared allocator,
   lease/ownership protocol, mapping authority. Reintroduces the
   distributed-systems complexity Architecture A removed by design.
+- **D2 storage layout selection.** §4.4.2 lists three shapes (D2-a
+  RAID 0 + extended `LocalDiskBackend`, D2-b per-shard backend with
+  key-hashed placement, D2-c raw-block backend). Select after D1
+  numbers land and after Appendix A durability requirements are
+  reconciled with upstream LMCache. Depends on bead LMCache-05n if
+  D2-b is chosen.
+- **`by_key` sharding for single-worker initiators (bead
+  LMCache-05n).** Extend `PathSharder` to per-op selection with a
+  stable non-`hash()` chunk digest, plumb through `LocalDiskBackend`
+  / `GdsBackend` / `NIXLStorageBackend`, add capacity/eviction
+  accounting across paths, restart-stable metadata. Trigger to
+  implement is DDIO or tail-latency evidence from §4.2 workload runs
+  that RAID 0 fragments the cache path or destroys too much on media
+  loss to be acceptable.
 
 
 ## Appendix A: WAL Durable-Commit Protocol
