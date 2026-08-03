@@ -513,22 +513,119 @@ Runner scope freezes after M1: two sweeps, one runner. Transport-neutral verifie
 </div>
 
 ---
+<!-- _class: small -->
 <!-- _footer: "IPU KV Cache PoC" -->
 
-# Next Steps
+# The LMCache storage-backend benchmark — vs. our goals
 
-1. **Customer sign-off on the platform shift.** D2 exit moves from
-   CX7 to MEV (see the plan's §1 revision note); CX7 becomes a
-   completed reference baseline (D.5). Needs an explicit ack before
-   the plan is published as the plan of record.
-2. Confirm with Nima: is the MEV kernel-path scope (Stages 0–5) plus
-   the two-week Stage-1 abort rule sufficient for the customer
-   decision review?
-3. Align internally on track ordering (A first, or B directly?)
-4. Draft technical one-pager for account team
-5. Confirm MEV lab readiness for Architecture A: 2-node Inspur
-   NF5280M7 testbed with 2x Samsung PM9A3 SSDs, single 100 GbE
-   Falcon link, feature-pack pinned in the run manifest. MMG lab
-   hardware (16x NVMe, 400 GbE) scoped separately.
+**Project goal:** validate that D1 (RAID0 remote NVMe-oF, 100 → 400 → 1600 GbE)
+sustains vLLM's KV traffic — **store on prefill, retrieve on decode, at
+production tail latency**.
+
+<div class="cols">
+<div class="card card-green">
+
+### What it DOES answer
+
+- **On-disk bandwidth ceiling** of the backend read / write implementation
+- **Bytes / op and file layout** — one flat-dir file per KV chunk, real DeepSeek-V3 shape (28 MiB @ 256-token bf16)
+- **Effect of `O_DIRECT` vs page cache** on the write path
+- **Working set > DRAM** — sized by chunk count, tunable
+- **One concurrency dial** — submission-side (backend I/O pool is a fixed default of 4 workers today, not a CLI knob)
+
+</div>
+<div class="card card-amber">
+
+### What it DOES NOT answer — and matters for us
+
+- **End-to-end retrieve latency to the GPU** — no CPU→GPU staging; H2D PCIe / NVLink cost invisible. That step is where a real serve-loop actually pays.
+- **Sustained mixed R/W** — strictly two-phase (write-all, then read-all). Real inference traffic overlaps them.
+- **Tail latency (p50 / p95 / p99)** — only aggregate ops/s + total elapsed. Cannot tell if the median is fine while p99 is 10×.
+- **Back-pressure / pipeline stalls** — no counter surfaced. Cannot tell where the pipeline stalls at 12 GB/s.
+- **Memory-pressure eviction** — CPU pool defaults skip this path.
+- **Capacity eviction** — can be provoked, but the harness reports attempted operations, not successful reads (needs success accounting first).
+- **Cold-cache reads today** — no cache-invalidation between phases → reads hit page cache unless `O_DIRECT` engages **and** the buffer is aligned (it isn't — see next slide).
+
+</div>
+</div>
+
+<div class="cols">
+<div class="card card-blue">
+
+### What this means for the plan
+
+- The bench is **necessary but not sufficient for an LMCache / vLLM scaling claim at 400 / 1600 GbE.** It bounds the disk-tier ceiling; it does **not** bound the end-to-end retrieve latency vLLM will see. D1's own remote-NVMe baseline exit is a separate, already-scoped step.
+- Once the read path is fixed, we get: (a) cold-cache read GB/s at various I/O-pool sizes, (b) put-side bandwidth vs. concurrency.
+- We still need a **separate integrated test** (or a harness extension) to cover CPU → GPU staging, sustained mixed R/W, and tail-latency behavior.
+
+</div>
+</div>
+
+---
+<!-- _class: small -->
+<!-- _footer: "IPU KV Cache PoC" -->
+
+# Stage 2 bring-up finding — the harness silently masks read failures
+
+**Setup.** mkp1 (initiator) ↔ mkp2 (target), 100 GbE RoCEv2, md0 RAID0
++ XFS on 2× PM9A3, DeepSeek-V3 KV geometry (28 MiB / chunk), `O_DIRECT`.
+
+<div class="cols">
+<div class="card card-red">
+
+### What we saw
+
+- **Executive one-liner: writes moved data over the wire; reads did not.** We corrected the test before making any performance claim.
+- Read cell reported **7,746 ops/s at c=1** (≈ 228 GB/s — impossible on 100 GbE)
+- RDMA verbs counters: **write phase moved 15.03 GB over the wire; read phase moved ZERO**
+- Every "read" was actually an `EINVAL` on the `O_DIRECT` `readinto` syscall
+
+### Root cause
+
+- The read destination allocator returns a non-page-aligned CPU tensor
+- The backend opens the file with `O_DIRECT`; kernel rejects the unaligned user buffer with `EINVAL`
+- Exception is caught in the read helper, logged at ERROR, slot returns `None`
+- Harness times elapsed regardless of success / failure → ops/s looks great
+
+</div>
+<div class="card card-purple">
+
+### What we can still trust
+
+- **Write path** — harness aligns its write buffers manually; the backend put path is exercised
+- **Single-drive O_DIRECT write** = 2.66 GB/s — an observation, not a bottleneck claim (needs a matched **single-drive** direct-write fio control before it can be compared)
+
+### What we can't (from this harness, today)
+
+- Cold-cache read bandwidth end-to-end
+- CPU → GPU staging (never invoked)
+- Tail latency, sustained mixed R/W, memory-pressure eviction
+- Last night's smoke doc's **6.21 GB/s single-drive O_DIRECT read = 89 % of fio** is invalid and needs retraction
+
+</div>
+</div>
+
+<div class="cols">
+<div class="card card-green">
+
+### Fixes required before Stage 2 reads are trustworthy
+
+1. **Page-align the read buffer.** `O_DIRECT` requires page alignment; pinning alone is not sufficient.
+2. **Invalidate cache between phases** — page-drop each written path before the read phase begins.
+3. **Add success / failure accounting** — count `None` returns; fail the run on any failed read so this defect cannot recur unnoticed.
+4. **Upstream correctness bug** — the read helper swallows `OSError` and returns `None`. File upstream regardless of the benchmark.
+
+</div>
+<div class="card card-blue">
+
+### Retractions from last night's smoke doc
+
+- ❌ **"6.21 GB/s single-drive O_DIRECT read = 89 % of fio ceiling"** — was 512 immediate `EINVAL`s
+- ❌ **"The backend does NOT collapse at chunk size"** — not proven; the read path was never measured
+- ✅ **Still valid: write observation.** 2.66 GB/s O_DIRECT single-drive is a real number (RDMA counters agree). No comparative claim against fio yet.
+- 📋 Doc needs an addendum
+
+</div>
+</div>
 
 ---
