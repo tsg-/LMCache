@@ -1,0 +1,20 @@
+
+=== Matched raw baseline (over wire, no FS) ===
+cell                                           bw_med GB/s   p99_med us  reps
+rand_read_256k_qd16                                  11.99          391     3
+rand_read_256k_qd256                                 11.99         5734     3
+rand_read_256k_qd64                                  11.99         1450     3
+raw_sanity_numjobs4                                  11.99         3588     1
+seq_read_256k_qd16                                   11.99          358     3
+seq_read_256k_qd256                                  11.99         5669     3
+seq_read_256k_qd64                                   11.99         1434     3
+
+=== XFS + md0 ceiling ===
+cell                                           bw_med GB/s   p99_med us  reps
+rand_read_256k_qd16                                  11.65          635     3
+rand_read_256k_qd256                                 11.98         6324     3
+rand_read_256k_qd64                                  11.98         1843     3
+seq_read_256k_qd16                                   11.89          545     3
+seq_read_256k_qd256                                  11.81         7438     3
+seq_read_256k_qd64                                   11.81         1925     3
+xfs_sanity_numjobs4                                  11.98         4489     1

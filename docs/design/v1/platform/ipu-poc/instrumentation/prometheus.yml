@@ -1,0 +1,25 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 15s
+  external_labels:
+    project: ipu-poc-nvmeof-alt
+
+scrape_configs:
+  - job_name: node
+    static_configs:
+      # Scrape via SSH-forwarded local port OR mgmt-plane IP.
+      # NEVER put a 192.168.200.x address here.
+      - targets:
+          - 127.0.0.1:19100   # mkp1 via `ssh -L 19100:127.0.0.1:9100 mkp1`
+          - 127.0.0.1:19101   # mkp2 via `ssh -L 19101:127.0.0.1:9100 mkp2`
+        labels:
+          fabric: mgmt
+    relabel_configs:
+      - source_labels: [__address__]
+        regex: 127\.0\.0\.1:19100
+        target_label: host
+        replacement: mkp1
+      - source_labels: [__address__]
+        regex: 127\.0\.0\.1:19101
+        target_label: host
+        replacement: mkp2

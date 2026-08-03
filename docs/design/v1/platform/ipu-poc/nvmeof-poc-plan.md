@@ -304,7 +304,11 @@ above. D2 storage plan is unresolved and separate from D1. `by_gpu`
 does not solve the single-worker case; `by_key` is the only path to
 per-page placement in that case and is filed as follow-on work. See
 `results/mkp1-mkp2-baseline-2026-08-02.md` for the pre-flight
-throughput numbers on this hardware.
+throughput numbers on this hardware, and
+`results/mkp1-mkp2-d1-fs-ceiling-2026-08-02.md` for the matched
+raw-vs-XFS-on-md0 comparison that confirms XFS costs ≤ 3 % throughput
+on read (worst cell: `rand QD16 −2.8 %`) at a fabric-bound 12.0 GB/s
+ceiling.
 
 #### 4.4.4 Scaling to 400 Gbps and 1.6 Tbps — not established
 
@@ -349,6 +353,10 @@ backend) with per-shard placement and batched I/O submission — see
 1. **`md0` filesystem ceiling.** FIO against `md0` + XFS/ext4 (no
    LMCache), same matrix as the pre-flight run. Establishes what the
    filesystem itself sustains vs. the direct-block ceiling.
+   *Landed 2026-08-02:* `results/mkp1-mkp2-d1-fs-ceiling-2026-08-02.md`.
+   XFS+md0 tops out at the same fabric-bound 12.0 GB/s as raw for
+   QD ≥ 64; low-QD reads pay a p99 penalty (+27–62 %). Design point:
+   agg-QD-128 shows +25 % tail-latency tax, no throughput loss.
 2. **`LocalDiskBackend` micro-benchmark.** Run
    `benchmarks/storage_backend_io/storage_backend_io_benchmark.py`
    (the direct storage-backend microbenchmark; `lmcache bench l2` is

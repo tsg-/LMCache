@@ -1,0 +1,167 @@
+[03:33:20] ===== D1 FS-ceiling preflight (was: Stage 1 v10) starting at 2026-08-02T03:33:20-07:00 =====
+[03:33:20] === Resolving remote namespaces by NQN ===
+[03:33:20] Resolved: mkp2-nvme1 -> nvme2, mkp2-nvme2 -> nvme3 (both rdma+200.0.0.37, unique)
+[03:33:20]   NQN1=mkp2-nvme1  ctrl=nvme2  ns=/dev/nvme2n1  by-id=/dev/disk/by-id/nvme-Linux_1c83718a24a71f34fb9e
+[03:33:20]   NQN2=mkp2-nvme2  ctrl=nvme3  ns=/dev/nvme3n1  by-id=/dev/disk/by-id/nvme-Linux_9970d8704cad2ba293a6
+[03:33:20] === Fail-closed checks (recursive mount/holder, size, model) ===
+[03:33:20]   --- checking /dev/nvme2n1 ---
+nvme2n1 259:5   disk             1.7T
+[03:33:20]   /dev/nvme2n1 size 1.92 TB OK
+[03:33:20]   /dev/nvme2n1 model: : Linux : 0 : 1024
+[03:33:20]   WARN: /dev/nvme2n1 has recognized signatures:
+    nvme2n1 0x1bf1fc55e00 gpt       
+[03:33:20]   --- checking /dev/nvme3n1 ---
+nvme3n1 259:7   disk             1.7T
+[03:33:20]   /dev/nvme3n1 size 1.92 TB OK
+[03:33:20]   /dev/nvme3n1 model: : Linux : 0 : 1024
+[03:33:20]   WARN: /dev/nvme3n1 has recognized signatures:
+    nvme3n1 0x1bf1fc55e00 gpt       
+[03:33:20] OVERRIDE: STAGE1_FORCE_DESTRUCTIVE=1 with exact STAGE1_APPROVED_DEVICES; proceeding.
+[03:33:20] All identity checks passed.
+[03:33:20] === MANIFEST (before) ===
+timestamp: 2026-08-02T03:33:20-07:00
+hostname_initiator: I-P00599-B15-P14
+hostname_target: mkp2 (200.0.0.37)
+kernel: 5.14.0-427.13.1.el9_4.x86_64
+cpu: Intel(R) Xeon(R) Gold 6430
+dram: 251Gi
+fio_version: fio-3.35
+mdadm_version: mdadm - v4.2 - 2021-12-30 - 12
+mkfs_xfs_version: mkfs.xfs version 6.3.0
+kernel_perf_paranoid: 2
+nqn1: mkp2-nvme1 -> /dev/nvme2n1 (by-id: /dev/disk/by-id/nvme-Linux_1c83718a24a71f34fb9e)
+nqn2: mkp2-nvme2 -> /dev/nvme3n1 (by-id: /dev/disk/by-id/nvme-Linux_9970d8704cad2ba293a6)
+chunk_kb: 256
+xfs_size_gib: 1024
+nvme_connect_note: --nr-io-queues=16 per controller (irdma ENOMEM at default 128)
+SCOPE: D1 FS-ceiling PREFLIGHT (md0/XFS raw baseline vs XFS ceiling). NOT plan Stage 1 T1/T2b evidence. Does NOT validate LocalDiskBackend.
+[03:33:20] Snapshot: script sha=789415f81391278a629c68f7718f5c40dfbf3442aa92910e9e5b7577c0426a23  util sha=3e5f054d6cc714a4fb866ad314f12ea6287e2e50a527b1f730154c2e7818496b
+[03:33:20] === 5. Matched raw baseline FIO (BEFORE md0), --size=1024G ===
+[03:33:20]   raw seq_read 256k QD=16 (8/dev × 2 devs) rep=1 size=512G/ns
+[03:34:26]   raw seq_read 256k QD=16 (8/dev × 2 devs) rep=2 size=512G/ns
+[03:35:31]   raw seq_read 256k QD=16 (8/dev × 2 devs) rep=3 size=512G/ns
+[03:36:37]   raw seq_read 256k QD=64 (32/dev × 2 devs) rep=1 size=512G/ns
+[03:37:42]   raw seq_read 256k QD=64 (32/dev × 2 devs) rep=2 size=512G/ns
+[03:38:47]   raw seq_read 256k QD=64 (32/dev × 2 devs) rep=3 size=512G/ns
+[03:39:53]   raw seq_read 256k QD=256 (128/dev × 2 devs) rep=1 size=512G/ns
+[03:40:58]   raw seq_read 256k QD=256 (128/dev × 2 devs) rep=2 size=512G/ns
+[03:42:04]   raw seq_read 256k QD=256 (128/dev × 2 devs) rep=3 size=512G/ns
+[03:43:09]   raw rand_read 256k QD=16 (8/dev × 2 devs) rep=1 size=512G/ns
+[03:44:15]   raw rand_read 256k QD=16 (8/dev × 2 devs) rep=2 size=512G/ns
+[03:45:20]   raw rand_read 256k QD=16 (8/dev × 2 devs) rep=3 size=512G/ns
+[03:46:26]   raw rand_read 256k QD=64 (32/dev × 2 devs) rep=1 size=512G/ns
+[03:47:31]   raw rand_read 256k QD=64 (32/dev × 2 devs) rep=2 size=512G/ns
+[03:48:37]   raw rand_read 256k QD=64 (32/dev × 2 devs) rep=3 size=512G/ns
+[03:49:42]   raw rand_read 256k QD=256 (128/dev × 2 devs) rep=1 size=512G/ns
+[03:50:48]   raw rand_read 256k QD=256 (128/dev × 2 devs) rep=2 size=512G/ns
+[03:51:53]   raw rand_read 256k QD=256 (128/dev × 2 devs) rep=3 size=512G/ns
+[03:52:59]   raw sanity: rand_read 256k QD 64 numjobs=4
+[03:52:59]   raw sanity: rand_read 256k (2jobs/dev × iodepth=32 × 2 devs = 128 outstanding)
+[03:54:04] === 6. mdadm --create md0 (by-id, chunk=256k) ===
+[03:54:04]   wipefs -a /dev/disk/by-id/nvme-Linux_1c83718a24a71f34fb9e (approved override)
+/dev/disk/by-id/nvme-Linux_1c83718a24a71f34fb9e: 8 bytes were erased at offset 0x1bf1fc55e00 (gpt): 45 46 49 20 50 41 52 54
+/dev/disk/by-id/nvme-Linux_1c83718a24a71f34fb9e: calling ioctl to re-read partition table: Success
+[03:54:04]   wipefs -a /dev/disk/by-id/nvme-Linux_9970d8704cad2ba293a6 (approved override)
+/dev/disk/by-id/nvme-Linux_9970d8704cad2ba293a6: 8 bytes were erased at offset 0x1bf1fc55e00 (gpt): 45 46 49 20 50 41 52 54
+/dev/disk/by-id/nvme-Linux_9970d8704cad2ba293a6: calling ioctl to re-read partition table: Success
+[03:54:04]   post-wipefs verification: both devices report empty.
+mdadm: Unrecognised md component device - /dev/disk/by-id/nvme-Linux_1c83718a24a71f34fb9e
+mdadm: Unrecognised md component device - /dev/disk/by-id/nvme-Linux_9970d8704cad2ba293a6
+mdadm: Defaulting to version 1.2 metadata
+mdadm: array /dev/md0 started.
+Personalities : [raid0] 
+md0 : active raid0 nvme3n1[1] nvme2n1[0]
+      3750484480 blocks super 1.2 256k chunks
+      
+unused devices: <none>
+/dev/md0:
+           Version : 1.2
+     Creation Time : Sun Aug  2 03:54:05 2026
+        Raid Level : raid0
+        Array Size : 3750484480 (3.49 TiB 3.84 TB)
+      Raid Devices : 2
+     Total Devices : 2
+       Persistence : Superblock is persistent
+
+       Update Time : Sun Aug  2 03:54:05 2026
+             State : clean 
+    Active Devices : 2
+   Working Devices : 2
+    Failed Devices : 0
+     Spare Devices : 0
+
+            Layout : original
+        Chunk Size : 256K
+
+Consistency Policy : none
+
+              Name : I-P00599-B15-P14:0  (local to host I-P00599-B15-P14)
+              UUID : 4aa38883:4ca20db8:7a1b75dc:55e6ce76
+            Events : 0
+
+    Number   Major   Minor   RaidDevice State
+       0     259        5        0      active sync   /dev/nvme2n1
+       1     259        7        1      active sync   /dev/nvme3n1
+[03:54:08] === 7. mkfs.xfs on md0 ===
+meta-data=/dev/md0               isize=512    agcount=32, agsize=29300672 blks
+         =                       sectsz=4096  attr=2, projid32bit=1
+         =                       crc=1        finobt=1, sparse=1, rmapbt=0
+         =                       reflink=0    bigtime=1 inobtcount=1 nrext64=0
+data     =                       bsize=4096   blocks=937621120, imaxpct=5
+         =                       sunit=64     swidth=128 blks
+naming   =version 2              bsize=4096   ascii-ci=0, ftype=1
+log      =internal log           bsize=4096   blocks=457822, version=2
+         =                       sectsz=4096  sunit=1 blks, lazy-count=1
+realtime =none                   extsz=4096   blocks=0, rtextents=0
+Discarding blocks...Done.
+/dev/md0 on /mnt/md0 type xfs (rw,noatime,nodiratime,seclabel,attr2,inode64,logbufs=8,logbsize=32k,sunit=512,swidth=1024,noquota)
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/md0        3.5T  3.6G  3.5T   1% /mnt/md0
+[03:54:11] === 8. Populate 1024 GiB testfile ===
+[03:57:33] === 9. FIO read matrix on XFS+md0 ===
+[03:57:33]   xfs seq_read 256k QD=16 rep=1 numjobs=1
+[03:58:38]   xfs seq_read 256k QD=16 rep=2 numjobs=1
+[03:59:44]   xfs seq_read 256k QD=16 rep=3 numjobs=1
+[04:00:49]   xfs seq_read 256k QD=64 rep=1 numjobs=1
+[04:01:54]   xfs seq_read 256k QD=64 rep=2 numjobs=1
+[04:03:00]   xfs seq_read 256k QD=64 rep=3 numjobs=1
+[04:04:05]   xfs seq_read 256k QD=256 rep=1 numjobs=1
+[04:05:11]   xfs seq_read 256k QD=256 rep=2 numjobs=1
+[04:06:16]   xfs seq_read 256k QD=256 rep=3 numjobs=1
+[04:07:22]   xfs rand_read 256k QD=16 rep=1 numjobs=1
+[04:08:27]   xfs rand_read 256k QD=16 rep=2 numjobs=1
+[04:09:33]   xfs rand_read 256k QD=16 rep=3 numjobs=1
+[04:10:38]   xfs rand_read 256k QD=64 rep=1 numjobs=1
+[04:11:44]   xfs rand_read 256k QD=64 rep=2 numjobs=1
+[04:12:49]   xfs rand_read 256k QD=64 rep=3 numjobs=1
+[04:13:55]   xfs rand_read 256k QD=256 rep=1 numjobs=1
+[04:15:00]   xfs rand_read 256k QD=256 rep=2 numjobs=1
+[04:16:05]   xfs rand_read 256k QD=256 rep=3 numjobs=1
+[04:17:11]   xfs sanity: rand_read 256k iodepth=32 numjobs=4 (agg concurrency 128)
+[04:18:16] === 10. Post-run counters ===
+[04:18:16] === 11. Summary ===
+
+=== Matched raw baseline (over wire, no FS) ===
+cell                                           bw_med GB/s   p99_med us  reps
+rand_read_256k_qd16                                  11.99          391     3
+rand_read_256k_qd256                                 11.99         5734     3
+rand_read_256k_qd64                                  11.99         1450     3
+raw_sanity_numjobs4                                  11.99         3588     1
+seq_read_256k_qd16                                   11.99          358     3
+seq_read_256k_qd256                                  11.99         5669     3
+seq_read_256k_qd64                                   11.99         1434     3
+
+=== XFS + md0 ceiling ===
+cell                                           bw_med GB/s   p99_med us  reps
+rand_read_256k_qd16                                  11.65          635     3
+rand_read_256k_qd256                                 11.98         6324     3
+rand_read_256k_qd64                                  11.98         1843     3
+seq_read_256k_qd16                                   11.89          545     3
+seq_read_256k_qd256                                  11.81         7438     3
+seq_read_256k_qd64                                   11.81         1925     3
+xfs_sanity_numjobs4                                  11.98         4489     1
+[04:18:16] === 12. Cleanup ===
+mdadm: stopped /dev/md0
+[04:18:17] md0 stopped (verified: /dev/md0 does not exist). Superblocks NOT zeroed.
+[04:18:17] To fully wipe (destructive): mdadm --zero-superblock --force /dev/disk/by-id/nvme-Linux_1c83718a24a71f34fb9e /dev/disk/by-id/nvme-Linux_9970d8704cad2ba293a6
+[04:18:17] ===== D1 FS-ceiling preflight (v10) done at 2026-08-02T04:18:17-07:00 =====
