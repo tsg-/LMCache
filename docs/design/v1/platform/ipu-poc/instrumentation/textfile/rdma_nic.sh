@@ -5,12 +5,13 @@
 # /var/lib/node_exporter/textfile/rdma_nic.prom.
 #
 # IMPORTANT: bind ONLY to the RDMA fabric interface, never the mgmt interface.
-#   mkp1 fabric iface: ens1f1np1 (adjust to host)
-#   mkp2 fabric iface: ens1f0np0 (adjust to host)
+#   mkp1 fabric iface: ens2f0 (200.0.0.35)
+#   mkp2 fabric iface: ens2f0 (200.0.0.37)
+#   mgmt (scrape plane): ens101f0 (10.166.97.x) — DO NOT read counters from this here
 
 set -euo pipefail
 
-IFACE="${RDMA_FABRIC_IFACE:-ens1f1np1}"
+IFACE="${RDMA_FABRIC_IFACE:-ens2f0}"
 OUT_DIR="/var/lib/node_exporter/textfile"
 OUT_FILE="$OUT_DIR/rdma_nic.prom"
 TMP_FILE="$(mktemp "$OUT_DIR/rdma_nic.prom.XXXXXX")"
@@ -34,5 +35,6 @@ trap 'rm -f "$TMP_FILE"' EXIT
         '
 } > "$TMP_FILE"
 
+chmod 0644 "$TMP_FILE"
 mv "$TMP_FILE" "$OUT_FILE"
 trap - EXIT

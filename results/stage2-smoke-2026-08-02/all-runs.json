@@ -1,0 +1,65 @@
+[
+  {
+    "backend": "read_local_disk",
+    "num_ops": 128,
+    "concurrency": 4,
+    "write_elapsed_sec": 0.4822808913886547,
+    "write_ops_per_sec": 265.40549767883897,
+    "read_elapsed_sec": 0.33784839138388634,
+    "read_ops_per_sec": 378.8681647282366,
+    "total_elapsed_sec": 0.820129282772541,
+    "use_odirect": false,
+    "verify_integrity": false,
+    "integrity_errors": 0,
+    "integrity_passed": false,
+    "local_disk_dir": "/dev/shm/lmcache-smoke"
+  }
+][
+  {
+    "backend": "read_local_disk",
+    "num_ops": 1024,
+    "concurrency": 32,
+    "write_elapsed_sec": 2.8575555495917797,
+    "write_ops_per_sec": 358.3482393356395,
+    "read_elapsed_sec": 2.424607776105404,
+    "read_ops_per_sec": 422.33635068383285,
+    "total_elapsed_sec": 5.282163325697184,
+    "use_odirect": false,
+    "verify_integrity": false,
+    "integrity_errors": 0,
+    "integrity_passed": false,
+    "local_disk_dir": "/dev/shm/lmcache-smoke2"
+  }
+][
+  {
+    "backend": "read_local_disk",
+    "num_ops": 512,
+    "concurrency": 32,
+    "write_elapsed_sec": 1.747990932315588,
+    "write_ops_per_sec": 292.90769793739514,
+    "read_elapsed_sec": 1.272853639908135,
+    "read_ops_per_sec": 402.24577590629536,
+    "total_elapsed_sec": 3.020844572223723,
+    "use_odirect": false,
+    "verify_integrity": false,
+    "integrity_errors": 0,
+    "integrity_passed": false,
+    "local_disk_dir": "/mnt/lmcache-stage2-test"
+  }
+][
+  {
+    "backend": "read_local_disk",
+    "num_ops": 512,
+    "concurrency": 32,
+    "write_elapsed_sec": 5.383599605411291,
+    "write_ops_per_sec": 95.10365508708456,
+    "read_elapsed_sec": 2.307503590360284,
+    "read_ops_per_sec": 221.88481185420756,
+    "total_elapsed_sec": 7.691103195771575,
+    "use_odirect": true,
+    "verify_integrity": false,
+    "integrity_errors": 0,
+    "integrity_passed": false,
+    "local_disk_dir": "/mnt/lmcache-stage2-test"
+  }
+]

@@ -5,23 +5,26 @@ live cross-host view earns its keep. Skip for Stage 1 FIO preflights (self-
 contained JSON is sufficient and a background scraper risks perturbing DDIO
 measurements at the QD 256/256k knee).
 
-## Topology
+## Topology (mkp lab)
 
 ```
-  control host (laptop / VM)                mkp1 (target)          mkp2 (initiator)
+  control host (laptop / VM)                mkp1 (10.166.97.21)     mkp2 (10.166.97.113)
   ┌──────────────────────────┐              ┌──────────────┐        ┌──────────────┐
   │ prometheus + grafana     │ ─mgmt scrape→│ node_exporter│        │ node_exporter│
-  │ (docker-compose)         │              │  :9100       │        │  :9100       │
+  │ (docker-compose)         │              │  127.0.0.1:9100        │  127.0.0.1:9100
   └──────────────────────────┘              └──────────────┘        └──────────────┘
-                                             192.168.100.x mgmt plane (scrape)
-                                             192.168.200.x RDMA fabric (traffic; do NOT touch)
+                                             10.166.97.0/22 mgmt (SSH + scrape)
+                                             200.0.0.0/24    RDMA fabric on ens2f0
+                                                             (traffic; do NOT touch)
 ```
 
-- **node_exporter** runs natively on mkp1/mkp2 (no docker on data-plane hosts).
-- **Prometheus + Grafana** run in a single compose stack on a third host.
-- Scrape traverses the **192.168.100 mgmt plane only**. RDMA fabric NIC counters
-  are read via textfile collector, but the scrape connection itself must NOT
-  touch 192.168.200 (that would perturb the workload under test).
+- **node_exporter** binds to `127.0.0.1:9100` on each host — reachable only via
+  the SSH tunnel from the control host. No listener on the mgmt or fabric IP.
+- **Scrape** traverses the SSH tunnel over the 10.166.97 mgmt plane.
+- **RDMA fabric NIC counters** are read via the textfile collector against
+  `ens2f0`; the scrape path never touches 200.0.0.x.
+- **IPU-side aliases** (100.0.0.1, 100.2.0.2, 10.10.0.1 on ens2f0d2/d3) — those
+  are IPU control planes / duplicates. Do NOT scrape them.
 
 ## Coverage
 
@@ -66,9 +69,12 @@ full stack only when you want live mid-run visibility or a second viewer.
 
 ## Do NOT
 
-- Bind exporter to 192.168.200 addresses.
+- Bind exporter to `200.0.0.x` (RDMA fabric on ens2f0) — 127.0.0.1 only.
 - Run docker on mkp1 or mkp2.
 - Enable prometheus scraping during the DDIO-knee FIO preflights — background
   cache/PCIe traffic invalidates the measurement.
-- Reconfigure MTU or bring links down on 192.168.100 while an exporter target
-  is being added — same "do not touch mgmt plane" rule as everything else.
+- Reconfigure MTU or bring links down on the 10.166.97 mgmt plane while an
+  exporter target is being added — same "do not touch mgmt plane" rule as
+  everything else.
+- Read counters from `ens101f0` (mgmt) in the RDMA-fabric textfile job — it
+  hides pause / OOB counters that only surface on the fabric NIC.

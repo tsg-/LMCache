@@ -26,5 +26,6 @@ devices=$(nvme list -o json 2>/dev/null | jq -r '.Devices[].DevicePath // empty'
     done
 } > "$TMP_FILE"
 
+chmod 0644 "$TMP_FILE"
 mv "$TMP_FILE" "$OUT_FILE"
 trap - EXIT
