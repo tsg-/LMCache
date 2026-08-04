@@ -44,6 +44,9 @@ def test_rounds_mode_is_the_default() -> None:
 
     assert args.duration_sec == 0.0
     assert args.warmup_sec == 0.0
+    # Empty prefix keeps the historical key universe addressable, so
+    # existing rounds-mode corpora survive this flag being added.
+    assert args.key_prefix == ""
 
 
 def test_duration_sec_and_warmup_sec_parse() -> None:
@@ -139,6 +142,8 @@ def test_sustained_store_writes_a_distinct_file_per_submit(
     args = _parse(
         "--duration-sec",
         "0.3",
+        "--key-prefix",
+        "distinct-files",
         "--only",
         "store",
         "--num-keys",
@@ -172,6 +177,8 @@ def test_sustained_mode_records_per_submit_latencies(
     args = _parse(
         "--duration-sec",
         "0.3",
+        "--key-prefix",
+        "latencies",
         "--only",
         "store",
         "--num-keys",
@@ -190,6 +197,154 @@ def test_sustained_mode_records_per_submit_latencies(
     out = capsys.readouterr().out
     assert "Sustained window for 0.3s" in out
     assert "submits in" in out
+
+
+# ---------------------------------------------------------------------------
+# Cross-invocation store keyspace
+# ---------------------------------------------------------------------------
+
+
+def _store_args(tmp_path: Path, *extra: str, prefix: str | None = None) -> object:
+    argv = [
+        "--only",
+        "store",
+        "--num-keys",
+        "2",
+        "--in-flight",
+        "2",
+        "--data-size-kb",
+        "4",
+        "--rounds",
+        "1",
+        "--warmup-rounds",
+        "0",
+        *extra,
+    ]
+    if prefix is not None:
+        argv += ["--key-prefix", prefix]
+    return _parse(*argv, adapter_json=_fs_adapter_json(tmp_path))
+
+
+def test_sustained_store_requires_a_key_prefix(tmp_path: Path) -> None:
+    """A sustained store must be named explicitly before it runs.
+
+    It writes monotonically for the whole window, so it consumes real
+    capacity and cannot be repeated into the same key space. Requiring the
+    prefix forces the operator to choose a fresh one per run.
+    """
+    args = _store_args(tmp_path, "--duration-sec", "0.2")
+
+    with pytest.raises(SystemExit) as exc:
+        run_l2_adapter_bench(MagicMock(), args)
+
+    assert exc.value.code == 2
+
+
+def test_sustained_load_does_not_require_a_key_prefix(tmp_path: Path) -> None:
+    """The requirement is store-only: a load consumes no new capacity.
+
+    Guards the validation against over-reach -- a sustained load pass over
+    an already-prepopulated corpus must still be runnable without one.
+    """
+    args = _parse(
+        "--only",
+        "load",
+        "--duration-sec",
+        "0.2",
+        "--num-keys",
+        "2",
+        "--in-flight",
+        "2",
+        "--data-size-kb",
+        "4",
+        "--rounds",
+        "1",
+        "--warmup-rounds",
+        "0",
+        adapter_json=_fs_adapter_json(tmp_path),
+    )
+
+    # Reaches the run rather than exiting 2 during validation.
+    run_l2_adapter_bench(MagicMock(), args)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        pytest.param((), id="rounds"),
+        pytest.param(("--duration-sec", "0.2"), id="sustained"),
+    ],
+)
+def test_repeated_store_run_is_rejected(tmp_path: Path, extra: tuple[str, ...]) -> None:
+    """A second store run into the same keyspace must not report success.
+
+    ``fs_native`` short-circuits a store whose file exists and reports
+    success without writing, and the harness counts that as all keys
+    transferred -- so the second run would advertise a full write rate
+    having written nothing. Keys restart at index 0 every invocation, so
+    this is the default outcome of reusing a prefix, in both modes.
+    """
+    run_l2_adapter_bench(MagicMock(), _store_args(tmp_path, *extra, prefix="run-a"))
+
+    with pytest.raises(SystemExit) as exc:
+        run_l2_adapter_bench(MagicMock(), _store_args(tmp_path, *extra, prefix="run-a"))
+
+    assert exc.value.code == 2
+
+
+def test_a_fresh_key_prefix_allows_a_second_store_run(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--key-prefix gives an independent key universe on the same store.
+
+    The escape hatch for the rejection above: same backing path, disjoint
+    keys, so every submit is a physical write again.
+    """
+    run_l2_adapter_bench(MagicMock(), _store_args(tmp_path, prefix="run-a"))
+    capsys.readouterr()
+
+    run_l2_adapter_bench(MagicMock(), _store_args(tmp_path, prefix="run-b"))
+
+    # Reached the report rather than exiting: the run actually measured.
+    assert "Store" in capsys.readouterr().out
+
+
+def test_store_then_load_still_shares_the_keyspace(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The prefix guard must not break prepopulate-then-load.
+
+    ``--only store`` followed by ``--only load`` at the same geometry is a
+    supported workflow and depends on both runs deriving identical keys,
+    which means passing the SAME --key-prefix to both. The guard fires on
+    repeated *stores* only, so the load must still hit.
+    """
+    run_l2_adapter_bench(MagicMock(), _store_args(tmp_path, prefix="pair"))
+    capsys.readouterr()
+
+    load_args = _parse(
+        "--only",
+        "load",
+        "--key-prefix",
+        "pair",
+        "--num-keys",
+        "2",
+        "--in-flight",
+        "2",
+        "--data-size-kb",
+        "4",
+        "--rounds",
+        "1",
+        "--warmup-rounds",
+        "0",
+        adapter_json=_fs_adapter_json(tmp_path),
+    )
+    run_l2_adapter_bench(MagicMock(), load_args)
+
+    out = capsys.readouterr().out
+    # All 4 keys hit: the load found what the store wrote.
+    assert "Load" in out
+    assert "0/4" not in out
 
 
 # ---------------------------------------------------------------------------

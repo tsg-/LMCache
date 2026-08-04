@@ -208,6 +208,81 @@ def _wait_lookup_finished(
     return results, observed_at
 
 
+class StoreNamespaceNotEmptyError(RuntimeError):
+    """A store benchmark was asked to write keys that already exist."""
+
+
+def count_existing_keys(adapter, keys: list[ObjectKey], timeout: float) -> int:
+    """Count how many of *keys* the adapter already holds.
+
+    Uses ``submit_lookup_and_lock_task`` and immediately unlocks, so it
+    does not disturb the objects. Every adapter implements lookup, so this
+    works without reaching into any backend's internals.
+
+    Args:
+        adapter: L2 adapter to probe.
+        keys: Keys to test for existence.
+        timeout: Seconds to wait for the lookup to complete.
+
+    Returns:
+        Number of *keys* the adapter reported present. Returns 0 when the
+        lookup timed out -- a probe that could not answer must not block
+        the benchmark.
+    """
+    if not keys:
+        return 0
+    task_id = adapter.submit_lookup_and_lock_task(keys, _PLACEHOLDER_LAYOUT_DESC)
+    results, _observed = _wait_lookup_finished(adapter, [task_id], timeout)
+    bitmap = results.get(task_id)
+    if bitmap is None:
+        return 0
+    found = _bitmap_count(bitmap)
+    adapter.submit_unlock(keys)
+    return found
+
+
+def require_empty_store_namespace(
+    adapter,
+    keys: list[ObjectKey],
+    namespace: str,
+    log: LogFn,
+    timeout: float = _LOOKUP_TIMEOUT_SEC,
+) -> None:
+    """Fail if a store benchmark would target keys that already exist.
+
+    A store submit whose key is already present is reported successful by
+    backends that short-circuit on existence -- ``fs_native`` returns
+    early from ``do_single_set`` when the file is there
+    (csrc/storage_backends/fs/connector.cpp). The harness counts that as
+    all keys transferred, so the run would advertise a full write rate
+    having written nothing. Keys are a pure function of ``(namespace, key
+    index)`` and the index restarts at zero every invocation, so a
+    repeated store run hits this by default.
+
+    Args:
+        adapter: L2 adapter about to be benchmarked.
+        keys: A sample of the keys the store phase will write. The first
+            wave is enough -- if it is clean the namespace was not used
+            at this geometry.
+        namespace: Namespace those keys belong to, for the error message.
+        log: Progress logger.
+        timeout: Seconds to wait for the existence probe.
+
+    Raises:
+        StoreNamespaceNotEmptyError: Any of *keys* already exists.
+    """
+    found = count_existing_keys(adapter, keys, timeout)
+    if found == 0:
+        return
+    raise StoreNamespaceNotEmptyError(
+        f"{found} of the {len(keys)} keys this store run would write already "
+        f"exist in namespace '{namespace}'. Backends that short-circuit an "
+        f"existing key report success without writing, so the measured "
+        f"throughput would be fictitious. Pass a fresh --key-prefix, or "
+        f"clear the backing store."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Sustained-window driver
 # ---------------------------------------------------------------------------

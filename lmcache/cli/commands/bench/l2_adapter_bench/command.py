@@ -85,6 +85,25 @@ def add_l2_arguments(parser: argparse.ArgumentParser) -> None:
         help="Measurement rounds per operation (default: 1).",
     )
     parser.add_argument(
+        "--key-prefix",
+        type=str,
+        default="",
+        help=(
+            "Key namespace prefix, folded into the ObjectKey model_name. "
+            "Keys are a pure function of this plus the key index, so two "
+            "runs sharing a prefix address the same backing objects. That "
+            "is what lets --only store be followed by --only load -- pass "
+            "the SAME prefix to both. It also means a repeated STORE run "
+            "re-targets objects that already exist, which backends that "
+            "short-circuit an existing key report as success without "
+            "writing, so pass a fresh prefix (a timestamp or run id) for "
+            "an independent store measurement. REQUIRED for a sustained "
+            "store run, which consumes backing capacity for its whole "
+            "window and cannot be safely repeated into the same prefix. "
+            "Default: empty (rounds mode only)."
+        ),
+    )
+    parser.add_argument(
         "--warmup-rounds",
         type=int,
         default=1,
@@ -99,11 +118,16 @@ def add_l2_arguments(parser: argparse.ArgumentParser) -> None:
             "fixed rounds. Keeps --in-flight submits outstanding for the "
             "whole window, issuing one replacement per completion, so the "
             "worker pool never drains at a round edge. Use this for a "
-            "steady-state throughput number. --rounds still sizes the key "
-            "space (rounds * in-flight * num-keys keys); the window wraps "
-            "around it, which can serve reads from page cache -- size it "
-            "past DRAM or drop caches. Lookup is unsupported in this mode. "
-            "Default: 0 (rounds mode)."
+            "steady-state throughput number. The two directions treat the "
+            "key space differently: LOADS wrap around the prepopulated "
+            "space that --rounds sizes (rounds * in-flight * num-keys "
+            "keys), so a long window re-reads keys the page cache may "
+            "serve -- size it past DRAM or drop caches. STORES never "
+            "wrap; they advance monotonically past that space so every "
+            "submit is a physical write, consuming in-flight * num-keys * "
+            "data-size bytes of backing capacity per completed wave for "
+            "the whole window. Size the backing store for the duration. "
+            "Lookup is unsupported in this mode. Default: 0 (rounds mode)."
         ),
     )
     parser.add_argument(
@@ -218,6 +242,8 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
         bench_lookup,
         bench_store,
         bench_store_sustained,
+        StoreNamespaceNotEmptyError,
+        require_empty_store_namespace,
     )
     from lmcache.cli.profiling import (
         PY_SPY_MODES,
@@ -275,6 +301,22 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
             file=sys.stderr,
         )
         sys.exit(2)
+    if sustained and args.only != "load" and not args.key_prefix:
+        # A sustained store writes monotonically for the whole window, so
+        # it consumes real capacity and cannot be repeated into the same
+        # key universe -- the second run would hit already-stored keys and
+        # measure existence checks. Requiring an explicit prefix makes the
+        # run identifiable and forces the operator to choose a fresh one;
+        # the matching load pass must be given the same value.
+        print(
+            "Error: --duration-sec with a store phase requires "
+            "--key-prefix. A sustained store cannot be repeated into the "
+            "same key space, so name this run explicitly (e.g. "
+            "--key-prefix run-$(date +%s)) and pass the same prefix to "
+            "the matching --only load pass.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     if sustained and not args.skip_verify:
         # Sustained mode recycles buffers across submits and does not
         # zero load buffers, so the round-trip comparison has no stable
@@ -303,6 +345,11 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
     # operation. Warmup rounds extend the consumed idx range.
     keys_per_round = in_flight * num_keys
     total_run_keys = total_rounds * keys_per_round  # warmup + measured
+    # ``--key-prefix`` becomes part of the ObjectKey model_name, so it
+    # partitions the key universe. Empty prefix keeps the historical
+    # "bench-model" name, so existing rounds-mode corpora stay addressable.
+    key_prefix = args.key_prefix
+    key_namespace = f"{key_prefix}-bench-model" if key_prefix else "bench-model"
 
     def log(msg: str) -> None:
         # Per-round progress log; suppressed by --quiet.
@@ -430,7 +477,11 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
         """Build per-submit key batches for round *r* (store/load)."""
         base = r * keys_per_round
         return [
-            make_object_keys(num_keys, key_offset=base + i * num_keys)
+            make_object_keys(
+                num_keys,
+                model_name=key_namespace,
+                key_offset=base + i * num_keys,
+            )
             for i in range(in_flight)
         ]
 
@@ -480,8 +531,16 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
         hit_base = r * per_round_hit
         miss_base = miss_origin + r * per_round_miss
         keys_round: list = []
-        keys_round.extend(make_object_keys(per_round_hit, key_offset=hit_base))
-        keys_round.extend(make_object_keys(per_round_miss, key_offset=miss_base))
+        keys_round.extend(
+            make_object_keys(
+                per_round_hit, model_name=key_namespace, key_offset=hit_base
+            )
+        )
+        keys_round.extend(
+            make_object_keys(
+                per_round_miss, model_name=key_namespace, key_offset=miss_base
+            )
+        )
         # Split into in_flight equal-sized batches of num_keys.
         return [keys_round[i * num_keys : (i + 1) * num_keys] for i in range(in_flight)]
 
@@ -548,9 +607,16 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
         """Keys for sustained store submit *submit_index*.
 
         Monotonic, never wrapping, so no submit can land on an
-        already-stored key and degenerate into a no-op success.
+        already-stored key and degenerate into a no-op success. Note this
+        holds only *within* one invocation -- across invocations the
+        offset restarts at zero, which is what ``--key-prefix``
+        guards.
         """
-        return make_object_keys(num_keys, key_offset=submit_index * num_keys)
+        return make_object_keys(
+            num_keys,
+            model_name=key_namespace,
+            key_offset=submit_index * num_keys,
+        )
 
     def _sustained_load_keys(submit_index: int) -> list:
         """Keys for sustained load submit *submit_index* (wraps).
@@ -560,7 +626,22 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
         rather than measuring the miss path.
         """
         slot_idx = submit_index % total_submit_slots
-        return make_object_keys(num_keys, key_offset=slot_idx * num_keys)
+        return make_object_keys(
+            num_keys,
+            model_name=key_namespace,
+            key_offset=slot_idx * num_keys,
+        )
+
+    def _first_store_wave_keys() -> list:
+        """Keys the store phase writes first, in whichever mode is active.
+
+        Both modes start at key index 0, so the two branches agree today;
+        they are kept distinct so a future change to either key provider
+        cannot silently make the probe test the wrong keys.
+        """
+        if sustained:
+            return _sustained_store_keys(0)
+        return [k for batch in _build_round_keys(0) for k in batch]
 
     def _sustained_store_objs(slot: int) -> list:
         return _store_objs(0)[slot]
@@ -570,6 +651,7 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
 
     results: list = []
     failed = False
+    failed_precondition = False
 
     # Track the very last measured store round so we can verify it
     # against the matching load round (round-trip integrity check).
@@ -591,6 +673,16 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
 
         # ---- Store ----
         if args.only is None or args.only == "store":
+            # Probe before writing anything: the first wave's keys are
+            # enough to tell whether this namespace was already used at
+            # this geometry. A hit means the run would measure existence
+            # checks while counting full payload bytes.
+            require_empty_store_namespace(
+                adapter,
+                keys=_first_store_wave_keys(),
+                namespace=key_namespace,
+                log=log,
+            )
             if sustained:
                 results.append(
                     bench_store_sustained(
@@ -713,6 +805,11 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
             data_per_round_mb=(keys_per_round * data_size) / mb,
             results=results,
         )
+    except StoreNamespaceNotEmptyError as e:
+        # A usage error, not a benchmark failure: nothing was measured, so
+        # exit 2 like the argument-validation paths rather than 1.
+        print(f"Error: {e}", file=sys.stderr)
+        failed_precondition = True
     finally:
         # Idempotent: a no-op if profiling already stopped on the normal
         # path; tears the recorder down if a phase raised.
@@ -725,6 +822,8 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
             print(f"[Cleanup] adapter.close() failed: {e}", file=sys.stderr)
         log("[Cleanup] Done.")
 
+    if failed_precondition:
+        sys.exit(2)
     if failed:
         sys.exit(1)
 

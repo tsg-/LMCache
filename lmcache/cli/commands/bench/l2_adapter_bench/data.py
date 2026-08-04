@@ -64,9 +64,18 @@ def make_object_keys(
     ``ObjectKey`` is a frozen dataclass with field order:
     (chunk_hash, model_name, kv_rank).
 
+    Keys are a pure function of ``(model_name, key_offset)``, so two
+    invocations with the same arguments produce the same keys and address
+    the same backing objects. That is deliberate -- it is what lets
+    ``--only store`` be followed by ``--only load`` -- but it means a
+    *store* run repeated with the same ``model_name`` re-targets objects
+    that already exist. Pass a distinct ``model_name`` to get a fresh key
+    universe; see ``--key-prefix``.
+
     Args:
         num_keys: Number of keys to generate.
-        model_name: Model name embedded in each key.
+        model_name: Model name embedded in each key. Acts as the key
+            namespace: distinct values yield disjoint key universes.
         key_offset: Starting index offset to ensure uniqueness across threads.
     """
     keys: list[ObjectKey] = []
