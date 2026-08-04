@@ -91,6 +91,31 @@ def add_l2_arguments(parser: argparse.ArgumentParser) -> None:
         help="Warmup rounds before measurement (default: 1).",
     )
     parser.add_argument(
+        "--duration-sec",
+        type=float,
+        default=0.0,
+        help=(
+            "Run a sustained window for this many seconds instead of "
+            "fixed rounds. Keeps --in-flight submits outstanding for the "
+            "whole window, issuing one replacement per completion, so the "
+            "worker pool never drains at a round edge. Use this for a "
+            "steady-state throughput number. --rounds still sizes the key "
+            "space (rounds * in-flight * num-keys keys); the window wraps "
+            "around it, which can serve reads from page cache -- size it "
+            "past DRAM or drop caches. Lookup is unsupported in this mode. "
+            "Default: 0 (rounds mode)."
+        ),
+    )
+    parser.add_argument(
+        "--warmup-sec",
+        type=float,
+        default=0.0,
+        help=(
+            "Discarded sustained window run before the measured one, in "
+            "seconds. Only used with --duration-sec. Default: 0."
+        ),
+    )
+    parser.add_argument(
         "--lookup-max-hit-rate",
         type=float,
         default=0.0,
@@ -189,8 +214,10 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
     )
     from lmcache.cli.commands.bench.l2_adapter_bench.runner import (
         bench_load,
+        bench_load_sustained,
         bench_lookup,
         bench_store,
+        bench_store_sustained,
     )
     from lmcache.cli.profiling import (
         PY_SPY_MODES,
@@ -226,6 +253,51 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
     total_rounds = warmup + rounds
     max_hit_rate = max(0.0, min(1.0, args.lookup_max_hit_rate))
     quiet = getattr(args, "quiet", False)
+    duration_sec = float(getattr(args, "duration_sec", 0.0))
+    warmup_sec = float(getattr(args, "warmup_sec", 0.0))
+    sustained = duration_sec > 0
+    if duration_sec < 0:
+        print("Error: --duration-sec must not be negative", file=sys.stderr)
+        sys.exit(2)
+    if warmup_sec < 0:
+        print("Error: --warmup-sec must not be negative", file=sys.stderr)
+        sys.exit(2)
+    if warmup_sec > 0 and not sustained:
+        print(
+            "Error: --warmup-sec applies only to sustained mode; pass "
+            "--duration-sec too, or use --warmup-rounds for rounds mode.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if sustained and args.only == "lookup":
+        print(
+            "Error: --duration-sec does not support --only lookup",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if sustained and not args.skip_verify:
+        # Sustained mode recycles buffers across submits and does not
+        # zero load buffers, so the round-trip comparison has no stable
+        # pair to check. Fail rather than silently skip the gate.
+        print(
+            "Error: --no-skip-verify requires rounds mode; "
+            "--duration-sec cannot verify round-trip integrity",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if not args.skip_verify and args.only is not None:
+        # The verify gate compares store source buffers against load
+        # destination buffers, so it structurally needs both directions
+        # in one process. With --only it could never run, and previously
+        # did so silently -- a prepopulate + `--only load` split looked
+        # verified while checking nothing.
+        print(
+            f"Error: --no-skip-verify needs both store and load in one run, "
+            f"but --only {args.only} was requested. Drop --only, or drop "
+            f"--no-skip-verify and rely on counter validation.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
     # Keys per round (one in-flight wave) and total measured keys per
     # operation. Warmup rounds extend the consumed idx range.
@@ -443,6 +515,59 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
             )
         return load_obj_batches
 
+    # ------------------------------------------------------------------
+    # Sustained-mode providers
+    # ------------------------------------------------------------------
+    # A sustained window issues an unbounded number of submits, so the
+    # submit index -> key idx mapping has to be defined past the end of
+    # the rounds-mode key universe (``total_run_keys`` keys). The two
+    # directions need opposite treatment:
+    #
+    # Store MUST NOT wrap. ``fs_native`` short-circuits a store whose key
+    # already exists and reports success without writing anything
+    # (csrc/storage_backends/fs/connector.cpp, ``do_single_set``). A
+    # wrapped store window would therefore measure the existence check,
+    # not the write path, and still count full payload bytes. Store keys
+    # advance monotonically so every submit is a physical write. The cost
+    # is unbounded capacity growth: a sustained store consumes
+    # ``in_flight * num_keys * data_size`` bytes per completed wave for
+    # the whole window, so size the backing store for the duration.
+    #
+    # Load MUST wrap: it can only hit keys that were actually stored, so
+    # it stays inside ``total_run_keys``. A window long enough to wrap
+    # re-reads keys, which the page cache may serve -- size the key space
+    # past DRAM or drop caches between phases.
+    #
+    # Window *slots* map to the per-submit batches rounds mode already
+    # allocates: slot i owns batch i. A slot is only reissued after its
+    # previous submit completed, so no two outstanding submits share
+    # buffers.
+    total_submit_slots = max(1, total_run_keys // num_keys)
+
+    def _sustained_store_keys(submit_index: int) -> list:
+        """Keys for sustained store submit *submit_index*.
+
+        Monotonic, never wrapping, so no submit can land on an
+        already-stored key and degenerate into a no-op success.
+        """
+        return make_object_keys(num_keys, key_offset=submit_index * num_keys)
+
+    def _sustained_load_keys(submit_index: int) -> list:
+        """Keys for sustained load submit *submit_index* (wraps).
+
+        Wraps within ``total_run_keys`` -- the idx range a prepopulating
+        store pass at matching geometry actually covered -- so reads hit
+        rather than measuring the miss path.
+        """
+        slot_idx = submit_index % total_submit_slots
+        return make_object_keys(num_keys, key_offset=slot_idx * num_keys)
+
+    def _sustained_store_objs(slot: int) -> list:
+        return _store_objs(0)[slot]
+
+    def _sustained_load_objs(slot: int) -> list:
+        return _load_objs(0)[slot]
+
     results: list = []
     failed = False
 
@@ -466,24 +591,43 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
 
         # ---- Store ----
         if args.only is None or args.only == "store":
-            log(f"[Store] Running {warmup} warmup + {rounds} measurement rounds...")
-            all_store = bench_store(
-                adapter,
-                in_flight=in_flight,
-                num_keys=num_keys,
-                data_size=data_size,
-                rounds=total_rounds,
-                keys_for_round=_build_round_keys,
-                objs_for_round=_store_objs,
-                log=log,
-            )
-            results.append(_strip_warmup(all_store, warmup))
-            # Last measured store round is total_rounds - 1.
-            last_store_round_keys = _build_round_keys(total_rounds - 1)
+            if sustained:
+                results.append(
+                    bench_store_sustained(
+                        adapter,
+                        in_flight=in_flight,
+                        num_keys=num_keys,
+                        data_size=data_size,
+                        duration_sec=duration_sec,
+                        warmup_sec=warmup_sec,
+                        keys_for_submit=_sustained_store_keys,
+                        objs_for_slot=_sustained_store_objs,
+                        log=log,
+                    )
+                )
+            else:
+                log(f"[Store] Running {warmup} warmup + {rounds} measurement rounds...")
+                all_store = bench_store(
+                    adapter,
+                    in_flight=in_flight,
+                    num_keys=num_keys,
+                    data_size=data_size,
+                    rounds=total_rounds,
+                    keys_for_round=_build_round_keys,
+                    objs_for_round=_store_objs,
+                    log=log,
+                )
+                results.append(_strip_warmup(all_store, warmup))
+                # Last measured store round is total_rounds - 1.
+                last_store_round_keys = _build_round_keys(total_rounds - 1)
             log("")
 
         # ---- Lookup ----
-        if args.only is None or args.only == "lookup":
+        # Skipped entirely in sustained mode: mixing a rounds-mode lookup
+        # into a sustained run would put two incomparable measurement
+        # modes in one report. ``--only lookup`` with --duration-sec is
+        # rejected up front.
+        if not sustained and (args.only is None or args.only == "lookup"):
             log(f"[Lookup] Running {warmup} warmup + {rounds} measurement rounds...")
             all_lookup = bench_lookup(
                 adapter,
@@ -500,19 +644,34 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
 
         # ---- Load ----
         if args.only is None or args.only == "load":
-            log(f"[Load] Running {warmup} warmup + {rounds} measurement rounds...")
-            all_load = bench_load(
-                adapter,
-                in_flight=in_flight,
-                num_keys=num_keys,
-                data_size=data_size,
-                rounds=total_rounds,
-                keys_for_round=_build_round_keys,
-                objs_for_round=_load_objs,
-                log=log,
-            )
-            results.append(_strip_warmup(all_load, warmup))
-            last_load_round_keys = _build_round_keys(total_rounds - 1)
+            if sustained:
+                results.append(
+                    bench_load_sustained(
+                        adapter,
+                        in_flight=in_flight,
+                        num_keys=num_keys,
+                        data_size=data_size,
+                        duration_sec=duration_sec,
+                        warmup_sec=warmup_sec,
+                        keys_for_submit=_sustained_load_keys,
+                        objs_for_slot=_sustained_load_objs,
+                        log=log,
+                    )
+                )
+            else:
+                log(f"[Load] Running {warmup} warmup + {rounds} measurement rounds...")
+                all_load = bench_load(
+                    adapter,
+                    in_flight=in_flight,
+                    num_keys=num_keys,
+                    data_size=data_size,
+                    rounds=total_rounds,
+                    keys_for_round=_build_round_keys,
+                    objs_for_round=_load_objs,
+                    log=log,
+                )
+                results.append(_strip_warmup(all_load, warmup))
+                last_load_round_keys = _build_round_keys(total_rounds - 1)
             log("")
 
         # Stop profiling before verification / summary so the flame
@@ -585,13 +744,23 @@ def _strip_warmup(result: "BenchResult", warmup: int) -> "BenchResult":
     total_rounds = max(1, len(result.round_durations))
     scaled_expected_hit = int(result.expected_hit_count * kept_rounds / total_rounds)
 
+    # Per-submit latencies are recorded in submit order, so the warmup
+    # prefix is the sum of the per-round counts (which is in_flight per
+    # round unless a round timed out).
+    dropped_submits = sum(result.round_latency_counts[:warmup])
+
     return BenchResult(
         operation=result.operation,
         in_flight=result.in_flight,
         num_keys=result.num_keys,
         data_size_bytes=result.data_size_bytes,
+        mode=result.mode,
         round_durations=result.round_durations[warmup:],
+        round_starts=result.round_starts[warmup:],
         success_counts=result.success_counts[warmup:],
+        submit_latencies=result.submit_latencies[dropped_submits:],
+        round_latency_counts=result.round_latency_counts[warmup:],
+        timed_out=result.timed_out,
         expected_max_hit_rate=result.expected_max_hit_rate,
         expected_hit_count=scaled_expected_hit,
     )
@@ -624,80 +793,188 @@ def _emit_l2_adapter_metrics(
         "Data / round (MB)",
         round(data_per_round_mb, 2),
     )
-    cfg_section.add("measurement_rounds", "Measurement rounds", args.rounds)
-    cfg_section.add("warmup_rounds", "Warmup rounds", args.warmup_rounds)
+    duration_sec = float(getattr(args, "duration_sec", 0.0))
+    if duration_sec > 0:
+        cfg_section.add("mode", "Measurement mode", "sustained")
+        cfg_section.add("duration_sec", "Window (s)", round(duration_sec, 3))
+        cfg_section.add(
+            "warmup_sec",
+            "Warmup window (s)",
+            round(float(getattr(args, "warmup_sec", 0.0)), 3),
+        )
+    else:
+        cfg_section.add("mode", "Measurement mode", "rounds")
+        cfg_section.add("measurement_rounds", "Measurement rounds", args.rounds)
+        cfg_section.add("warmup_rounds", "Warmup rounds", args.warmup_rounds)
     # Only meaningful when lookup is actually executed; matches the
-    # original banner log behaviour.
-    if args.only is None or args.only == "lookup":
+    # original banner log behaviour. Sustained mode never runs lookup.
+    if duration_sec <= 0 and (args.only is None or args.only == "lookup"):
         cfg_section.add(
             "lookup_max_hit_rate",
             "Lookup max hit rate",
             round(args.lookup_max_hit_rate, 4),
         )
 
+    # First Party
+    from lmcache.cli.commands.bench.l2_adapter_bench.result import BenchMode
+
     for idx, r in enumerate(results):
         section_id = f"op_{idx}"
         section = metrics.add_section(section_id, r.operation)
         section.add("operation", "Operation", r.operation)
-        section.add("rounds", "Rounds", len(r.round_durations))
-        section.add("keys_per_round", "Keys / round", r.keys_per_round)
+        sustained_result = r.mode is BenchMode.SUSTAINED
+        if sustained_result:
+            section.add("submits", "Submits completed", r.completed_submits)
+            section.add(
+                "window_sec",
+                "Measured window (s)",
+                round(r.sustained_window_sec, 3),
+            )
+            section.add(
+                "drain_tail_sec",
+                "Ramp-down tail (s)",
+                round(r.sustained_drain_sec, 3),
+            )
+        else:
+            section.add("rounds", "Rounds", len(r.round_durations))
+            section.add("keys_per_round", "Keys / round", r.keys_per_round)
         section.add("total_keys", "Total keys", r.total_keys)
         section.add("total_success", "Total success", r.total_success)
+        if r.timed_out:
+            section.add("timed_out", "Timed out", True)
+        if not sustained_result:
+            section.add(
+                "duration_avg_ms",
+                "Duration avg (ms)",
+                round(r.avg_duration * 1000, 2),
+            )
+            section.add(
+                "duration_min_ms",
+                "Duration min (ms)",
+                round(r.min_duration * 1000, 2),
+            )
+            section.add(
+                "duration_max_ms",
+                "Duration max (ms)",
+                round(r.max_duration * 1000, 2),
+            )
+            section.add(
+                "duration_p50_ms",
+                "Duration p50 (ms)",
+                round(r.p50_duration * 1000, 2),
+            )
+            section.add(
+                "duration_p99_ms",
+                "Duration p99 (ms)",
+                round(r.p99_duration * 1000, 2),
+            )
+            section.add(
+                "duration_std_ms",
+                "Duration std (ms)",
+                round(r.std_duration * 1000, 2),
+            )
+        # Per-submit latency distribution. Unlike the duration_* fields
+        # above (which are percentiles over whole rounds) these are per
+        # submit, so a single straggler is distinguishable from a
+        # uniformly slow round. Upper bound on service time -- see
+        # BenchResult.submit_latencies.
+        if r.submit_count > 0:
+            section.add("submit_latency_count", "Submits measured", r.submit_count)
+            section.add(
+                "submit_latency_avg_ms",
+                "Submit latency avg (ms)",
+                round(r.submit_latency_avg_ms, 3),
+            )
+            section.add(
+                "submit_latency_min_ms",
+                "Submit latency min (ms)",
+                round(r.submit_latency_min_ms, 3),
+            )
+            section.add(
+                "submit_latency_p50_ms",
+                "Submit latency p50 (ms)",
+                round(r.submit_latency_p50_ms, 3),
+            )
+            section.add(
+                "submit_latency_p90_ms",
+                "Submit latency p90 (ms)",
+                round(r.submit_latency_p90_ms, 3),
+            )
+            section.add(
+                "submit_latency_p99_ms",
+                "Submit latency p99 (ms)",
+                round(r.submit_latency_p99_ms, 3),
+            )
+            section.add(
+                "submit_latency_max_ms",
+                "Submit latency max (ms)",
+                round(r.submit_latency_max_ms, 3),
+            )
+        # Aggregate throughput: requested payload / total measured time.
+        # Preferred over throughput_avg, which is a mean of per-round
+        # rates and over-weights fast rounds.
         section.add(
-            "duration_avg_ms",
-            "Duration avg (ms)",
-            round(r.avg_duration * 1000, 2),
+            "throughput_aggregate_mbps",
+            "Throughput aggregate (MB/s)",
+            round(r.aggregate_throughput_mbps, 2),
         )
+        # Successful-bytes throughput. Emitted whenever it diverges from
+        # the requested figure, which means keys were missed or a store
+        # was short-circuited -- the fio comparator wants this one.
+        if r.data_size_bytes > 0 and r.total_success != r.total_keys:
+            section.add(
+                "throughput_success_mbps",
+                "Throughput successful (MB/s)",
+                round(r.success_throughput_mbps, 2),
+            )
+        if not sustained_result:
+            # Charges the run for the inter-round gaps the timed regions
+            # exclude. Zero when round starts were not recorded.
+            if r.wall_clock_throughput_mbps > 0:
+                section.add(
+                    "throughput_wall_clock_mbps",
+                    "Throughput wall clock (MB/s)",
+                    round(r.wall_clock_throughput_mbps, 2),
+                )
+                section.add(
+                    "barrier_idle_pct",
+                    "Round-edge idle (%)",
+                    round(r.barrier_idle_fraction * 100, 2),
+                )
+            section.add(
+                "throughput_avg_mbps",
+                "Throughput avg (MB/s)",
+                round(r.avg_throughput_mbps, 2),
+            )
+            section.add(
+                "throughput_min_mbps",
+                "Throughput min (MB/s)",
+                round(r.min_throughput_mbps, 2),
+            )
+            section.add(
+                "throughput_max_mbps",
+                "Throughput max (MB/s)",
+                round(r.max_throughput_mbps, 2),
+            )
         section.add(
-            "duration_min_ms",
-            "Duration min (ms)",
-            round(r.min_duration * 1000, 2),
+            "ops_per_sec_aggregate",
+            "Aggregate ops/s",
+            round(r.aggregate_ops_per_sec, 2),
         )
-        section.add(
-            "duration_max_ms",
-            "Duration max (ms)",
-            round(r.max_duration * 1000, 2),
-        )
-        section.add(
-            "duration_p50_ms",
-            "Duration p50 (ms)",
-            round(r.p50_duration * 1000, 2),
-        )
-        section.add(
-            "duration_p99_ms",
-            "Duration p99 (ms)",
-            round(r.p99_duration * 1000, 2),
-        )
-        section.add(
-            "duration_std_ms",
-            "Duration std (ms)",
-            round(r.std_duration * 1000, 2),
-        )
-        section.add(
-            "throughput_avg_mbps",
-            "Throughput avg (MB/s)",
-            round(r.avg_throughput_mbps, 2),
-        )
-        section.add(
-            "throughput_min_mbps",
-            "Throughput min (MB/s)",
-            round(r.min_throughput_mbps, 2),
-        )
-        section.add(
-            "throughput_max_mbps",
-            "Throughput max (MB/s)",
-            round(r.max_throughput_mbps, 2),
-        )
-        section.add(
-            "ops_per_sec_avg",
-            "Avg ops/s",
-            round(r.avg_ops_per_sec, 2),
-        )
-        section.add(
-            "latency_per_key_ms",
-            "Avg latency / key (ms)",
-            round(r.avg_latency_per_key_ms, 3),
-        )
+        if not sustained_result:
+            section.add(
+                "ops_per_sec_avg",
+                "Avg ops/s",
+                round(r.avg_ops_per_sec, 2),
+            )
+            # Round makespan / keys -- an artifact of the round barrier,
+            # not a latency. Kept for output continuity; read the
+            # submit_latency_* fields instead.
+            section.add(
+                "latency_per_key_ms",
+                "Avg latency / key (ms)",
+                round(r.avg_latency_per_key_ms, 3),
+            )
         if r.expected_max_hit_rate > 0 or r.expected_hit_count > 0:
             section.add(
                 "expected_max_hit_rate",
