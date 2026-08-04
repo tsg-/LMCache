@@ -10,7 +10,7 @@ adapter benchmark.
 from __future__ import annotations
 
 # Standard
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 import argparse
 import os
 import sys
@@ -19,6 +19,10 @@ if TYPE_CHECKING:
     # First Party
     from lmcache.cli.commands.base import BaseCommand
     from lmcache.cli.commands.bench.l2_adapter_bench.result import BenchResult
+
+
+def _noop_shutdown() -> None:
+    """Stand-in for the metrics shutdown when the endpoint is off."""
 
 
 # ---------------------------------------------------------------------------
@@ -131,9 +135,20 @@ def add_l2_arguments(parser: argparse.ArgumentParser) -> None:
             "added to the submit path. A 1-15s scrape is far too coarse "
             "to attribute host CPU to a phase of a run -- the end-of-run "
             "summary remains the authoritative per-run figure. Rate "
-            "queries need a window of at least 60s. Binds all interfaces; "
-            "use on a benchmark rig, not an untrusted network. "
-            "Default: 0 (off)."
+            "queries need a window of at least 60s. Binds loopback only "
+            "by default -- see --metrics-bind-address. Default: 0 (off)."
+        ),
+    )
+    parser.add_argument(
+        "--metrics-bind-address",
+        type=str,
+        default="127.0.0.1",
+        metavar="ADDR",
+        help=(
+            "Interface for --serve-metrics to bind. Defaults to "
+            "127.0.0.1, so an unauthenticated endpoint is not reachable "
+            "off-box; pass 0.0.0.0 only when Prometheus scrapes the rig "
+            "remotely. Default: 127.0.0.1."
         ),
     )
     parser.add_argument(
@@ -280,6 +295,9 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
         require_empty_store_namespace,
     )
     from lmcache.cli.commands.bench.l2_adapter_bench.metrics import (
+        PHASE_MEASURED,
+        PHASE_WARMUP,
+        PHASE_WARMUP_AND_MEASURED,
         BenchMetricsState,
         MetricsServerError,
         start_metrics_server,
@@ -341,6 +359,7 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
         )
         sys.exit(2)
     metrics_port = int(getattr(args, "serve_metrics", 0))
+    metrics_address = str(getattr(args, "metrics_bind_address", "127.0.0.1"))
     if metrics_port and not (1 <= metrics_port <= 65535):
         print(
             "Error: --serve-metrics must be a TCP port in 1..65535",
@@ -468,12 +487,34 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
             )
             sys.exit(2)
 
+    # Bind the endpoint before the adapter exists, so a port clash fails
+    # while there is still nothing to clean up. Doing it the other way
+    # round leaks the adapter's worker threads: the exit below runs
+    # outside the try/finally that closes it. The mirror obligation is
+    # that every init failure between here and that try/finally must call
+    # ``stop_metrics`` itself, or it leaks the listener instead.
+    metrics_state = BenchMetricsState()
+    stop_metrics: Callable[[], None] = _noop_shutdown
+    if metrics_port:
+        try:
+            stop_metrics = start_metrics_server(
+                metrics_port, metrics_state, address=metrics_address
+            )
+        except MetricsServerError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(2)
+        log(
+            f"[Metrics] Serving Prometheus metrics on "
+            f"{metrics_address}:{metrics_port}/metrics"
+        )
+
     log("\n[Init] Creating adapter...")
     try:
         adapter = create_l2_adapter(adapter_cfg, l1_memory_desc=l1_memory_desc)
         log(f"[Init] Adapter created successfully ({type(adapter).__name__}).\n")
     except Exception as e:
         print(f"[Init] Failed to create adapter: {e}", file=sys.stderr)
+        stop_metrics()
         sys.exit(1)
 
     # Optional self-profiling: record a flame graph of the measured
@@ -506,6 +547,7 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
                 adapter.close()
             except Exception:
                 pass
+            stop_metrics()
             sys.exit(2)
 
     # ------------------------------------------------------------------
@@ -701,21 +743,28 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
     def _sustained_load_objs(slot: int) -> list:
         return _load_objs(0)[slot]
 
-    # Start before any phase runs so a scraper attached at t=0 sees the
-    # whole run. Bound early enough that a port clash fails before the
-    # benchmark touches the adapter.
-    metrics_state = BenchMetricsState()
-    if metrics_port:
-        try:
-            start_metrics_server(metrics_port, metrics_state)
-        except MetricsServerError as e:
-            print(f"Error: {e}", file=sys.stderr)
-            sys.exit(2)
-        log(f"[Metrics] Serving Prometheus metrics on :{metrics_port}/metrics")
+    # Rounds mode drives warmup and measured rounds through one result, so
+    # the live series unavoidably carries both -- ``_strip_warmup`` only
+    # separates them afterwards, when the summary is computed. Label it for
+    # what it is rather than letting it pass as measured-only.
+    rounds_phase = PHASE_WARMUP_AND_MEASURED if warmup else PHASE_MEASURED
 
-    def _publish(result) -> None:
-        """Register a phase's live result with the metrics endpoint."""
-        metrics_state.register(result.operation, result)
+    def _publish_measured(result) -> None:
+        """Register a measured phase's live result with the endpoint."""
+        metrics_state.register(result.operation, result, PHASE_MEASURED)
+
+    def _publish_warmup(result) -> None:
+        """Register a sustained phase's discarded warmup window.
+
+        A separate series, so it can never be summed into the measured
+        figures, but still exposed: the NIC and NVMe counters this
+        endpoint exists to align against do include warmup I/O.
+        """
+        metrics_state.register(result.operation, result, PHASE_WARMUP)
+
+    def _publish_rounds(result) -> None:
+        """Register a rounds-mode result under :data:`rounds_phase`."""
+        metrics_state.register(result.operation, result, rounds_phase)
 
     results: list = []
     failed = False
@@ -763,7 +812,8 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
                         keys_for_submit=_sustained_store_keys,
                         objs_for_slot=_sustained_store_objs,
                         log=log,
-                        on_result=_publish,
+                        on_result=_publish_measured,
+                        on_warmup_result=_publish_warmup,
                     )
                 )
             else:
@@ -777,7 +827,7 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
                     keys_for_round=_build_round_keys,
                     objs_for_round=_store_objs,
                     log=log,
-                    on_result=_publish,
+                    on_result=_publish_rounds,
                 )
                 results.append(_strip_warmup(all_store, warmup))
                 # Last measured store round is total_rounds - 1.
@@ -800,7 +850,7 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
                 log=log,
                 expected_max_hit_rate=max_hit_rate,
                 expected_hit_count=expected_hit_count,
-                on_result=_publish,
+                on_result=_publish_rounds,
             )
             results.append(_strip_warmup(all_lookup, warmup))
             log("")
@@ -819,7 +869,8 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
                         keys_for_submit=_sustained_load_keys,
                         objs_for_slot=_sustained_load_objs,
                         log=log,
-                        on_result=_publish,
+                        on_result=_publish_measured,
+                        on_warmup_result=_publish_warmup,
                     )
                 )
             else:
@@ -833,7 +884,7 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
                     keys_for_round=_build_round_keys,
                     objs_for_round=_load_objs,
                     log=log,
-                    on_result=_publish,
+                    on_result=_publish_rounds,
                 )
                 results.append(_strip_warmup(all_load, warmup))
                 last_load_round_keys = _build_round_keys(total_rounds - 1)
@@ -895,6 +946,15 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
             adapter.close()
         except Exception as e:
             print(f"[Cleanup] adapter.close() failed: {e}", file=sys.stderr)
+        # Closed last, after the summary is printed. The endpoint dies
+        # with the run, so the final scrape interval is truncated: read
+        # the summary table, not the tail of the rate() curve, for the
+        # last few seconds. Releasing the socket matters for in-process
+        # callers -- otherwise each run leaks a listener for the life of
+        # the interpreter.
+        if metrics_port:
+            log("[Cleanup] Stopping metrics endpoint...")
+            stop_metrics()
         log("[Cleanup] Done.")
 
     if failed_precondition:
@@ -934,6 +994,9 @@ def _strip_warmup(result: "BenchResult", warmup: int) -> "BenchResult":
         success_counts=result.success_counts[warmup:],
         submit_latencies=result.submit_latencies[dropped_submits:],
         round_latency_counts=result.round_latency_counts[warmup:],
+        # Kept consistent with the surviving rounds; dropped_submits is
+        # exactly the warmup prefix's contribution.
+        completed_submits=result.completed_submits - dropped_submits,
         timed_out=result.timed_out,
         expected_max_hit_rate=result.expected_max_hit_rate,
         expected_hit_count=scaled_expected_hit,

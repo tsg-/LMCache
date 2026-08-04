@@ -20,17 +20,31 @@ bracketing around the measured window. Treat these series as a time
 axis to align external counters against, not as the measurement itself.
 The authoritative per-run figures remain the end-of-run summary table.
 
-Counters are cumulative and labelled by ``operation``, so each series is
-monotonic within its own phase and ``rate()`` behaves. Use a window of
-at least 60 s: the irdma driver refreshes ``hw_counters`` asynchronously
+Counters are cumulative and labelled by ``operation`` and ``phase``, so
+each series is monotonic within its own phase and ``rate()`` behaves.
+Warmup is exposed under ``phase="warmup"`` rather than hidden: the
+external counters this endpoint exists to align against *do* include
+warmup I/O, so omitting it would leave an unexplained gap in the NIC and
+NVMe series. It is a separate series precisely so it can never be
+mistaken for, or summed into, the measured figures. Use a window of at
+least 60 s: the irdma driver refreshes ``hw_counters`` asynchronously
 (roughly 1 s), and shorter rate windows alias badly against it.
+
+**Thread-safety model.** The unsynchronised read in
+:meth:`BenchMetricsState.snapshot` relies on CPython's GIL making list
+appends and int increments atomic. This is a CPython-specific guarantee,
+not general thread safety: on a free-threaded build it would need real
+locking. Fields are read independently, so a scrape can straddle an
+instant -- ``completed_submits`` and the percentiles may reflect times a
+few microseconds apart. Each individual counter is still nondecreasing,
+which is all ``rate()`` requires.
 """
 
 # Future
 from __future__ import annotations
 
 # Standard
-from typing import TYPE_CHECKING, Iterable
+from typing import TYPE_CHECKING, Callable, Iterable
 import threading
 
 if TYPE_CHECKING:
@@ -47,12 +61,26 @@ class MetricsServerError(RuntimeError):
     """The metrics endpoint could not be started."""
 
 
-class BenchMetricsState:
-    """Live benchmark results, keyed by phase, for the collector to read.
+PHASE_MEASURED = "measured"
+PHASE_WARMUP = "warmup"
+# Rounds mode drives warmup and measured rounds through ONE result, so a
+# live observer cannot separate them -- the split only happens afterwards,
+# when the summary is computed. Labelling that series honestly is better
+# than either claiming it is measured-only or hiding it.
+PHASE_WARMUP_AND_MEASURED = "warmup+measured"
 
-    The benchmark registers each phase's :class:`BenchResult` here before
-    running it. Results are mutated in place by the runners, so the
-    collector sees current values without any copying or notification.
+
+class BenchMetricsState:
+    """Live benchmark results for the collector to read.
+
+    The benchmark registers each result here before running it. Results
+    are mutated in place by the runners, so the collector sees current
+    values without any copying or notification.
+
+    Keyed by ``(operation, phase)``. Warmup and measured results are
+    therefore distinct series, which is what keeps each one monotonic: a
+    single series carrying warmup and then measured values would show a
+    counter reset that ``rate()`` would misread as a restart.
 
     Thread safety: the benchmark's producer thread registers results and
     the HTTP server's thread reads them, so the registry dict is guarded.
@@ -62,29 +90,34 @@ class BenchMetricsState:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._results: dict[str, "BenchResult"] = {}
+        self._results: dict[tuple[str, str], "BenchResult"] = {}
 
-    def register(self, operation: str, result: "BenchResult") -> None:
-        """Publish *result* under the label ``operation``.
+    def register(
+        self, operation: str, result: "BenchResult", phase: str = PHASE_MEASURED
+    ) -> None:
+        """Publish *result* under ``(operation, phase)``.
 
         Args:
-            operation: Phase name used as the ``operation`` label, e.g.
-                ``"Store"``. Re-registering a phase replaces it.
+            operation: Direction under test, used as the ``operation``
+                label, e.g. ``"Store"``.
             result: Result object the runner will mutate in place.
+            phase: :data:`PHASE_MEASURED` or :data:`PHASE_WARMUP`.
+                Re-registering the same pair replaces it.
         """
         with self._lock:
-            self._results[operation] = result
+            self._results[(operation, phase)] = result
 
-    def snapshot(self) -> list[tuple[str, "BenchResult"]]:
-        """Return the registered ``(operation, result)`` pairs.
+    def snapshot(self) -> list[tuple[tuple[str, str], "BenchResult"]]:
+        """Return the registered ``((operation, phase), result)`` pairs.
 
         Only the dict is locked. The results themselves are read
-        unsynchronised while a runner appends to them, which is safe for
-        this purpose: CPython list appends and int increments are atomic
+        unsynchronised while a runner appends to them. This is safe under
+        CPython specifically: list appends and int increments are atomic
         under the GIL, so a scrape sees a valid-but-possibly-stale value
-        rather than a torn one. The alternative -- locking the runner's
-        harvest loop -- would put scrape contention on the measured path,
-        which is exactly what must not happen.
+        rather than a torn one. It is not general thread safety -- a
+        free-threaded build would need real locking. The alternative --
+        locking the runner's harvest loop -- would put scrape contention
+        on the measured path, which is exactly what must not happen.
         """
         with self._lock:
             return list(self._results.items())
@@ -104,12 +137,12 @@ class _BenchCollector:
         submits = CounterMetricFamily(
             f"{_NAMESPACE}_completed_submits",
             "Submits completed so far in this phase.",
-            labels=["operation"],
+            labels=["operation", "phase"],
         )
         success_keys = CounterMetricFamily(
             f"{_NAMESPACE}_success_keys",
             "Keys the adapter reported successful so far in this phase.",
-            labels=["operation"],
+            labels=["operation", "phase"],
         )
         success_bytes = CounterMetricFamily(
             f"{_NAMESPACE}_success_bytes",
@@ -119,7 +152,7 @@ class _BenchCollector:
                 "without writing, so this counts requested payload, not "
                 "necessarily bytes that reached the media."
             ),
-            labels=["operation"],
+            labels=["operation", "phase"],
         )
         latency = GaugeMetricFamily(
             f"{_NAMESPACE}_submit_latency_seconds",
@@ -128,16 +161,16 @@ class _BenchCollector:
                 "so far. Not a sliding window: percentiles are cumulative and "
                 "flatten as the run proceeds."
             ),
-            labels=["operation", "quantile"],
+            labels=["operation", "phase", "quantile"],
         )
         in_flight = GaugeMetricFamily(
             f"{_NAMESPACE}_in_flight_target",
             "Configured outstanding submits held by this phase.",
-            labels=["operation"],
+            labels=["operation", "phase"],
         )
 
-        for operation, result in self._state.snapshot():
-            labels = [operation]
+        for (operation, phase), result in self._state.snapshot():
+            labels = [operation, phase]
             submits.add_metric(labels, float(result.completed_submits))
             success_keys.add_metric(labels, float(result.total_success))
             success_bytes.add_metric(labels, float(result.total_success_bytes))
@@ -147,7 +180,7 @@ class _BenchCollector:
                 ("0.9", result.submit_latency_p90_ms),
                 ("0.99", result.submit_latency_p99_ms),
             ):
-                latency.add_metric([operation, quantile], value_ms / 1000.0)
+                latency.add_metric([operation, phase, quantile], value_ms / 1000.0)
 
         yield submits
         yield success_keys
@@ -156,22 +189,33 @@ class _BenchCollector:
         yield in_flight
 
 
-def start_metrics_server(port: int, state: BenchMetricsState) -> None:
+def start_metrics_server(
+    port: int, state: BenchMetricsState, address: str = "127.0.0.1"
+) -> Callable[[], None]:
     """Serve *state* over HTTP for Prometheus on *port*.
 
     Uses a dedicated registry rather than the process-global one, so the
     benchmark's series are the only thing exposed and nothing a
     transitively imported module registered leaks into the scrape.
 
-    The server runs on a daemon thread; there is no shutdown call. A
-    benchmark is a one-shot process and the endpoint must stay scrapable
-    through the end-of-run summary, so it dies with the process.
+    The server runs on a daemon thread, so a one-shot CLI process does
+    not need to stop it. In-process callers do: without the returned
+    shutdown, each call leaks a listening socket for the life of the
+    interpreter, which matters for tests.
 
     Args:
-        port: TCP port to bind. Binds all interfaces, matching
-            ``prometheus_client`` defaults -- this is a benchmark rig
-            tool, so do not expose it on an untrusted network.
+        port: TCP port to bind.
         state: Registry the collector reads on each scrape.
+        address: Interface to bind. Defaults to loopback rather than
+            ``prometheus_client``'s all-interfaces default: the endpoint
+            is unauthenticated, so reaching it off-box must be an
+            explicit choice. Pass ``"0.0.0.0"`` when Prometheus scrapes
+            the rig remotely.
+
+    Returns:
+        A callable that closes the listening socket and joins the server
+        thread. Idempotent, so calling it from a ``finally`` block that
+        may run twice is safe.
 
     Raises:
         MetricsServerError: ``prometheus_client`` is unavailable, or the
@@ -190,10 +234,22 @@ def start_metrics_server(port: int, state: BenchMetricsState) -> None:
     registry = CollectorRegistry()
     registry.register(_BenchCollector(state))
     try:
-        start_http_server(port, registry=registry)
+        server, thread = start_http_server(port, addr=address, registry=registry)
     except OSError as e:
         raise MetricsServerError(
-            f"could not bind the metrics endpoint on port {port}: {e}. "
-            f"Pick a free port with --serve-metrics, or stop whatever "
-            f"holds it."
+            f"could not bind the metrics endpoint on {address}:{port}: "
+            f"{e}. Pick a free port with --serve-metrics, or stop "
+            f"whatever holds it."
         ) from e
+
+    stopped = threading.Event()
+
+    def shutdown() -> None:
+        if stopped.is_set():
+            return
+        stopped.set()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5.0)
+
+    return shutdown

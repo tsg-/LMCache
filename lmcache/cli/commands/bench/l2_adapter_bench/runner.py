@@ -64,11 +64,11 @@ HarvestFn = Callable[[set[int]], dict[int, Any]]
 # Maps one harvested completion payload to a success key count.
 SuccessFn = Callable[[Any], int]
 
-# Receives the measured result as soon as it exists, BEFORE the runner
-# starts mutating it. Lets a caller observe progress live -- the metrics
-# endpoint reads the same object on every scrape. Warmup results are not
-# published: they are discarded, and reporting them under the same name
-# would show a counter reset the measured phase did not cause.
+# Receives a result as soon as it exists, BEFORE the runner starts
+# mutating it. Lets a caller observe progress live -- the metrics
+# endpoint reads the same object on every scrape. Sustained mode passes
+# the discarded warmup result to a SEPARATE hook, so an observer can
+# distinguish it instead of having it folded into the measured series.
 ResultHook = Callable[[BenchResult], None]
 
 
@@ -536,9 +536,9 @@ def bench_store(
         elapsed = t1 - t0
         timed_out = len(completed) < len(task_ids)
 
-        result.round_latency_counts.append(
-            _record_round_latencies(result, task_ids, observed_at, submitted_at)
-        )
+        appended = _record_round_latencies(result, task_ids, observed_at, submitted_at)
+        result.round_latency_counts.append(appended)
+        result.completed_submits += appended
 
         success_keys = sum(
             len(keys_batches[i])
@@ -580,6 +580,7 @@ def bench_store_sustained(
     objs_for_slot: SlotObjProvider,
     log: LogFn,
     on_result: ResultHook = _discard_result_hook,
+    on_warmup_result: ResultHook = _discard_result_hook,
 ) -> BenchResult:
     """Benchmark ``submit_store_task`` in sustained-window mode.
 
@@ -595,8 +596,11 @@ def bench_store_sustained(
             source buffers are read-only, so slot reuse is safe.
         log: Progress logger.
         on_result: Receives the measured result before its window opens,
-            so a caller can observe it live. The discarded warmup result
-            is never passed.
+            so a caller can observe it live.
+        on_warmup_result: Receives the discarded warmup result, if any,
+            before its window opens. Separate from ``on_result`` so an
+            observer can keep the two apart -- the warmup does real I/O
+            that external counters will show.
 
     Returns:
         A :class:`BenchResult` in :attr:`BenchMode.SUSTAINED`.
@@ -623,6 +627,7 @@ def bench_store_sustained(
             data_size_bytes=data_size,
             mode=BenchMode.SUSTAINED,
         )
+        on_warmup_result(warmup)
         next_index, outstanding = run_sustained_window(
             warmup,
             submit=_submit,
@@ -642,8 +647,9 @@ def bench_store_sustained(
         data_size_bytes=data_size,
         mode=BenchMode.SUSTAINED,
     )
-    # Published after the warmup so the endpoint never exposes the
-    # discarded window's counters.
+    # A distinct result from the warmup, published under its own phase
+    # label, so the discarded window can never be summed into the
+    # measured series.
     on_result(result)
     log(f"[Store] Sustained window for {duration_sec:.1f}s at {in_flight} in flight...")
     run_sustained_window(
@@ -719,9 +725,9 @@ def bench_lookup(
         elapsed = t1 - t0
         timed_out = len(results) < len(task_ids)
 
-        result.round_latency_counts.append(
-            _record_round_latencies(result, task_ids, observed_at, submitted_at)
-        )
+        appended = _record_round_latencies(result, task_ids, observed_at, submitted_at)
+        result.round_latency_counts.append(appended)
+        result.completed_submits += appended
 
         total_found = sum(_bitmap_count(results.get(tid)) for tid in task_ids)
 
@@ -802,9 +808,9 @@ def bench_load(
         elapsed = t1 - t0
         timed_out = len(results) < len(task_ids)
 
-        result.round_latency_counts.append(
-            _record_round_latencies(result, task_ids, observed_at, submitted_at)
-        )
+        appended = _record_round_latencies(result, task_ids, observed_at, submitted_at)
+        result.round_latency_counts.append(appended)
+        result.completed_submits += appended
 
         total_loaded = sum(_bitmap_count(results.get(tid)) for tid in task_ids)
 
@@ -842,6 +848,7 @@ def bench_load_sustained(
     objs_for_slot: SlotObjProvider,
     log: LogFn,
     on_result: ResultHook = _discard_result_hook,
+    on_warmup_result: ResultHook = _discard_result_hook,
 ) -> BenchResult:
     """Benchmark ``submit_load_task`` in sustained-window mode.
 
@@ -863,8 +870,11 @@ def bench_load_sustained(
         objs_for_slot: Load buffers for a given window slot.
         log: Progress logger.
         on_result: Receives the measured result before its window opens,
-            so a caller can observe it live. The discarded warmup result
-            is never passed.
+            so a caller can observe it live.
+        on_warmup_result: Receives the discarded warmup result, if any,
+            before its window opens. Separate from ``on_result`` so an
+            observer can keep the two apart -- the warmup does real I/O
+            that external counters will show.
 
     Returns:
         A :class:`BenchResult` in :attr:`BenchMode.SUSTAINED`.
@@ -893,6 +903,7 @@ def bench_load_sustained(
             data_size_bytes=data_size,
             mode=BenchMode.SUSTAINED,
         )
+        on_warmup_result(warmup)
         next_index, outstanding = run_sustained_window(
             warmup,
             submit=_submit,
@@ -912,8 +923,9 @@ def bench_load_sustained(
         data_size_bytes=data_size,
         mode=BenchMode.SUSTAINED,
     )
-    # Published after the warmup so the endpoint never exposes the
-    # discarded window's counters.
+    # A distinct result from the warmup, published under its own phase
+    # label, so the discarded window can never be summed into the
+    # measured series.
     on_result(result)
     log(f"[Load] Sustained window for {duration_sec:.1f}s at {in_flight} in flight...")
     run_sustained_window(

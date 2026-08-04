@@ -83,8 +83,12 @@ class BenchResult:
     # ``submit_latencies``. Normally ``in_flight``, but fewer for a round
     # that timed out. Lets warmup rounds be stripped exactly.
     round_latency_counts: list[int] = field(default_factory=list)
-    # Sustained-mode accounting (unused in ROUNDS mode).
+    # Submits that completed, in BOTH modes. In ROUNDS mode this equals
+    # ``sum(round_latency_counts)`` and is *not* used to derive
+    # :attr:`total_keys` (rounds mode counts whole rounds); it exists so a
+    # live observer has a monotonic progress counter in either mode.
     completed_submits: int = 0
+    # Sustained-mode accounting (unused in ROUNDS mode).
     sustained_window_sec: float = 0.0
     # Ramp-down tail: time from the refill deadline until the last
     # outstanding submit completed. Concurrency decays across this
