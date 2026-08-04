@@ -97,10 +97,23 @@ def add_l2_arguments(parser: argparse.ArgumentParser) -> None:
             "re-targets objects that already exist, which backends that "
             "short-circuit an existing key report as success without "
             "writing, so pass a fresh prefix (a timestamp or run id) for "
-            "an independent store measurement. REQUIRED for a sustained "
-            "store run, which consumes backing capacity for its whole "
-            "window and cannot be safely repeated into the same prefix. "
-            "Default: empty (rounds mode only)."
+            "an independent store measurement. REQUIRED for any run with "
+            "a store phase, in either mode; concurrent producers each "
+            "need a DISTINCT prefix. Default: empty, which addresses the "
+            "historical unprefixed namespace and is usable for load and "
+            "lookup runs without further flags."
+        ),
+    )
+    parser.add_argument(
+        "--unsafe-shared-key-prefix",
+        action="store_true",
+        help=(
+            "Allow a store phase to run with no --key-prefix, writing "
+            "into the shared unprefixed namespace. Unsafe: two such runs "
+            "target identical keys, and the pre-flight existence probe "
+            "reports state rather than reserving the keyspace, so "
+            "concurrent producers can both see it empty and then collide. "
+            "For reproducing historical unprefixed corpora only."
         ),
     )
     parser.add_argument(
@@ -242,6 +255,7 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
         bench_lookup,
         bench_store,
         bench_store_sustained,
+        StoreFreshnessUnknownError,
         StoreNamespaceNotEmptyError,
         require_empty_store_namespace,
     )
@@ -301,19 +315,25 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
             file=sys.stderr,
         )
         sys.exit(2)
-    if sustained and args.only != "load" and not args.key_prefix:
-        # A sustained store writes monotonically for the whole window, so
-        # it consumes real capacity and cannot be repeated into the same
-        # key universe -- the second run would hit already-stored keys and
-        # measure existence checks. Requiring an explicit prefix makes the
-        # run identifiable and forces the operator to choose a fresh one;
-        # the matching load pass must be given the same value.
+    stores = args.only != "load" and args.only != "lookup"
+    if stores and not args.key_prefix and not args.unsafe_shared_key_prefix:
+        # Every store-containing run needs its own key universe, in both
+        # modes. The pre-flight probe is not a reservation: two processes
+        # can both find the default namespace empty and then write the
+        # same keys, and backends that short-circuit an existing key
+        # report success without writing. A distinct prefix per producer
+        # is the only thing that actually keeps them disjoint. The
+        # matching load pass must be given the same value.
         print(
-            "Error: --duration-sec with a store phase requires "
-            "--key-prefix. A sustained store cannot be repeated into the "
-            "same key space, so name this run explicitly (e.g. "
+            "Error: a store phase requires --key-prefix. Keys are a pure "
+            "function of the prefix and the key index, so every store run "
+            "needs its own namespace -- name this one explicitly (e.g. "
             "--key-prefix run-$(date +%s)) and pass the same prefix to "
-            "the matching --only load pass.",
+            "the matching --only load pass. Concurrent producers each "
+            "need a DISTINCT prefix; the pre-flight existence probe "
+            "reports state, it does not reserve the keyspace. To write "
+            "into the historical unprefixed namespace anyway, pass "
+            "--unsafe-shared-key-prefix.",
             file=sys.stderr,
         )
         sys.exit(2)
@@ -805,9 +825,11 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
             data_per_round_mb=(keys_per_round * data_size) / mb,
             results=results,
         )
-    except StoreNamespaceNotEmptyError as e:
+    except (StoreNamespaceNotEmptyError, StoreFreshnessUnknownError) as e:
         # A usage error, not a benchmark failure: nothing was measured, so
-        # exit 2 like the argument-validation paths rather than 1.
+        # exit 2 like the argument-validation paths rather than 1. Both an
+        # occupied namespace and an unanswerable probe land here -- the
+        # gate fails closed either way.
         print(f"Error: {e}", file=sys.stderr)
         failed_precondition = True
     finally:

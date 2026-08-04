@@ -212,6 +212,17 @@ class StoreNamespaceNotEmptyError(RuntimeError):
     """A store benchmark was asked to write keys that already exist."""
 
 
+class StoreFreshnessUnknownError(RuntimeError):
+    """The existence probe could not answer, so freshness is unknown.
+
+    Raised instead of assuming the namespace is empty. A timed-out lookup
+    carries no information: the keys may or may not be there. Treating it
+    as "absent" would let the benchmark write into an already-populated
+    namespace, which is the exact condition
+    :class:`StoreNamespaceNotEmptyError` exists to prevent.
+    """
+
+
 def count_existing_keys(adapter, keys: list[ObjectKey], timeout: float) -> int:
     """Count how many of *keys* the adapter already holds.
 
@@ -225,9 +236,12 @@ def count_existing_keys(adapter, keys: list[ObjectKey], timeout: float) -> int:
         timeout: Seconds to wait for the lookup to complete.
 
     Returns:
-        Number of *keys* the adapter reported present. Returns 0 when the
-        lookup timed out -- a probe that could not answer must not block
-        the benchmark.
+        Number of *keys* the adapter reported present. Zero only when the
+        adapter positively reported every key absent.
+
+    Raises:
+        StoreFreshnessUnknownError: The lookup did not complete within
+            *timeout*, so the answer is unknown rather than zero.
     """
     if not keys:
         return 0
@@ -235,7 +249,14 @@ def count_existing_keys(adapter, keys: list[ObjectKey], timeout: float) -> int:
     results, _observed = _wait_lookup_finished(adapter, [task_id], timeout)
     bitmap = results.get(task_id)
     if bitmap is None:
-        return 0
+        raise StoreFreshnessUnknownError(
+            f"the existence probe for {len(keys)} keys did not complete "
+            f"within {timeout:g}s, so whether this namespace is already "
+            f"populated is unknown. A store run into an occupied namespace "
+            f"measures existence checks while counting full payload bytes, "
+            f"so this is not safe to assume away. Investigate why the "
+            f"adapter's lookup stalled, then re-run."
+        )
     found = _bitmap_count(bitmap)
     adapter.submit_unlock(keys)
     return found
@@ -270,6 +291,9 @@ def require_empty_store_namespace(
 
     Raises:
         StoreNamespaceNotEmptyError: Any of *keys* already exists.
+        StoreFreshnessUnknownError: The probe timed out, leaving freshness
+            unknown. This gate fails closed -- an unanswered probe is not
+            evidence of an empty namespace.
     """
     found = count_existing_keys(adapter, keys, timeout)
     if found == 0:

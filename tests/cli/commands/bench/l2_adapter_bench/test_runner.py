@@ -19,10 +19,14 @@ from lmcache.cli.commands.bench.l2_adapter_bench.result import (
     BenchMode,
     BenchResult,
 )
+from lmcache.cli.commands.bench.l2_adapter_bench.data import make_object_keys
 from lmcache.cli.commands.bench.l2_adapter_bench.runner import (
+    StoreFreshnessUnknownError,
     WarmupNotDrainedError,
     _record_round_latencies,
     _require_drained_warmup,
+    count_existing_keys,
+    require_empty_store_namespace,
     run_sustained_window,
 )
 from lmcache.v1.platform import create_event_notifier
@@ -430,3 +434,79 @@ def test_foreign_completions_are_ignored() -> None:
     assert result.completed_submits > 0
     assert result.completed_submits == len(result.submit_latencies)
     assert result.completed_submits <= adapter.submitted
+
+
+# ---------------------------------------------------------------------------
+# Store-freshness probe -- must fail closed
+# ---------------------------------------------------------------------------
+
+
+class _StallingLookupAdapter:
+    """Accepts a lookup-and-lock submit and never completes it.
+
+    Models an adapter whose lookup path is wedged: the task id comes back,
+    but the eventfd is never signalled, so the probe cannot learn whether
+    the keys exist.
+    """
+
+    def __init__(self) -> None:
+        self._notifier = create_event_notifier()
+        self.unlocked = False
+
+    def submit_lookup_and_lock_task(self, keys: Any, layout_desc: Any) -> int:
+        return 0
+
+    def get_lookup_and_lock_event_fd(self) -> int:
+        return self._notifier.fileno()
+
+    def query_lookup_and_lock_result(self, task_id: int) -> None:
+        return None
+
+    def submit_unlock(self, keys: Any) -> None:
+        self.unlocked = True
+
+    def close(self) -> None:
+        self._notifier.close()
+
+
+def test_a_timed_out_freshness_probe_raises() -> None:
+    """An unanswered probe must not be read as "namespace is empty".
+
+    A timeout means freshness is UNKNOWN. Returning 0 would let a store
+    run proceed into a possibly-populated namespace, where backends that
+    short-circuit an existing key report success without writing -- the
+    exact fiction this gate exists to prevent. Fail closed.
+    """
+    adapter = _StallingLookupAdapter()
+    keys = make_object_keys(2, model_name="stalled")
+
+    with pytest.raises(StoreFreshnessUnknownError, match="did not complete"):
+        count_existing_keys(adapter, keys, timeout=0.05)
+
+    adapter.close()
+
+
+def test_require_empty_store_namespace_propagates_the_timeout() -> None:
+    """The gate the CLI calls must surface the timeout, not swallow it."""
+    adapter = _StallingLookupAdapter()
+    keys = make_object_keys(2, model_name="stalled")
+
+    with pytest.raises(StoreFreshnessUnknownError):
+        require_empty_store_namespace(
+            adapter,
+            keys=keys,
+            namespace="stalled",
+            log=lambda _msg: None,
+            timeout=0.05,
+        )
+
+    adapter.close()
+
+
+def test_an_empty_key_list_needs_no_probe() -> None:
+    """No keys means nothing to collide with; must not raise."""
+    adapter = _StallingLookupAdapter()
+
+    assert count_existing_keys(adapter, [], timeout=0.05) == 0
+
+    adapter.close()

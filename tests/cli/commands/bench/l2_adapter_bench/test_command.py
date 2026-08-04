@@ -108,6 +108,8 @@ def test_verify_runs_when_both_directions_are_present(
     """
     args = _parse(
         "--no-skip-verify",
+        "--key-prefix",
+        "verify",
         "--num-keys",
         "4",
         "--in-flight",
@@ -225,14 +227,23 @@ def _store_args(tmp_path: Path, *extra: str, prefix: str | None = None) -> objec
     return _parse(*argv, adapter_json=_fs_adapter_json(tmp_path))
 
 
-def test_sustained_store_requires_a_key_prefix(tmp_path: Path) -> None:
-    """A sustained store must be named explicitly before it runs.
+@pytest.mark.parametrize(
+    "extra",
+    [
+        pytest.param((), id="rounds"),
+        pytest.param(("--duration-sec", "0.2"), id="sustained"),
+    ],
+)
+def test_a_store_requires_a_key_prefix(tmp_path: Path, extra: tuple[str, ...]) -> None:
+    """Every store run must be named explicitly, in EITHER mode.
 
-    It writes monotonically for the whole window, so it consumes real
-    capacity and cannot be repeated into the same key space. Requiring the
-    prefix forces the operator to choose a fresh one per run.
+    Keys restart at index 0 each invocation, so an unprefixed store shares
+    a key universe with every other unprefixed store. The pre-flight probe
+    catches the sequential case but is not a reservation -- two concurrent
+    producers can both find the default namespace empty and then write the
+    same keys. Requiring the prefix is what actually keeps them disjoint.
     """
-    args = _store_args(tmp_path, "--duration-sec", "0.2")
+    args = _store_args(tmp_path, *extra)
 
     with pytest.raises(SystemExit) as exc:
         run_l2_adapter_bench(MagicMock(), args)
@@ -240,7 +251,22 @@ def test_sustained_store_requires_a_key_prefix(tmp_path: Path) -> None:
     assert exc.value.code == 2
 
 
-def test_sustained_load_does_not_require_a_key_prefix(tmp_path: Path) -> None:
+def test_unsafe_shared_key_prefix_overrides_the_requirement(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The escape hatch must actually reach the benchmark.
+
+    Reproducing a historical unprefixed corpus is a legitimate need, so
+    the guard is overridable -- but only by naming the risk.
+    """
+    args = _store_args(tmp_path, "--unsafe-shared-key-prefix")
+
+    run_l2_adapter_bench(MagicMock(), args)
+
+    assert "Store" in capsys.readouterr().out
+
+
+def test_load_does_not_require_a_key_prefix(tmp_path: Path) -> None:
     """The requirement is store-only: a load consumes no new capacity.
 
     Guards the validation against over-reach -- a sustained load pass over
