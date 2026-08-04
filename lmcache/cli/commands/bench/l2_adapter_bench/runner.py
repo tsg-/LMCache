@@ -64,6 +64,18 @@ HarvestFn = Callable[[set[int]], dict[int, Any]]
 # Maps one harvested completion payload to a success key count.
 SuccessFn = Callable[[Any], int]
 
+# Receives the measured result as soon as it exists, BEFORE the runner
+# starts mutating it. Lets a caller observe progress live -- the metrics
+# endpoint reads the same object on every scrape. Warmup results are not
+# published: they are discarded, and reporting them under the same name
+# would show a counter reset the measured phase did not cause.
+ResultHook = Callable[[BenchResult], None]
+
+
+def _discard_result_hook(result: BenchResult) -> None:
+    """Default :data:`ResultHook`: observe nothing."""
+
+
 # TODO: bench passes a placeholder layout_desc; a real layout may be
 # required here in the future (e.g. when benchmarking the P2P adapter).
 _PLACEHOLDER_LAYOUT_DESC = MemoryLayoutDesc(shapes=[], dtypes=[])
@@ -480,12 +492,16 @@ def bench_store(
     keys_for_round: KeyProvider,
     objs_for_round: ObjProvider,
     log: LogFn,
+    on_result: ResultHook = _discard_result_hook,
 ) -> BenchResult:
     """Benchmark ``submit_store_task`` in rounds mode.
 
     For each round, ``in_flight`` independent submits are issued; the
     round duration is the wall-clock time from the first submit until
     every submit of that round has completed.
+
+    ``on_result`` receives the result before the first round runs, so a
+    caller can observe it filling in.
     """
     result = BenchResult(
         operation="Store",
@@ -493,6 +509,7 @@ def bench_store(
         num_keys=num_keys,
         data_size_bytes=data_size,
     )
+    on_result(result)
 
     for r in range(rounds):
         keys_batches = keys_for_round(r)
@@ -562,6 +579,7 @@ def bench_store_sustained(
     keys_for_submit: SubmitKeyProvider,
     objs_for_slot: SlotObjProvider,
     log: LogFn,
+    on_result: ResultHook = _discard_result_hook,
 ) -> BenchResult:
     """Benchmark ``submit_store_task`` in sustained-window mode.
 
@@ -576,6 +594,9 @@ def bench_store_sustained(
         objs_for_slot: Store buffers for a given window slot. Store
             source buffers are read-only, so slot reuse is safe.
         log: Progress logger.
+        on_result: Receives the measured result before its window opens,
+            so a caller can observe it live. The discarded warmup result
+            is never passed.
 
     Returns:
         A :class:`BenchResult` in :attr:`BenchMode.SUSTAINED`.
@@ -621,6 +642,9 @@ def bench_store_sustained(
         data_size_bytes=data_size,
         mode=BenchMode.SUSTAINED,
     )
+    # Published after the warmup so the endpoint never exposes the
+    # discarded window's counters.
+    on_result(result)
     log(f"[Store] Sustained window for {duration_sec:.1f}s at {in_flight} in flight...")
     run_sustained_window(
         result,
@@ -651,8 +675,13 @@ def bench_lookup(
     log: LogFn,
     expected_max_hit_rate: float = 0.0,
     expected_hit_count: int = 0,
+    on_result: ResultHook = _discard_result_hook,
 ) -> BenchResult:
-    """Benchmark ``submit_lookup_and_lock_task`` in rounds mode."""
+    """Benchmark ``submit_lookup_and_lock_task`` in rounds mode.
+
+    ``on_result`` receives the result before the first round runs, so a
+    caller can observe it filling in.
+    """
     result = BenchResult(
         operation="Lookup",
         in_flight=in_flight,
@@ -661,6 +690,7 @@ def bench_lookup(
         expected_max_hit_rate=expected_max_hit_rate,
         expected_hit_count=expected_hit_count,
     )
+    on_result(result)
 
     log(
         "bench_lookup uses a placeholder MemoryLayoutDesc; this may need a "
@@ -732,14 +762,20 @@ def bench_load(
     keys_for_round: KeyProvider,
     objs_for_round: ObjProvider,
     log: LogFn,
+    on_result: ResultHook = _discard_result_hook,
 ) -> BenchResult:
-    """Benchmark ``submit_load_task`` in rounds mode."""
+    """Benchmark ``submit_load_task`` in rounds mode.
+
+    ``on_result`` receives the result before the first round runs, so a
+    caller can observe it filling in.
+    """
     result = BenchResult(
         operation="Load",
         in_flight=in_flight,
         num_keys=num_keys,
         data_size_bytes=data_size,
     )
+    on_result(result)
 
     for r in range(rounds):
         keys_batches = keys_for_round(r)
@@ -805,6 +841,7 @@ def bench_load_sustained(
     keys_for_submit: SubmitKeyProvider,
     objs_for_slot: SlotObjProvider,
     log: LogFn,
+    on_result: ResultHook = _discard_result_hook,
 ) -> BenchResult:
     """Benchmark ``submit_load_task`` in sustained-window mode.
 
@@ -825,6 +862,9 @@ def bench_load_sustained(
             keys that were previously stored, or every load misses.
         objs_for_slot: Load buffers for a given window slot.
         log: Progress logger.
+        on_result: Receives the measured result before its window opens,
+            so a caller can observe it live. The discarded warmup result
+            is never passed.
 
     Returns:
         A :class:`BenchResult` in :attr:`BenchMode.SUSTAINED`.
@@ -872,6 +912,9 @@ def bench_load_sustained(
         data_size_bytes=data_size,
         mode=BenchMode.SUSTAINED,
     )
+    # Published after the warmup so the endpoint never exposes the
+    # discarded window's counters.
+    on_result(result)
     log(f"[Load] Sustained window for {duration_sec:.1f}s at {in_flight} in flight...")
     run_sustained_window(
         result,

@@ -117,6 +117,26 @@ def add_l2_arguments(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument(
+        "--serve-metrics",
+        type=int,
+        default=0,
+        metavar="PORT",
+        help=(
+            "Serve live benchmark progress as Prometheus metrics on PORT "
+            "for the duration of the process. Exists to give a benchmark "
+            "run a time axis that host-side counters (RDMA NIC, NVMe "
+            "SMART, per-NUMA CPU) can be aligned against, instead of "
+            "bracketing the run and diffing counters by hand. Metrics are "
+            "computed at scrape time from the live results, so nothing is "
+            "added to the submit path. A 1-15s scrape is far too coarse "
+            "to attribute host CPU to a phase of a run -- the end-of-run "
+            "summary remains the authoritative per-run figure. Rate "
+            "queries need a window of at least 60s. Binds all interfaces; "
+            "use on a benchmark rig, not an untrusted network. "
+            "Default: 0 (off)."
+        ),
+    )
+    parser.add_argument(
         "--warmup-rounds",
         type=int,
         default=1,
@@ -259,6 +279,11 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
         StoreNamespaceNotEmptyError,
         require_empty_store_namespace,
     )
+    from lmcache.cli.commands.bench.l2_adapter_bench.metrics import (
+        BenchMetricsState,
+        MetricsServerError,
+        start_metrics_server,
+    )
     from lmcache.cli.profiling import (
         PY_SPY_MODES,
         FlameProfiler,
@@ -312,6 +337,13 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
     if sustained and args.only == "lookup":
         print(
             "Error: --duration-sec does not support --only lookup",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    metrics_port = int(getattr(args, "serve_metrics", 0))
+    if metrics_port and not (1 <= metrics_port <= 65535):
+        print(
+            "Error: --serve-metrics must be a TCP port in 1..65535",
             file=sys.stderr,
         )
         sys.exit(2)
@@ -669,6 +701,22 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
     def _sustained_load_objs(slot: int) -> list:
         return _load_objs(0)[slot]
 
+    # Start before any phase runs so a scraper attached at t=0 sees the
+    # whole run. Bound early enough that a port clash fails before the
+    # benchmark touches the adapter.
+    metrics_state = BenchMetricsState()
+    if metrics_port:
+        try:
+            start_metrics_server(metrics_port, metrics_state)
+        except MetricsServerError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(2)
+        log(f"[Metrics] Serving Prometheus metrics on :{metrics_port}/metrics")
+
+    def _publish(result) -> None:
+        """Register a phase's live result with the metrics endpoint."""
+        metrics_state.register(result.operation, result)
+
     results: list = []
     failed = False
     failed_precondition = False
@@ -715,6 +763,7 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
                         keys_for_submit=_sustained_store_keys,
                         objs_for_slot=_sustained_store_objs,
                         log=log,
+                        on_result=_publish,
                     )
                 )
             else:
@@ -728,6 +777,7 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
                     keys_for_round=_build_round_keys,
                     objs_for_round=_store_objs,
                     log=log,
+                    on_result=_publish,
                 )
                 results.append(_strip_warmup(all_store, warmup))
                 # Last measured store round is total_rounds - 1.
@@ -750,6 +800,7 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
                 log=log,
                 expected_max_hit_rate=max_hit_rate,
                 expected_hit_count=expected_hit_count,
+                on_result=_publish,
             )
             results.append(_strip_warmup(all_lookup, warmup))
             log("")
@@ -768,6 +819,7 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
                         keys_for_submit=_sustained_load_keys,
                         objs_for_slot=_sustained_load_objs,
                         log=log,
+                        on_result=_publish,
                     )
                 )
             else:
@@ -781,6 +833,7 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
                     keys_for_round=_build_round_keys,
                     objs_for_round=_load_objs,
                     log=log,
+                    on_result=_publish,
                 )
                 results.append(_strip_warmup(all_load, warmup))
                 last_load_round_keys = _build_round_keys(total_rounds - 1)
