@@ -15,7 +15,7 @@ evidence and does **not** validate LocalDiskBackend.
 |------------|---------------------|---------------------------------------------|-------|
 | Initiator  | `I-P00599-B15-P14`  | Xeon Gold 6430, 251 GiB DRAM, kernel 5.14.0-427.13.1 | FIO consumer |
 | Target     | `mkp2` (200.0.0.37) | Exports 2 × Linux NVMe-oF namespaces        | `mkp2-nvme1`, `mkp2-nvme2` |
-| Fabric     | RoCEv2 100 GbE      | 96 Gbps goodput ceiling                     | irdma |
+| Fabric     | 100 GbE Falcon reliable transport | 96 Gbps goodput ceiling           | `rocep69s0f0`, `idpf` + `irdma` host stack, RoCE-style verbs |
 | NVMe conn  | `--nr-io-queues=16` per controller | irdma ENOMEM at default 128 | workaround captured in manifest |
 
 **Namespaces:**

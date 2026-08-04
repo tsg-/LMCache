@@ -391,8 +391,8 @@ D.6. Every run manifest snapshots the version-sensitive rows below.
 | --- | --- |
 | Hosts | Inspur NF5280M7 (I-P00599 initiator, I-P00600 target), Xeon Gold 6430, 64C/128T each; IPU on PCIe Gen4 |
 | IPU | Intel IPU, MEV-TS release `IPU IMC MEV-HW-C1-ci-ts.release.2.1.0.11517` (manifest pins the exact release per run) |
-| RDMA device | `rocep69s0f0` (vendor `0x8086`, part `5202`), driven by `irdma`; host-IPU control plane via `idpf` |
-| Wire transport | Falcon reliable transport on the wire (not RoCEv2/UDP); RoCE-style verbs layered on top |
+| RDMA device | `rocep69s0f0` (vendor `0x8086`, part `5202`, PCI `8086:1452`), driven by `irdma`; host-IPU control plane via `idpf`. **These host-stack names do not imply an E810 part** — the device is an IPU; see the wire-transport row |
+| Wire transport | Falcon-backed direct IPU-to-IPU link, `idpf` + `irdma` host stack, RoCE-style verbs on top. Bring-up evidence: `falcon-bringup-provenance.md` §1 (IPU QSFP0↔QSFP0 direct 100 GbE), §2 (Falcon `rtcmd` app up on both ACCs, `idpf`/`irdma` above it, `200.0.0.35`↔`.37` on `ens2f0`), §4 (Feature Pack 0.8 drop 3 Falcon init procedure). **No packet-level claim is made here** — the evidence shows the Falcon transport app carrying this link, not the on-wire header format, so do not assert "not RoCEv2/UDP" from it |
 | Target media | 2x Samsung PM9A3 1.92 TB (`MZQL21T9HCJR-00A07`, Gen4 x4 U.2), one namespace each (ns1, ns2), both on the single-host NQN ACL; ns1 primary durability namespace |
 | Data plane | 1x 100 GbE direct-attach; `active_mtu=IBV_MTU_4096` on both ends |
 | Kernel modules (target) | `nvmet`, `nvmet_rdma` — must load and bind over `irdma` cleanly (hard no-go) |
@@ -424,7 +424,7 @@ MTU gate is satisfied.
 | Gate | Type | Required evidence | If unmet |
 | --- | --- | --- | --- |
 | Target kernel modules | Hard | `nvmet` and `nvmet_rdma` load cleanly on the target host and bind the `irdma` device | Target owner rebuilds module or boots compatible kernel before Stage 1 |
-| Falcon/perftest sanity | Hard | Reproduce the D.5-era perftest RC baselines on the current feature pack (`ib_send_bw` ~96 Gb/s, `ib_write_bw` ~96 Gb/s, `ib_read_bw` ~93 Gb/s at 64 KiB) before any NVMe-oF work | Stop; debug Falcon/irdma bring-up with the platform team before Stage 1 |
+| Falcon/perftest sanity | Hard | Reproduce the D.5-era perftest RC baselines on the current feature pack (`ib_send_bw` ~96 Gb/s, `ib_write_bw` ~96 Gb/s, `ib_read_bw` ~93 Gb/s at 64 KiB) before any NVMe-oF work. **NOT MET — historical baseline only.** A Falcon bring-up on Feature Pack 0.8 drop 3 did hit those numbers (`falcon-bringup-provenance.md` §3: `ib_send_bw` 96.37/95.98, `ib_write_bw` 95.89, `ib_read_bw` 92.84, all RC, `active_mtu` 4096). That is a *historical* baseline: it does not establish which feature pack is running now, and the gate asks for a rerun. Required to close: a manifest pinning the current feature pack plus a fresh perftest run | Stop; debug Falcon/irdma bring-up with the platform team before Stage 1 |
 | Fabric MTU | Performance | `active_mtu=IBV_MTU_4096` on both ends; link MTU ≥ 4200; bidirectional `ping -M do -s 4000` passes. See Appendix C | Functional stages proceed labeled `mtu:degraded`; timed runs stop and escalate |
 | Management-plane isolation | Hard | Target refuses management-plane listen IP; management MTU/config unchanged | Provisioning refuses to proceed |
 | Dedicated media | Hard | Both named `/dev/disk/by-id/...` namespaces are unused, unmounted, and not system/data devices | Target provisioning script fails closed |

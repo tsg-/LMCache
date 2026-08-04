@@ -1,5 +1,43 @@
 # Stage 2 smoke — first Python-driven `LocalDiskBackend` numbers on mkp1
 
+> ## ⚠️ RETRACTED IN PART — 2026-08-03
+>
+> **Every read number in this document is invalid.** The reads never happened.
+> The `O_DIRECT` `readinto` syscall failed with `EINVAL` on every call because
+> `LocalDiskBackend`'s read destination allocator returns a non-page-aligned CPU
+> tensor. The exception is caught in the read helper, logged at ERROR, and the
+> slot returns `None` — while the harness times the elapsed interval regardless
+> of success or failure. RDMA verbs counters confirm it: the write phase moved
+> 15.03 GB over the wire, the read phase moved **zero**.
+>
+> **Specifically retracted:**
+> - ❌ **"6.21 GB/s = 89 % of fio single-drive ceiling"** (TL;DR table, Run 4
+>   table, finding 1) — was 512 immediate `EINVAL`s. The 7,746 ops/s at c=1
+>   figure implies ≈ 228 GB/s, impossible on 100 GbE, which is the tell.
+> - ❌ **"The Python control plane does not collapse"** / **"the backend does
+>   NOT collapse at chunk size"** — not proven either way; the read path was
+>   never exercised.
+> - ❌ The `95.1` in the Run-4 table is a *latency/ops* column artifact of the
+>   same failed run and is unrelated to the 95.1 Gbps figure measured later on
+>   2026-08-03.
+>
+> **Still valid:** the **write** observations. The harness aligns its write
+> buffers manually, so the put path was genuinely exercised; 2.66 GB/s
+> single-drive `O_DIRECT` write is a real number and RDMA counters agree. No
+> comparative claim against fio was ever established for it.
+>
+> **Superseded by:**
+> [mkp1-fsnative-l2-2026-08-03.md](mkp1-fsnative-l2-2026-08-03.md), which
+> measures the LMCache read path correctly via `bench l2` + `fs_native` and
+> finds **11.88 GB/s / 95.1 Gbps = 99.1 % of the 11.99 GB/s fio wire ceiling**
+> on md0+XFS, counter-validated. That doc supersedes this one for any read-path
+> claim.
+>
+> **Tracked as:** `LMCache-mg1`. The underlying upstream bug —
+> `_load_chunk_into_memory` swallowing `OSError` and returning `None`
+> (`local_disk_backend.py:533`) — is a real defect independent of this
+> benchmark and still needs filing upstream.
+
 **Date:** 2026-08-02 23:50 MST
 **Scope:** Stage 0 harness bring-up + first four smoke cells with
 `benchmarks/storage_backend_io/storage_backend_io_benchmark.py` against
@@ -14,7 +52,7 @@ The bottleneck story on this rig, after tonight:
 | Layer | Read ceiling | Notes |
 |---|---:|---|
 | 2× PM9A3 local (Config A, prior baseline) | **14.3 GB/s** | media / Gen4 lanes; not the limit here |
-| 2× PM9A3 over 100 GbE RoCEv2 (Config C, prior baseline) | **12.0 GB/s** | **wire-bound** at 96 Gbps goodput |
+| 2× PM9A3 over the 100 GbE Falcon link (Config C, prior baseline) | **12.0 GB/s** | **wire-bound** at 96 Gbps goodput |
 | md0 RAID0 + XFS over the wire (Stage 1 preflight) | **11.99 GB/s** | filesystem costs ≤ 3 % |
 | **Python `LocalDiskBackend` O_DIRECT, single wire drive** | **6.21 GB/s** | **89 % of fio single-drive ceiling (6.96 GB/s)** |
 
@@ -40,7 +78,8 @@ ceiling actually lives. Stage 2 continues.
   `pip install --no-build-isolation -e .` after installing
   `python3.11-devel` for the pybind11 headers.
 - **Storage under test:** `/mnt/lmcache-stage2-test` — freshly `mkfs.xfs`ed
-  `/dev/nvme2n1` (a single remote NVMe-oF namespace on mkp2 via RoCEv2).
+  `/dev/nvme2n1` (a single remote NVMe-oF namespace on mkp2 over the
+  100 GbE Falcon link).
   No md0. No RAID. Single wire, single drive.
 
 ## Bytes/op calibration

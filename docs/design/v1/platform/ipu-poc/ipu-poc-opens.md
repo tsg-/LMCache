@@ -567,7 +567,7 @@ production tail latency**.
 
 # Stage 2 bring-up finding — the harness silently masks read failures
 
-**Setup.** mkp1 (initiator) ↔ mkp2 (target), 100 GbE RoCEv2, md0 RAID0
+**Setup.** mkp1 (initiator) ↔ mkp2 (target), 100 GbE Falcon, md0 RAID0
 + XFS on 2× PM9A3, DeepSeek-V3 KV geometry (28 MiB / chunk), `O_DIRECT`.
 
 <div class="cols">
@@ -627,5 +627,96 @@ production tail latency**.
 
 </div>
 </div>
+
+---
+<!-- _class: small -->
+<!-- _footer: "IPU KV Cache PoC" -->
+
+# `bench l2` + `fs_native`: payload size is the throughput knob, not queue depth
+
+**Setup.** mkp1 (initiator) ↔ mkp2 (target), 100 GbE Falcon, remote NVMe-oF
+(md0 RAID0 + XFS, 2× PM9A3), `fs_native` L2 adapter. Every cell below is
+RDMA-counter-validated — observed `InRdmaWrites` / `InRdmaReads` ops within
+1 % of the payload-derived expectation.
+
+<div class="cols">
+<div class="card card-blue">
+
+### How the harness actually behaves
+
+- `submit_store_task` / `submit_load_task` return a task ID immediately;
+  non-blocking all the way down (`runner.py:163`,
+  `raw_block_l2_adapter.py:430`, `native_connector_l2_adapter.py:189`)
+- Each round issues **all** `in_flight` submits, then does ONE eventfd wait
+  for the group → **per-round drain barrier, not per-request serialization**
+- Real C++ `std::thread` workers, blocking syscalls, GIL dropped before
+  queueing (`connector_base.h:293`, `fs/connector.cpp:91`,
+  `connector_pybind_utils.h:60`)
+- **Concurrency ceiling:** each submit fans into `min(num_workers, num_keys)`
+  tiles (`connector_base.h:313`), so active filesystem I/O =
+  `min(num_workers, queued tiles)`. **`num_workers` and `in_flight` must be
+  swept together** — `in_flight 256` with `num_workers 4` just queues 252
+  requests behind 4 active reads.
+
+</div>
+<div class="card card-amber">
+
+### What the sweeps measured
+
+- **Reads scale with payload, not depth** — 256 K / 512 K / 1 M / 4 M per
+  key → 64.1 / 84.9 / 87.3 / **95.1 Gbps**
+- 28 MiB keys (`num_keys=1`), `in_flight` 4 / 16 / 64 → 84.6 / 74.5 /
+  95.1 Gbps — non-monotonic; **no depth win**
+- **Longest rounds-mode run: 89.5 Gbps over 100 GiB** (102,400 keys, 200
+  rounds) — still wave-barriered, not steady state
+- **Stores saturate at concurrency 2.** `num_workers` 1→64 at `inf=4, nk=8`
+  gives active I/O 1/2/4/8/16/32/32 → 3.76 / **5.48** / 5.56 / 5.67 / 5.63 /
+  5.63 / 5.59 GB/s. Knee at 2; matches the 5.6 GB/s fio write ceiling.
+- 95.1 Gbps read = **99.1 %** of the 11.99 GB/s fio wire ceiling
+- ⚠️ The `in_flight` 1→32 sweep is **degenerate** — at `w=16, nk=8`,
+  `min(16, inf×8)` pins active I/O at 16 from `inf=2` up. Its flatness is
+  mostly an artifact; the latency ramp (1.55→48.06 ms) is real queue wait.
+
+</div>
+</div>
+
+<div class="cols">
+<div class="card card-green">
+
+### Why an async / sliding-window mode is NOT the throughput fix
+
+- Store side is **media-bound** — the 45 Gbps ceiling is the SSDs, not the
+  harness
+- Read side is at **99.1 % of the fio ceiling** at 4 MiB per key
+- Latency doubles exactly with `in_flight` (1.55 → 48.06 ms over 1→32) while
+  throughput stays flat — and per the tiling formula the extra depth never
+  reached the disks. Deeper queueing bought pure wait time.
+- **Correction accepted:** buffer reuse does *not* block a window — existing
+  `in_flight` batches become slots and store source buffers are read-only.
+  No buffer pool needed.
+
+</div>
+<div class="card card-red">
+
+### What IS worth fixing — observability, not concurrency
+
+- Percentiles are over **round durations** (`result.py:98`), not per request —
+  useful (they caught a straggler) but cannot separate one slow I/O from a
+  uniformly slow round. `latency_per_key_ms` is round ÷ keys (`:165`), an
+  artifact, not a latency.
+- Reported throughput is a mean of per-round rates and so excludes
+  inter-round barrier stalls — optimistic vs wall clock
+- `--skip-verify` defaults **True**, and the gate structurally requires both
+  store *and* load batches → `--only load` can never verify. Arm it explicitly.
+- The **wave barrier** drains every submitted I/O before refilling, so the
+  worker pool idles at each round edge — a sawtooth at high throughput. Costs
+  wall-clock, but it is not per-I/O serialization.
+
+</div>
+</div>
+
+**Recommendation.** Drive throughput with ≥ 1 MiB per key; sweep
+`num_workers` + `in_flight` together. Add `--duration-sec T` as a
+**measurement** fix, not a ceiling fix. Percentile latency is the larger gap.
 
 ---

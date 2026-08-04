@@ -2,13 +2,24 @@
 
 > **Status: pre-flight sanity run, not the plan-conformant T7 baseline.**
 > This run uses 15-second FIO cells with no repetition, on 2 SSDs, over
-> **RoCEv2 on 100 GbE** (E810 `irdma`). It is **not Falcon**, does not
-> meet plan T2b protocol (60 s latency, 5-min bandwidth, 5 repetitions),
-> and cannot be cited as the D1/T7 kernel-path baseline for the offload
-> comparison. It is retained here as a smoke test that (a) the fabric
-> comes up cleanly, (b) the harness is functional end-to-end, and (c)
-> the read side can saturate 100 GbE. Rerun to protocol before any
+> the **100 GbE Falcon reliable-transport link** between the two MEV IPUs
+> (host stack `idpf` + `irdma`, RoCE-style verbs). It does not meet plan
+> T2b protocol (60 s latency, 5-min bandwidth, 5 repetitions), and cannot
+> be cited as the D1/T7 kernel-path baseline for the offload comparison.
+> It is retained here as a smoke test that (a) the fabric comes up
+> cleanly, (b) the harness is functional end-to-end, and (c) the read
+> side can saturate 100 GbE. Rerun to protocol before any
 > customer-visible baseline claim.
+>
+> **Correction 2026-08-04.** Earlier revisions of this document described
+> the fabric as "E810 `irdma`, RoCEv2, not Falcon". That was wrong. The
+> data plane is the direct 100 GbE IPU-to-IPU Falcon link
+> ([`falcon-bringup-provenance.md`](falcon-bringup-provenance.md) §1–§2);
+> `idpf`/`irdma` and
+> the `rocep69s0f0` device name are the host-facing software stack, not
+> the wire protocol, and the part is `8086:1452` / `vendor_part_id 5202`
+> (an IPU), not an E810. The numbers below are unaffected — only the
+> transport label was wrong.
 
 ## Setup
 
@@ -17,7 +28,7 @@
 | Target (MKP2) | Xeon Gold 6430 (SPR), 2×32c, RHEL 9.4, 256 GB DRAM, NUMA 0/1 |
 | Initiator (MKP1) | Xeon Gold 6430 (SPR), 2×32c, RHEL 9.4 |
 | SSDs on target | 2× Samsung PM9A3 1.92 TB (`nvme1n1`, `nvme2n1`), both PCIe Gen4×4 on NUMA 0 |
-| Fabric | Intel E810 (`irdma`), **100 GbE RoCEv2** (not Falcon), MTU 4096, `200.0.0.35 ↔ 200.0.0.37`, both NICs on NUMA 0 |
+| Fabric | **100 GbE Falcon reliable transport**, IPU-to-IPU direct attach (`rocep69s0f0`, `8086:1452`, `idpf` + `irdma` host stack, RoCE-style verbs), `active_mtu` 4096, `200.0.0.35 ↔ 200.0.0.37`, both on NUMA 0 |
 | NVMe-oF | kernel `nvmet-rdma` (target), kernel `nvme_rdma` (initiator), **`--nr-io-queues=16` per controller — see manifest note below** |
 | Namespace layout | One NQN per drive (`mkp2-nvme1`, `mkp2-nvme2`) — no RAID, no LVM |
 | FIO | 3.35, libaio, `--direct=1`, `--time_based --runtime=15 --ramp_time=2`, single repetition |
@@ -39,7 +50,7 @@ attribute the delta to it explicitly. Failed connect verbatim:
 Two configs completed:
 
 - **Config A (local block)** — FIO on MKP2 directly against `/dev/nvme1n1` and `/dev/nvme2n1`, no `nvmet`, no RDMA. Hardware ceiling on the target host.
-- **Config C (wire baseline over RoCEv2)** — FIO on MKP1 against `/dev/nvme{2,3}n1` (remote namespaces from MKP2 attached via `nvme_rdma` over 100 GbE RoCEv2). Full NVMe-oF stack + fabric. **This is not a Falcon measurement.**
+- **Config C (wire baseline over the Falcon link)** — FIO on MKP1 against `/dev/nvme{2,3}n1` (remote namespaces from MKP2 attached via `nvme_rdma` over the 100 GbE Falcon link). Full NVMe-oF stack + fabric. **This is a Falcon-backed kernel NVMe-oF measurement, not an IPU-offload measurement** — the IPU acts only as the `irdma` verbs device under the kernel path.
 
 **Config B (NVMe-oF loopback on MKP2)** was attempted with `rdma_rxe` on `lo` and separately with `nvme-loop`; both failed at connect time (route resolution timeouts on rxe; nvme-loop module not loadable on this kernel). Skipped. Note: skipping Config B is compatible with the plan's aggregate D1/T7 baseline, which does not require a stack-vs-wire decomposition. It is **not** valid to attribute the A→C delta to any specific component (framing, target dispatch, queue count, wire latency) without further isolation.
 
@@ -100,7 +111,7 @@ For read workloads, DRAM-write traffic during the run indicates SSD→LLC DMA is
 
 1. **Local hardware ceiling is ~14.3 GB/s aggregate reads, ~5.6 GB/s aggregate writes.** Reads are Gen4-lane-limited (2×~7 GB/s), writes are PM9A3-media-limited (~2.8 GB/s sustained per drive). QD 16 is enough to saturate reads; writes plateau immediately.
 
-2. **Wire baseline is ~12.0 GB/s reads = 96 Gbps of goodput at MTU 4096 on 100 GbE RoCEv2.** ~84% of local ceiling on reads across all block-size × QD points that saturate. **The 16% delta cannot be attributed to any specific component** (framing, target dispatch, initiator stack, queue-count workaround, wire latency) without Config B or a separate isolation. This is a clean 100 GbE read saturation number, nothing more.
+2. **Wire baseline is ~12.0 GB/s reads = 96 Gbps of goodput at `active_mtu` 4096 on the 100 GbE Falcon link.** ~84% of local ceiling on reads across all block-size × QD points that saturate. **The 16% delta cannot be attributed to any specific component** (framing, target dispatch, initiator stack, queue-count workaround, wire latency) without Config B or a separate isolation. This is a clean 100 GbE read saturation number, nothing more.
 
 3. **Writes are unaffected by the wire.** Local == wire == 5.6 GB/s. Writes are media-bound on 2 drives; adding the network doesn't cost anything because the SSDs are the bottleneck at ~45 Gbps.
 
@@ -114,7 +125,7 @@ For read workloads, DRAM-write traffic during the run indicates SSD→LLC DMA is
 
 ## For §4.2 planning
 
-- **Read side, RoCEv2 100 GbE goodput ceiling at MTU 4096: ~12.0 GB/s.** Any Falcon-side number lands against a *different* transport; do not use 12.0 GB/s as the Falcon reference. When Falcon becomes available, rerun and produce a Falcon-labeled baseline separately.
+- **Read side, 100 GbE Falcon goodput ceiling at `active_mtu` 4096: ~12.0 GB/s.** This *is* a Falcon-link number, so it is the right order-of-magnitude reference for this rig — but it is still a pre-flight run (15 s cells, no repetition), so it is not the protocol-conformant T7 baseline. What remains missing is not "Falcon" but the T2b protocol and, separately, any IPU-offload path: this measures the kernel `nvme_rdma`/`nvmet_rdma` path with the IPU serving as the verbs device.
 - **Write side is media-bound at ~5.6 GB/s** on 2 drives. Cannot be improved by network changes on this rig.
 - **DDIO way-count tuning (`iio_llc_ways`) is a candidate knob for §4.2** — the local-path knee at (QD 256, 256k) gives a rough concurrency bound, but the wire-path knee needs its own measurement before it can be cited as a concurrency ceiling.
 - **A→C delta interpretation.** The 16% delta at QD ≥ 16 on reads is an aggregate number that includes wire framing, target `nvmet-rdma` dispatch, initiator `nvme_rdma` cost, and the `--nr-io-queues=16` operational cap. **It is not a "stack tax" datum**; that label was misapplied in earlier drafts (R1 in the plan means initiator-only ownership, not a stack-tax measurement). A separated stack-vs-wire number requires a working Config B — e.g., `nvmet-tcp` loopback or a second local NIC binding.

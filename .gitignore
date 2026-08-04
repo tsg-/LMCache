@@ -168,3 +168,8 @@ docs/source/locale/**/*.mo
 
 # checkpoint skill continuation prompt
 .checkpoint.md
+
+# Raw operator session logs from lab bring-up: contain host root credentials,
+# chassis serials, and internal-only URLs. Sanitized provenance extracts live
+# under docs/design/v1/platform/ipu-poc/results/ instead.
+Falcon_Setup_MKP.txt
