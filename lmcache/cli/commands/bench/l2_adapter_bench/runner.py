@@ -123,7 +123,7 @@ def _record_round_latencies(
     appended = 0
     for task_id in task_ids:
         if task_id in observed_at and task_id in submitted_at:
-            result.submit_latencies.append(observed_at[task_id] - submitted_at[task_id])
+            result.record_latency(observed_at[task_id] - submitted_at[task_id])
             appended += 1
     return appended
 
@@ -457,8 +457,8 @@ def run_sustained_window(
         last_observed = now
         for task_id, payload in completed.items():
             submitted_at, slot = pending.pop(task_id)
-            result.submit_latencies.append(now - submitted_at)
-            result.success_counts.append(success_for(payload))
+            result.record_latency(now - submitted_at)
+            result.record_success(success_for(payload))
             result.completed_submits += 1
             free_slots.append(slot)
 
@@ -554,13 +554,13 @@ def bench_store(
             )
             result.round_starts.append(t0)
             result.round_durations.append(float("inf"))
-            result.success_counts.append(success_keys)
+            result.record_success(success_keys)
             result.timed_out = True
             continue
 
         result.round_starts.append(t0)
         result.round_durations.append(elapsed)
-        result.success_counts.append(success_keys)
+        result.record_success(success_keys)
         log(
             f"  [Store] Round {r + 1}: {elapsed * 1000:.2f} ms, "
             f"success_keys={success_keys}/{in_flight * num_keys}"
@@ -739,13 +739,13 @@ def bench_lookup(
             )
             result.round_starts.append(t0)
             result.round_durations.append(float("inf"))
-            result.success_counts.append(total_found)
+            result.record_success(total_found)
             result.timed_out = True
             continue
 
         result.round_starts.append(t0)
         result.round_durations.append(elapsed)
-        result.success_counts.append(total_found)
+        result.record_success(total_found)
         log(
             f"  [Lookup] Round {r + 1}: {elapsed * 1000:.2f} ms, "
             f"found={total_found}/{in_flight * num_keys}"
@@ -822,13 +822,13 @@ def bench_load(
             )
             result.round_starts.append(t0)
             result.round_durations.append(float("inf"))
-            result.success_counts.append(total_loaded)
+            result.record_success(total_loaded)
             result.timed_out = True
             continue
 
         result.round_starts.append(t0)
         result.round_durations.append(elapsed)
-        result.success_counts.append(total_loaded)
+        result.record_success(total_loaded)
         log(
             f"  [Load] Round {r + 1}: {elapsed * 1000:.2f} ms, "
             f"loaded={total_loaded}/{in_flight * num_keys}"

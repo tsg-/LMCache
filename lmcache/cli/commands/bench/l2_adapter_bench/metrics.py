@@ -8,11 +8,33 @@ run and diff the counters by hand.
 
 **Scrape-driven, not sampled.** The runners mutate their
 :class:`BenchResult` in place as each submit completes -- see
-``run_sustained_window``, which appends to ``submit_latencies`` and
-``success_counts`` and increments ``completed_submits`` inside its
-harvest loop. So the collector here computes everything at scrape time
-from the live result. There is no background sampler thread and nothing
-is added to the submit path.
+``run_sustained_window``, which calls ``record_latency`` and
+``record_success`` and increments ``completed_submits`` inside its
+harvest loop. So the collector here reads everything at scrape time from
+the live result. There is no background sampler thread and nothing is
+added to the submit path.
+
+**Every series is O(1) per scrape.** This is a hard constraint, not an
+optimisation. The HTTP server shares the interpreter with the single
+benchmark producer thread and holds the GIL while it collects, so any
+per-scrape work that grows with the run length eventually stalls the
+thread being measured -- and it stalls it *worst* exactly during the
+long saturation runs the endpoint exists to observe. Measured before
+the fix: one scrape took ~0.5 s against a one-million-sample latency
+history. So the collector may only read counters and running totals
+(``completed_submits``, ``success_total``, ``submit_latency_total_sec``);
+it must never sort, sum, copy, or otherwise walk ``submit_latencies`` or
+``success_counts``.
+
+**Hence no live percentiles.** p50/p90/p99 cannot be had from a
+cumulative history without scanning it, and the bounded alternatives
+are all worse than nothing here: a reservoir or a sliding window adds
+per-completion work to the harvest loop, and histogram buckets need a
+latency range nobody has calibrated for this rig yet. What is exposed
+instead is ``_submit_latency_seconds_total``, which with
+``_completed_submits_total`` gives a mean -- and, under ``rate()``, a
+windowed mean. For a real distribution use the end-of-run summary
+table, which computes percentiles once, off the hot path.
 
 **What this is not.** A 1-15 s scrape interval is far too coarse to
 attribute host CPU to a specific phase of a run; that needs in-process
@@ -35,9 +57,10 @@ least 60 s: the irdma driver refreshes ``hw_counters`` asynchronously
 appends and int increments atomic. This is a CPython-specific guarantee,
 not general thread safety: on a free-threaded build it would need real
 locking. Fields are read independently, so a scrape can straddle an
-instant -- ``completed_submits`` and the percentiles may reflect times a
-few microseconds apart. Each individual counter is still nondecreasing,
-which is all ``rate()`` requires.
+instant -- ``completed_submits`` and ``submit_latency_total_sec`` may
+reflect times a few microseconds apart, which shows up as a slightly
+off mean for one scrape. Each individual counter is still
+nondecreasing, which is all ``rate()`` requires.
 """
 
 # Future
@@ -154,14 +177,17 @@ class _BenchCollector:
             ),
             labels=["operation", "phase"],
         )
-        latency = GaugeMetricFamily(
+        # Rendered as ``..._submit_latency_seconds_total``:
+        # ``CounterMetricFamily`` appends the suffix itself.
+        latency_sum = CounterMetricFamily(
             f"{_NAMESPACE}_submit_latency_seconds",
             (
-                "Observed per-submit latency percentile over the whole phase "
-                "so far. Not a sliding window: percentiles are cumulative and "
-                "flatten as the run proceeds."
+                "Cumulative observed submit-to-completion time. Divide by "
+                "completed_submits, or take rate() of both, for a mean "
+                "submit latency. There is no percentile here on purpose -- "
+                "see the module docstring."
             ),
-            labels=["operation", "phase", "quantile"],
+            labels=["operation", "phase"],
         )
         in_flight = GaugeMetricFamily(
             f"{_NAMESPACE}_in_flight_target",
@@ -175,17 +201,12 @@ class _BenchCollector:
             success_keys.add_metric(labels, float(result.total_success))
             success_bytes.add_metric(labels, float(result.total_success_bytes))
             in_flight.add_metric(labels, float(result.in_flight))
-            for quantile, value_ms in (
-                ("0.5", result.submit_latency_p50_ms),
-                ("0.9", result.submit_latency_p90_ms),
-                ("0.99", result.submit_latency_p99_ms),
-            ):
-                latency.add_metric([operation, phase, quantile], value_ms / 1000.0)
+            latency_sum.add_metric(labels, result.submit_latency_total_sec)
 
         yield submits
         yield success_keys
         yield success_bytes
-        yield latency
+        yield latency_sum
         yield in_flight
 
 

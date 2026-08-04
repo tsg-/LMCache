@@ -79,6 +79,14 @@ class BenchResult:
     success_counts: list[int] = field(default_factory=list)
     # Per-submit observed latencies in seconds (both modes).
     submit_latencies: list[float] = field(default_factory=list)
+    # Running aggregates over the two lists above, so a live observer
+    # (the --serve-metrics collector) never re-scans the whole history to
+    # read a total. Derived in __post_init__ and then maintained
+    # incrementally by :meth:`record_success` / :meth:`record_latency`;
+    # not constructor arguments, so slicing a result into a new one (see
+    # the summary's warmup strip) recomputes them correctly and for free.
+    success_total: int = field(init=False, default=0)
+    submit_latency_total_sec: float = field(init=False, default=0.0)
     # ROUNDS mode: how many entries each round contributed to
     # ``submit_latencies``. Normally ``in_flight``, but fewer for a round
     # that timed out. Lets warmup rounds be stripped exactly.
@@ -100,6 +108,49 @@ class BenchResult:
     # Lookup-specific metadata (left as defaults for store/load).
     expected_max_hit_rate: float = 0.0
     expected_hit_count: int = 0
+
+    def __post_init__(self) -> None:
+        """Seed the running aggregates from any pre-supplied lists.
+
+        Constructing a result with populated ``success_counts`` or
+        ``submit_latencies`` -- which tests do, and which the summary's
+        warmup strip does with a slice -- must leave the aggregates
+        agreeing with them. This is the one place a full scan is
+        acceptable: it happens once per result, not once per scrape.
+        """
+        self.success_total = sum(self.success_counts)
+        self.submit_latency_total_sec = math.fsum(self.submit_latencies)
+
+    # ------------------------------------------------------------------
+    # Hot-path recording
+    # ------------------------------------------------------------------
+
+    def record_success(self, keys: int) -> None:
+        """Append a success count and fold it into the running total.
+
+        Use this rather than appending to :attr:`success_counts`
+        directly, or :attr:`success_total` silently goes stale.
+
+        Args:
+            keys: Keys the adapter reported successful for one submit
+                (rounds mode: for one whole round).
+        """
+        self.success_counts.append(keys)
+        self.success_total += keys
+
+    def record_latency(self, seconds: float) -> None:
+        """Append an observed submit latency and fold it into the total.
+
+        Use this rather than appending to :attr:`submit_latencies`
+        directly, or :attr:`submit_latency_total_sec` goes stale.
+
+        Args:
+            seconds: Submit-to-observed-completion time for one submit.
+                See the class docstring for what that does and does not
+                measure.
+        """
+        self.submit_latencies.append(seconds)
+        self.submit_latency_total_sec += seconds
 
     # ------------------------------------------------------------------
     # Derived counts
@@ -131,7 +182,13 @@ class BenchResult:
 
     @property
     def total_success(self) -> int:
-        return sum(self.success_counts)
+        """Keys the adapter reported successful.
+
+        Reads the running :attr:`success_total` rather than summing
+        :attr:`success_counts`, so a live scrape costs the same at one
+        submit as at ten million.
+        """
+        return self.success_total
 
     @property
     def total_success_bytes(self) -> int:
