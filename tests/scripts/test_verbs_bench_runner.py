@@ -87,6 +87,7 @@ def test_verbs_command_binds_requested_numa_node() -> None:
         role="source",
         direction="read",
         device="mlx5_1",
+        gid_index=4,
         numa_node=1,
         iterations=4,
         bytes_per_iter=4096,
@@ -96,6 +97,7 @@ def test_verbs_command_binds_requested_numa_node() -> None:
     )
 
     assert "numactl --cpunodebind=1 --membind=1" in command
+    assert "--gid-index 4" in command
 
 
 # ---------------------------------------------------------------------------
@@ -436,7 +438,7 @@ def test_run_bench_aborts_before_launching_verbs_on_manifest_failure(
 
     call_order: list[str] = []
 
-    def fake_create_manifest(host, label, role, nic, numa_node, total_bytes):
+    def fake_create_manifest(host, label, role, nic, gid_index, numa_node, total_bytes):
         call_order.append(f"manifest:{role}")
         if role == "storage":
             raise RuntimeError("simulated storage manifest gate failure")
@@ -477,7 +479,7 @@ def test_run_bench_persists_manifest_ref_from_both_hosts(tmp_path: Path) -> None
         "storage": "/tmp/manifest_dst.json",
     }
 
-    def fake_create_manifest(host, label, role, nic, numa_node, total_bytes):
+    def fake_create_manifest(host, label, role, nic, gid_index, numa_node, total_bytes):
         return manifests[role]
 
     def fake_snapshot_nic(host, iface):
