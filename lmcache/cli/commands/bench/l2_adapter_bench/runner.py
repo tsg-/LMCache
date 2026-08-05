@@ -39,7 +39,7 @@ from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.memory_management import MemoryObj
 
 # Local
-from .data import wait_eventfd
+from .data import verify_round_trip, wait_eventfd, wait_eventfds
 from .result import BenchMode, BenchResult
 
 # Logger callable type: takes a single string and prints / logs it.
@@ -83,6 +83,7 @@ _PLACEHOLDER_LAYOUT_DESC = MemoryLayoutDesc(shapes=[], dtypes=[])
 _STORE_TIMEOUT_SEC = 120.0
 _LOOKUP_TIMEOUT_SEC = 60.0
 _LOAD_TIMEOUT_SEC = 120.0
+_MIXED_WRITE_VERIFY_SAMPLES = 3
 
 
 def _bitmap_count(bitmap: Bitmap | None) -> int:
@@ -476,6 +477,350 @@ def run_sustained_window(
         max(0.0, last_observed - refill_end) if refill_end > 0.0 else 0.0
     )
     return submit_index, len(pending)
+
+
+def run_sustained_mixed_window(
+    adapter,
+    load_result: BenchResult,
+    store_result: BenchResult,
+    read_write_ratio: tuple[int, int],
+    load_keys_for_submit: SubmitKeyProvider,
+    store_keys_for_submit: SubmitKeyProvider,
+    load_objs_for_slot: SlotObjProvider,
+    store_objs_for_slot: SlotObjProvider,
+    duration_sec: float,
+    timeout: float,
+    log: LogFn,
+) -> bool:
+    """Run a sustained read/write window under one global in-flight limit.
+
+    The deterministic issue pattern begins with a store, then contains the
+    requested number of loads and stores per cycle. Store and load task-id
+    spaces are tracked separately because adapters are allowed to reuse task
+    ids across operation types.
+
+    Args:
+        adapter: L2 adapter receiving store and load submits.
+        load_result: Result to populate for successful load payloads.
+        store_result: Result to populate for successful store payloads.
+        read_write_ratio: Requested ``(read, write)`` payload ratio.
+        load_keys_for_submit: Read-corpus keys for each load submit.
+        store_keys_for_submit: Monotonic write-prefix keys for each store submit.
+        load_objs_for_slot: Load buffers for a reusable global window slot.
+        store_objs_for_slot: Store buffers for a reusable global window slot.
+        duration_sec: Measured refill-window duration in seconds.
+        timeout: Maximum wait for a completion event in seconds.
+        log: Progress logger.
+
+    Returns:
+        ``True`` when every completion was successful and the final successful
+        payload ratio is within one percent of the requested ratio. A timeout,
+        failed store, partial load, or ratio mismatch returns ``False``.
+
+    Raises:
+        ValueError: If the duration, in-flight limit, ratio, or result modes
+            are invalid.
+    """
+    read_count, write_count = read_write_ratio
+    if duration_sec <= 0:
+        raise ValueError("duration_sec must be positive")
+    if load_result.in_flight <= 0 or store_result.in_flight <= 0:
+        raise ValueError("in_flight must be positive")
+    if load_result.in_flight != store_result.in_flight:
+        raise ValueError("mixed results must share the same in_flight limit")
+    if load_result.mode is not BenchMode.SUSTAINED:
+        raise ValueError("load_result requires BenchMode.SUSTAINED")
+    if store_result.mode is not BenchMode.SUSTAINED:
+        raise ValueError("store_result requires BenchMode.SUSTAINED")
+    if read_count <= 0 or write_count <= 0:
+        raise ValueError("read_write_ratio values must be positive")
+
+    # Start every cycle with a store. This makes the bootstrap explicit and
+    # still produces exactly READ:WRITE operations over every full cycle.
+    issue_pattern = ["Store"] + ["Load"] * read_count + ["Store"] * (write_count - 1)
+    pattern_index = 0
+    next_load_index = 0
+    next_store_index = 0
+    # (operation, task id) -> (submit timestamp, reusable global slot)
+    pending: dict[tuple[str, int], tuple[float, int]] = {}
+    free_slots = list(range(load_result.in_flight))
+    rejected = False
+    # ``fs_native`` reports a successful store when it has accepted a task,
+    # not when a later load proves the payload bytes. Keep a few source
+    # buffers and their keys for a post-window readback into the distinct
+    # load buffer pool.
+    write_samples: list[tuple[list[ObjectKey], list[MemoryObj], int]] = []
+
+    def issue(slot: int) -> None:
+        """Issue the next deterministic operation into *slot*."""
+        nonlocal next_load_index, next_store_index, pattern_index
+        operation = issue_pattern[pattern_index % len(issue_pattern)]
+        pattern_index += 1
+        submitted_at = time.perf_counter()
+        if operation == "Load":
+            task_id = adapter.submit_load_task(
+                load_keys_for_submit(next_load_index),
+                load_objs_for_slot(slot),
+            )
+            next_load_index += 1
+        else:
+            keys = store_keys_for_submit(next_store_index)
+            objects = store_objs_for_slot(slot)
+            if len(write_samples) < _MIXED_WRITE_VERIFY_SAMPLES:
+                write_samples.append((keys, objects, slot))
+            task_id = adapter.submit_store_task(
+                keys,
+                objects,
+            )
+            next_store_index += 1
+        pending[(operation, task_id)] = (submitted_at, slot)
+
+    t_start = time.perf_counter()
+    deadline = t_start + duration_sec
+    for _ in range(load_result.in_flight):
+        issue(free_slots.pop())
+
+    event_fds = {
+        "Load": adapter.get_load_event_fd(),
+        "Store": adapter.get_store_event_fd(),
+    }
+    last_observed = t_start
+    refill_end = 0.0
+
+    while pending:
+        ready_operations = wait_eventfds(event_fds, timeout=timeout)
+        if not ready_operations:
+            log(
+                "  [Mixed] TIMEOUT after "
+                f"{timeout:.0f}s with {len(pending)} submits outstanding"
+            )
+            load_result.timed_out = True
+            store_result.timed_out = True
+            rejected = True
+            break
+
+        completed: dict[tuple[str, int], Any] = {}
+        if "Store" in ready_operations:
+            for task_id, payload in adapter.pop_completed_store_tasks().items():
+                key = ("Store", task_id)
+                if key in pending:
+                    completed[key] = payload
+        if "Load" in ready_operations:
+            for operation, task_id in list(pending):
+                if operation != "Load":
+                    continue
+                bitmap = adapter.query_load_result(task_id)
+                if bitmap is not None:
+                    completed[(operation, task_id)] = bitmap
+        if not completed:
+            # A foreign completion or spurious event must not replenish a
+            # slot this window still owns.
+            continue
+
+        now = time.perf_counter()
+        last_observed = now
+        for (operation, task_id), payload in completed.items():
+            submitted_at, slot = pending.pop((operation, task_id))
+            result = load_result if operation == "Load" else store_result
+            result.record_latency(now - submitted_at)
+            result.completed_submits += 1
+            free_slots.append(slot)
+
+            if operation == "Load":
+                loaded = _bitmap_count(payload)
+                result.record_success(loaded)
+                if loaded != result.num_keys:
+                    log(
+                        f"  [Load] FAILED: loaded {loaded}/{result.num_keys} "
+                        "keys in a mixed window"
+                    )
+                    rejected = True
+            else:
+                stored = _store_success_keys(payload, result.num_keys)
+                result.record_success(stored)
+                if stored != result.num_keys:
+                    log(
+                        f"  [Store] FAILED: stored {stored}/{result.num_keys} "
+                        "keys in a mixed window"
+                    )
+                    rejected = True
+
+        if not rejected and now < deadline:
+            while free_slots and time.perf_counter() < deadline:
+                issue(free_slots.pop())
+        elif refill_end == 0.0:
+            refill_end = now
+
+    if not rejected and not pending:
+        if not verify_mixed_write_samples(
+            adapter,
+            write_samples,
+            load_objs_for_slot,
+            timeout=timeout,
+            log=log,
+        ):
+            rejected = True
+
+    window_sec = last_observed - t_start
+    drain_sec = max(0.0, last_observed - refill_end) if refill_end > 0.0 else 0.0
+    # The two operation results must use the same denominator before their
+    # per-direction goodputs can be summed.
+    for result in (load_result, store_result):
+        result.sustained_window_sec = window_sec
+        result.sustained_drain_sec = drain_sec
+
+    read_bytes = load_result.total_success_bytes
+    write_bytes = store_result.total_success_bytes
+    achieved_ratio = read_bytes / write_bytes if write_bytes else 0.0
+    target_ratio = read_count / write_count
+    within_tolerance = (
+        write_bytes > 0 and target_ratio * 0.99 <= achieved_ratio <= target_ratio * 1.01
+    )
+    all_successful = (
+        not load_result.timed_out
+        and not store_result.timed_out
+        and load_result.total_success == load_result.total_keys
+        and store_result.total_success == store_result.total_keys
+    )
+    if not within_tolerance:
+        log(
+            f"  [Mixed] FAILED: achieved read:write ratio "
+            f"{achieved_ratio:.4f}, expected {read_count}:{write_count} "
+            "(within 1%)"
+        )
+    return not rejected and all_successful and within_tolerance
+
+
+def verify_mixed_write_samples(
+    adapter,
+    samples: list[tuple[list[ObjectKey], list[MemoryObj], int]],
+    load_objs_for_slot: SlotObjProvider,
+    timeout: float,
+    log: LogFn,
+) -> bool:
+    """Read back sampled mixed-window stores and compare their payload bytes.
+
+    Args:
+        adapter: L2 adapter that received the mixed-window stores.
+        samples: ``(keys, expected_objects, slot)`` tuples captured before
+            each sampled store was issued.
+        load_objs_for_slot: Supplies the independent load buffers for a slot.
+        timeout: Maximum seconds to wait for each sample completion.
+        log: Progress logger.
+
+    Returns:
+        ``True`` only when each sample loads all keys and every loaded buffer
+        equals the corresponding source buffer.
+    """
+    for keys, expected_objects, slot in samples:
+        loaded_objects = load_objs_for_slot(slot)
+        task_id = adapter.submit_load_task(keys, loaded_objects)
+        if not wait_eventfd(adapter.get_load_event_fd(), timeout=timeout):
+            log("  [Mixed Verify] TIMEOUT waiting for write-prefix readback")
+            return False
+        bitmap = adapter.query_load_result(task_id)
+        if bitmap is None or _bitmap_count(bitmap) != len(keys):
+            log(
+                "  [Mixed Verify] FAILED: write-prefix sample did not "
+                f"load all {len(keys)} keys"
+            )
+            return False
+        if not verify_round_trip(keys, expected_objects, loaded_objects, log):
+            log("  [Mixed Verify] FAILED: write-prefix payload mismatch")
+            return False
+    return True
+
+
+def bench_mixed_sustained(
+    adapter,
+    in_flight: int,
+    num_keys: int,
+    data_size: int,
+    duration_sec: float,
+    read_write_ratio: tuple[int, int],
+    load_keys_for_submit: SubmitKeyProvider,
+    store_keys_for_submit: SubmitKeyProvider,
+    load_objs_for_slot: SlotObjProvider,
+    store_objs_for_slot: SlotObjProvider,
+    log: LogFn,
+    on_result: ResultHook = _discard_result_hook,
+) -> tuple[BenchResult, BenchResult, bool]:
+    """Benchmark a sustained read/write payload mix.
+
+    The benchmark holds one global ``in_flight`` window across both
+    operations. It starts with a store and then follows the requested
+    deterministic read/write issue ratio. Loads and stores receive separate
+    results but share the same measured wall-clock denominator.
+
+    Args:
+        adapter: L2 adapter under test.
+        in_flight: Total outstanding submits across both directions.
+        num_keys: Keys per submit.
+        data_size: Payload bytes per key.
+        duration_sec: Measured window length in seconds.
+        read_write_ratio: Requested ``(read, write)`` payload ratio.
+        load_keys_for_submit: Read-corpus keys for each load submit.
+        store_keys_for_submit: Monotonic write-prefix keys for each store.
+        load_objs_for_slot: Load buffers for a global window slot.
+        store_objs_for_slot: Store buffers for a global window slot.
+        log: Progress logger.
+        on_result: Receives each measured direction before submissions begin.
+
+    Returns:
+        ``(load_result, store_result, accepted)``. ``accepted`` is false on
+        a failed store, missed load key, timeout, or achieved-ratio mismatch.
+    """
+    load_result = BenchResult(
+        operation="Load",
+        in_flight=in_flight,
+        num_keys=num_keys,
+        data_size_bytes=data_size,
+        mode=BenchMode.SUSTAINED,
+    )
+    store_result = BenchResult(
+        operation="Store",
+        in_flight=in_flight,
+        num_keys=num_keys,
+        data_size_bytes=data_size,
+        mode=BenchMode.SUSTAINED,
+    )
+    on_result(load_result)
+    on_result(store_result)
+
+    read_count, write_count = read_write_ratio
+    log(
+        "[Mixed] Sustained window for "
+        f"{duration_sec:.1f}s at {in_flight} total in flight "
+        f"(requested read:write {read_count}:{write_count})..."
+    )
+    accepted = run_sustained_mixed_window(
+        adapter=adapter,
+        load_result=load_result,
+        store_result=store_result,
+        read_write_ratio=read_write_ratio,
+        load_keys_for_submit=load_keys_for_submit,
+        store_keys_for_submit=store_keys_for_submit,
+        load_objs_for_slot=load_objs_for_slot,
+        store_objs_for_slot=store_objs_for_slot,
+        duration_sec=duration_sec,
+        timeout=max(_LOAD_TIMEOUT_SEC, _STORE_TIMEOUT_SEC),
+        log=log,
+    )
+    _log_sustained_summary(load_result, log)
+    _log_sustained_summary(store_result, log)
+    if store_result.total_success_bytes:
+        achieved_ratio = (
+            load_result.total_success_bytes / store_result.total_success_bytes
+        )
+        log(
+            f"  [Mixed] successful read:write payload ratio "
+            f"{achieved_ratio:.4f} "
+            "("
+            f"{load_result.total_success_bytes} B:"
+            f"{store_result.total_success_bytes} B"
+            ")"
+        )
+    return load_result, store_result, accepted
 
 
 # ---------------------------------------------------------------------------

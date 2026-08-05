@@ -231,6 +231,25 @@ def test_sustained_totals_come_from_completed_submits() -> None:
     assert result.aggregate_ops_per_sec == pytest.approx(40.0)
 
 
+def test_sustained_timeout_suppresses_partial_window_throughput() -> None:
+    """A pre-stall interval must not publish a rate for a failed window."""
+    result = BenchResult(
+        operation="Load",
+        in_flight=2,
+        num_keys=4,
+        data_size_bytes=_MB,
+        mode=BenchMode.SUSTAINED,
+        success_counts=[4],
+        completed_submits=1,
+        sustained_window_sec=0.01,
+        timed_out=True,
+    )
+
+    assert result.measured_window_sec == 0.0
+    assert result.aggregate_throughput_mbps == 0.0
+    assert result.success_throughput_mbps == 0.0
+
+
 def test_success_throughput_excludes_missed_keys() -> None:
     """An all-miss load must not report the requested rate as throughput.
 

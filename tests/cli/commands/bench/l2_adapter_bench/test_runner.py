@@ -13,6 +13,7 @@ import time
 
 # Third Party
 import pytest
+import torch
 
 # First Party
 from lmcache.cli.commands.bench.l2_adapter_bench.result import (
@@ -24,10 +25,17 @@ from lmcache.cli.commands.bench.l2_adapter_bench.runner import (
     StoreFreshnessUnknownError,
     WarmupNotDrainedError,
     _record_round_latencies,
+    bench_mixed_sustained,
     _require_drained_warmup,
     count_existing_keys,
     require_empty_store_namespace,
+    run_sustained_mixed_window,
     run_sustained_window,
+)
+from lmcache.cli.commands.bench.l2_adapter_bench.data import wait_eventfds
+from lmcache.cli.commands.bench.l2_adapter_bench.metrics import (
+    PHASE_MEASURED,
+    BenchMetricsState,
 )
 from lmcache.v1.platform import create_event_notifier
 
@@ -434,6 +442,373 @@ def test_foreign_completions_are_ignored() -> None:
     assert result.completed_submits > 0
     assert result.completed_submits == len(result.submit_latencies)
     assert result.completed_submits <= adapter.submitted
+
+
+# ---------------------------------------------------------------------------
+# Mixed sustained window
+# ---------------------------------------------------------------------------
+
+
+class _FakeStoreResult:
+    """Minimal store completion with the interface the runner consumes."""
+
+    def __init__(self, successful: bool) -> None:
+        self._successful = successful
+
+    def is_successful(self) -> bool:
+        return self._successful
+
+
+class _FakeBitmap:
+    """Minimal load bitmap with the interface the runner consumes."""
+
+    def __init__(self, success_keys: int) -> None:
+        self._success_keys = success_keys
+
+    def popcount(self) -> int:
+        return self._success_keys
+
+
+class _MixedFakeAdapter:
+    """Asynchronously completes store and load tasks on separate eventfds."""
+
+    def __init__(
+        self,
+        *,
+        service_sec: float = 0.002,
+        store_successful: bool = True,
+        load_success_keys: int | None = None,
+        stall_operation: str | None = None,
+        corrupt_load_payload: bool = False,
+    ) -> None:
+        self._store_notifier = create_event_notifier()
+        self._load_notifier = create_event_notifier()
+        self._service_sec = service_sec
+        self._store_successful = store_successful
+        self._load_success_keys = load_success_keys
+        self._stall_operation = stall_operation
+        self._corrupt_load_payload = corrupt_load_payload
+        self._lock = threading.Lock()
+        self._next_ids = {"Store": 0, "Load": 0}
+        self._store_done: dict[int, _FakeStoreResult] = {}
+        self._load_done: dict[int, _FakeBitmap] = {}
+        self._stored_payloads: dict[tuple[int, ...], list[torch.Tensor]] = {}
+        self._threads: list[threading.Thread] = []
+        self._outstanding = 0
+        self.max_outstanding = 0
+        self.submissions: list[tuple[str, int]] = []
+        self.completion_order: list[str] = []
+
+    def get_store_event_fd(self) -> int:
+        return self._store_notifier.fileno()
+
+    def get_load_event_fd(self) -> int:
+        return self._load_notifier.fileno()
+
+    def submit_store_task(self, keys: list[Any], objects: list[Any]) -> int:
+        return self._submit("Store", keys, objects)
+
+    def submit_load_task(self, keys: list[Any], objects: list[Any]) -> int:
+        return self._submit("Load", keys, objects)
+
+    def _submit(self, operation: str, keys: list[Any], objects: list[Any]) -> int:
+        with self._lock:
+            task_id = self._next_ids[operation]
+            self._next_ids[operation] += 1
+            self._outstanding += 1
+            self.max_outstanding = max(self.max_outstanding, self._outstanding)
+            self.submissions.append((operation, task_id))
+        if operation == self._stall_operation:
+            return task_id
+        thread = threading.Thread(
+            target=self._complete,
+            args=(operation, task_id, keys, objects),
+            daemon=True,
+        )
+        self._threads.append(thread)
+        thread.start()
+        return task_id
+
+    def _complete(
+        self,
+        operation: str,
+        task_id: int,
+        keys: list[Any],
+        objects: list[Any],
+    ) -> None:
+        # Stores are deliberately slower, which forces cross-operation
+        # completion reordering and exercises the two-FD poll path.
+        time.sleep(self._service_sec * (2 if operation == "Store" else 1))
+        with self._lock:
+            if operation == "Store":
+                if all(hasattr(obj, "raw_data") for obj in objects):
+                    self._stored_payloads[tuple(map(id, keys))] = [
+                        obj.raw_data.clone() for obj in objects
+                    ]
+                self._store_done[task_id] = _FakeStoreResult(self._store_successful)
+            else:
+                stored = self._stored_payloads.get(tuple(map(id, keys)))
+                if stored is not None:
+                    for obj, payload in zip(objects, stored, strict=True):
+                        obj.raw_data.copy_(payload)
+                if self._corrupt_load_payload:
+                    for obj in objects:
+                        obj.raw_data.fill_(0xA5)
+                loaded = (
+                    len(keys)
+                    if self._load_success_keys is None
+                    else self._load_success_keys
+                )
+                self._load_done[task_id] = _FakeBitmap(loaded)
+            self._outstanding -= 1
+            self.completion_order.append(operation)
+        notifier = self._store_notifier if operation == "Store" else self._load_notifier
+        notifier.notify()
+
+    def pop_completed_store_tasks(self) -> dict[int, _FakeStoreResult]:
+        with self._lock:
+            completed = self._store_done
+            self._store_done = {}
+        return completed
+
+    def query_load_result(self, task_id: int) -> _FakeBitmap | None:
+        with self._lock:
+            return self._load_done.pop(task_id, None)
+
+    def close(self) -> None:
+        for thread in self._threads:
+            thread.join(timeout=5.0)
+        self._store_notifier.close()
+        self._load_notifier.close()
+
+
+def _mixed_result(operation: str, in_flight: int = 6, num_keys: int = 1) -> BenchResult:
+    return BenchResult(
+        operation=operation,
+        in_flight=in_flight,
+        num_keys=num_keys,
+        data_size_bytes=_MB,
+        mode=BenchMode.SUSTAINED,
+    )
+
+
+def _run_mixed(
+    adapter: _MixedFakeAdapter,
+    *,
+    ratio: tuple[int, int] = (5, 1),
+    in_flight: int = 6,
+    num_keys: int = 1,
+    duration_sec: float = 0.2,
+    timeout: float = 1.0,
+) -> tuple[BenchResult, BenchResult, bool]:
+    load_result = _mixed_result("Load", in_flight, num_keys)
+    store_result = _mixed_result("Store", in_flight, num_keys)
+    store_objects = [
+        [_MixedMemoryObject(slot + key) for key in range(num_keys)]
+        for slot in range(in_flight)
+    ]
+    load_objects = [
+        [_MixedMemoryObject(0xA5) for _ in range(num_keys)] for _ in range(in_flight)
+    ]
+    accepted = run_sustained_mixed_window(
+        adapter=adapter,
+        load_result=load_result,
+        store_result=store_result,
+        read_write_ratio=ratio,
+        load_keys_for_submit=lambda _index: [object()] * num_keys,
+        store_keys_for_submit=lambda _index: [object()] * num_keys,
+        load_objs_for_slot=lambda slot: load_objects[slot],
+        store_objs_for_slot=lambda slot: store_objects[slot],
+        duration_sec=duration_sec,
+        timeout=timeout,
+        log=lambda _message: None,
+    )
+    return load_result, store_result, accepted
+
+
+class _MixedMemoryObject:
+    """Tensor-backed object sufficient for mixed sample verification tests."""
+
+    def __init__(self, fill: int) -> None:
+        self.raw_data = torch.full((8,), fill, dtype=torch.uint8)
+
+    def get_physical_size(self) -> int:
+        return self.raw_data.numel()
+
+
+def test_wait_eventfds_returns_every_ready_operation() -> None:
+    store_notifier = create_event_notifier()
+    load_notifier = create_event_notifier()
+    try:
+        store_notifier.notify()
+        load_notifier.notify()
+
+        assert wait_eventfds(
+            {
+                "Store": store_notifier.fileno(),
+                "Load": load_notifier.fileno(),
+            },
+            timeout=0.1,
+        ) == {"Store", "Load"}
+    finally:
+        store_notifier.close()
+        load_notifier.close()
+
+
+def test_wait_eventfds_rejects_duplicate_eventfds() -> None:
+    """One consumed notification cannot safely identify two operations."""
+    notifier = create_event_notifier()
+    try:
+        with pytest.raises(ValueError, match="distinct completion eventfd"):
+            wait_eventfds(
+                {"Store": notifier.fileno(), "Load": notifier.fileno()},
+                timeout=0.1,
+            )
+    finally:
+        notifier.close()
+
+
+@pytest.mark.parametrize("ratio", [(5, 1), (1, 1)])
+def test_mixed_window_holds_one_global_limit_and_hits_requested_ratio(
+    ratio: tuple[int, int],
+) -> None:
+    adapter = _MixedFakeAdapter()
+    try:
+        load_result, store_result, accepted = _run_mixed(
+            adapter, ratio=ratio, duration_sec=0.5
+        )
+    finally:
+        adapter.close()
+
+    assert accepted
+    assert adapter.max_outstanding == 6
+    assert adapter.completion_order[0] == "Load"
+    assert load_result.total_success == load_result.total_keys
+    assert store_result.total_success == store_result.total_keys
+    assert load_result.sustained_window_sec == store_result.sustained_window_sec
+    assert load_result.sustained_drain_sec == store_result.sustained_drain_sec
+    assert load_result.total_success / store_result.total_success == pytest.approx(
+        ratio[0] / ratio[1], rel=0.01
+    )
+
+
+def test_mixed_window_accepts_overlapping_task_ids() -> None:
+    """Task id zero is valid concurrently for one store and one load."""
+    adapter = _MixedFakeAdapter()
+    try:
+        load_result, store_result, accepted = _run_mixed(adapter, duration_sec=0.5)
+    finally:
+        adapter.close()
+
+    assert accepted
+    assert ("Store", 0) in adapter.submissions
+    assert ("Load", 0) in adapter.submissions
+    assert load_result.completed_submits > 0
+    assert store_result.completed_submits > 0
+
+
+def test_mixed_window_rejects_a_failed_store() -> None:
+    adapter = _MixedFakeAdapter(store_successful=False)
+    try:
+        _load_result, store_result, accepted = _run_mixed(adapter)
+    finally:
+        adapter.close()
+
+    assert not accepted
+    assert store_result.total_success == 0
+
+
+def test_mixed_window_rejects_a_partial_load() -> None:
+    adapter = _MixedFakeAdapter(load_success_keys=1)
+    try:
+        load_result, _store_result, accepted = _run_mixed(adapter, num_keys=2)
+    finally:
+        adapter.close()
+
+    assert not accepted
+    assert load_result.total_success < load_result.total_keys
+
+
+def test_mixed_window_rejects_a_corrupt_write_readback() -> None:
+    """A full completion bitmap does not substitute for byte integrity."""
+    adapter = _MixedFakeAdapter(corrupt_load_payload=True)
+    store_objects = [_MixedMemoryObject(0x33)]
+    load_objects = [_MixedMemoryObject(0xA5)]
+    try:
+        load_result = _mixed_result("Load")
+        store_result = _mixed_result("Store")
+        accepted = run_sustained_mixed_window(
+            adapter=adapter,
+            load_result=load_result,
+            store_result=store_result,
+            read_write_ratio=(5, 1),
+            load_keys_for_submit=lambda _index: [object()],
+            store_keys_for_submit=lambda _index: [object()],
+            load_objs_for_slot=lambda _slot: load_objects,
+            store_objs_for_slot=lambda _slot: store_objects,
+            duration_sec=0.1,
+            timeout=1.0,
+            log=lambda _message: None,
+        )
+    finally:
+        adapter.close()
+
+    assert load_result.total_success == load_result.total_keys
+    assert store_result.total_success == store_result.total_keys
+    assert not accepted
+
+
+@pytest.mark.parametrize("stalled_operation", ["Store", "Load"])
+def test_mixed_window_rejects_a_timeout_from_either_direction(
+    stalled_operation: str,
+) -> None:
+    adapter = _MixedFakeAdapter(stall_operation=stalled_operation)
+    try:
+        load_result, store_result, accepted = _run_mixed(
+            adapter,
+            duration_sec=0.03,
+            timeout=0.03,
+        )
+    finally:
+        adapter.close()
+
+    assert not accepted
+    assert load_result.timed_out
+    assert store_result.timed_out
+
+
+def test_mixed_window_registers_both_measured_operation_series() -> None:
+    adapter = _MixedFakeAdapter()
+    state = BenchMetricsState()
+    store_objects = [[_MixedMemoryObject(slot)] for slot in range(6)]
+    load_objects = [[_MixedMemoryObject(0xA5)] for _ in range(6)]
+    try:
+        load_result, store_result, accepted = bench_mixed_sustained(
+            adapter,
+            in_flight=6,
+            num_keys=1,
+            data_size=_MB,
+            duration_sec=0.5,
+            read_write_ratio=(5, 1),
+            load_keys_for_submit=lambda _index: [object()],
+            store_keys_for_submit=lambda _index: [object()],
+            load_objs_for_slot=lambda slot: load_objects[slot],
+            store_objs_for_slot=lambda slot: store_objects[slot],
+            log=lambda _message: None,
+            on_result=lambda result: state.register(
+                result.operation, result, PHASE_MEASURED
+            ),
+        )
+    finally:
+        adapter.close()
+
+    assert accepted
+    assert {key for key, _result in state.snapshot()} == {
+        ("Load", PHASE_MEASURED),
+        ("Store", PHASE_MEASURED),
+    }
+    assert load_result.completed_submits > 0
+    assert store_result.completed_submits > 0
 
 
 # ---------------------------------------------------------------------------

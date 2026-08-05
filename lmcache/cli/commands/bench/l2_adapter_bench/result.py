@@ -275,7 +275,11 @@ class BenchResult:
         the sum meaningless).
         """
         if self.mode is BenchMode.SUSTAINED:
-            return self.sustained_window_sec
+            # A sustained timeout may leave a finite interval from the
+            # first submit to the last completion before the stall. Dividing
+            # partial payload by that shortened interval would advertise a
+            # misleading high throughput for a failed window.
+            return 0.0 if self.timed_out else self.sustained_window_sec
         total = math.fsum(self.round_durations)
         return total if math.isfinite(total) else 0.0
 

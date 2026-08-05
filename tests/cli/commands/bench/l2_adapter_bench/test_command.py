@@ -12,6 +12,7 @@ import pytest
 
 # First Party
 from lmcache.cli.commands.bench.l2_adapter_bench.command import (
+    _parse_read_write_ratio,
     _strip_warmup,
     add_l2_arguments,
     run_l2_adapter_bench,
@@ -47,6 +48,8 @@ def test_rounds_mode_is_the_default() -> None:
     # Empty prefix keeps the historical key universe addressable, so
     # existing rounds-mode corpora survive this flag being added.
     assert args.key_prefix == ""
+    assert args.write_key_prefix == ""
+    assert args.read_write_ratio is None
 
 
 def test_duration_sec_and_warmup_sec_parse() -> None:
@@ -54,6 +57,24 @@ def test_duration_sec_and_warmup_sec_parse() -> None:
 
     assert args.duration_sec == 30.0
     assert args.warmup_sec == 5.0
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        pytest.param("5:1", (5, 1), id="five-to-one"),
+        pytest.param("1:1", (1, 1), id="one-to-one"),
+        pytest.param("3:2", (3, 2), id="non-integer-ratio"),
+    ],
+)
+def test_read_write_ratio_parser(value: str, expected: tuple[int, int]) -> None:
+    assert _parse_read_write_ratio(value) == expected
+
+
+@pytest.mark.parametrize("value", ["", "1", "1:", ":1", "1:2:3", "0:1", "1:0"])
+def test_read_write_ratio_parser_rejects_invalid_values(value: str) -> None:
+    with pytest.raises(argparse.ArgumentTypeError):
+        _parse_read_write_ratio(value)
 
 
 # ---------------------------------------------------------------------------
@@ -84,6 +105,75 @@ def test_duration_sec_and_warmup_sec_parse() -> None:
     ],
 )
 def test_invalid_combinations_exit_2(argv: list[str]) -> None:
+    args = _parse(*argv)
+
+    with pytest.raises(SystemExit) as exc:
+        run_l2_adapter_bench(MagicMock(), args)
+
+    assert exc.value.code == 2
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        pytest.param(["--read-write-ratio", "5:1"], id="no-duration"),
+        pytest.param(
+            [
+                "--duration-sec",
+                "5",
+                "--read-write-ratio",
+                "5:1",
+                "--only",
+                "load",
+            ],
+            id="with-only",
+        ),
+        pytest.param(
+            ["--duration-sec", "5", "--read-write-ratio", "5:1"],
+            id="no-read-prefix",
+        ),
+        pytest.param(
+            [
+                "--duration-sec",
+                "5",
+                "--read-write-ratio",
+                "5:1",
+                "--key-prefix",
+                "reads",
+            ],
+            id="no-write-prefix",
+        ),
+        pytest.param(
+            [
+                "--duration-sec",
+                "5",
+                "--read-write-ratio",
+                "5:1",
+                "--key-prefix",
+                "shared",
+                "--write-key-prefix",
+                "shared",
+            ],
+            id="matching-prefixes",
+        ),
+        pytest.param(
+            [
+                "--duration-sec",
+                "5",
+                "--warmup-sec",
+                "1",
+                "--read-write-ratio",
+                "5:1",
+                "--key-prefix",
+                "reads",
+                "--write-key-prefix",
+                "writes",
+            ],
+            id="warmup-writes",
+        ),
+    ],
+)
+def test_mixed_mode_invalid_combinations_exit_2(argv: list[str]) -> None:
     args = _parse(*argv)
 
     with pytest.raises(SystemExit) as exc:
@@ -371,6 +461,94 @@ def test_store_then_load_still_shares_the_keyspace(
     # All 4 keys hit: the load found what the store wrote.
     assert "Load" in out
     assert "0/4" not in out
+
+
+def test_mixed_sustained_run_uses_distinct_read_and_write_prefixes(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Mixed mode loads a prepopulated corpus and writes another namespace."""
+    prepopulate = _parse(
+        "--only",
+        "store",
+        "--key-prefix",
+        "mixed-read",
+        "--num-keys",
+        "1",
+        "--in-flight",
+        "6",
+        "--data-size-kb",
+        "4",
+        "--rounds",
+        "2",
+        adapter_json=_fs_adapter_json(tmp_path),
+    )
+    run_l2_adapter_bench(MagicMock(), prepopulate)
+    capsys.readouterr()
+
+    args = _parse(
+        "--duration-sec",
+        "0.3",
+        "--read-write-ratio",
+        "5:1",
+        "--key-prefix",
+        "mixed-read",
+        "--write-key-prefix",
+        "mixed-write",
+        "--num-keys",
+        "1",
+        "--in-flight",
+        "6",
+        "--data-size-kb",
+        "4",
+        "--rounds",
+        "2",
+        "--warmup-rounds",
+        "0",
+        adapter_json=_fs_adapter_json(tmp_path),
+    )
+
+    run_l2_adapter_bench(MagicMock(), args)
+
+    out = capsys.readouterr().out
+    ratio_line = next(
+        line
+        for line in out.splitlines()
+        if "successful read:write payload ratio" in line
+    )
+    achieved_ratio = float(ratio_line.split("ratio ")[1].split()[0])
+    assert achieved_ratio == pytest.approx(5.0, rel=0.01)
+
+
+def test_mixed_sustained_rejects_an_existing_write_prefix(tmp_path: Path) -> None:
+    """The mixed freshness probe must check stores, not the read corpus."""
+    run_l2_adapter_bench(MagicMock(), _store_args(tmp_path, prefix="mixed-write"))
+
+    args = _parse(
+        "--duration-sec",
+        "0.2",
+        "--read-write-ratio",
+        "5:1",
+        "--key-prefix",
+        "mixed-read",
+        "--write-key-prefix",
+        "mixed-write",
+        "--num-keys",
+        "1",
+        "--in-flight",
+        "2",
+        "--data-size-kb",
+        "4",
+        "--rounds",
+        "1",
+        "--warmup-rounds",
+        "0",
+        adapter_json=_fs_adapter_json(tmp_path),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        run_l2_adapter_bench(MagicMock(), args)
+
+    assert exc.value.code == 2
 
 
 # ---------------------------------------------------------------------------

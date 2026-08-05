@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 # Standard
+from collections.abc import Mapping
 import select
 
 # Third Party
@@ -180,6 +181,42 @@ def wait_eventfd(efd: int, timeout: float = 60.0) -> bool:
         consume_fd(efd)
         return True
     return False
+
+
+def wait_eventfds(event_fds: Mapping[str, int], timeout: float = 60.0) -> set[str]:
+    """Wait for one or more named eventfds and return the ready names.
+
+    Each eventfd is consumed once before returning, matching
+    :func:`wait_eventfd`. Adapters require their store and load completion
+    fds to be distinct, so a mixed benchmark can use the returned names to
+    harvest only the direction that actually completed.
+
+    Args:
+        event_fds: Mapping from an operation name to its completion eventfd.
+        timeout: Maximum time to wait in seconds.
+
+    Returns:
+        Names whose eventfds were signalled, or an empty set on timeout.
+
+    Raises:
+        ValueError: If two operation names share one eventfd. A notification
+            is consumed once, so the caller could not tell which operation
+            completed.
+    """
+    if len(set(event_fds.values())) != len(event_fds):
+        raise ValueError("each operation must have a distinct completion eventfd")
+
+    poller = select.poll()
+    names_by_fd: dict[int, set[str]] = {}
+    for name, efd in event_fds.items():
+        poller.register(efd, select.POLLIN)
+        names_by_fd.setdefault(efd, set()).add(name)
+
+    ready_names: set[str] = set()
+    for efd, _event in poller.poll(timeout * 1000):
+        consume_fd(efd)
+        ready_names.update(names_by_fd.get(efd, set()))
+    return ready_names
 
 
 def verify_round_trip(keys, store_objects, load_objects, log) -> bool:

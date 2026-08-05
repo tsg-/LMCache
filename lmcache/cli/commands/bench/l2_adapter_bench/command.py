@@ -25,6 +25,26 @@ def _noop_shutdown() -> None:
     """Stand-in for the metrics shutdown when the endpoint is off."""
 
 
+def _parse_read_write_ratio(value: str) -> tuple[int, int]:
+    """Parse a positive ``READ:WRITE`` ratio supplied on the command line."""
+    parts = value.split(":")
+    if len(parts) != 2:
+        raise argparse.ArgumentTypeError(
+            "--read-write-ratio must use positive READ:WRITE integers, e.g. 5:1"
+        )
+    try:
+        read_count, write_count = (int(part) for part in parts)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(
+            "--read-write-ratio must use positive READ:WRITE integers, e.g. 5:1"
+        ) from e
+    if read_count <= 0 or write_count <= 0:
+        raise argparse.ArgumentTypeError(
+            "--read-write-ratio values must both be positive, e.g. 5:1"
+        )
+    return read_count, write_count
+
+
 # ---------------------------------------------------------------------------
 # Parser registration
 # ---------------------------------------------------------------------------
@@ -106,6 +126,29 @@ def add_l2_arguments(parser: argparse.ArgumentParser) -> None:
             "need a DISTINCT prefix. Default: empty, which addresses the "
             "historical unprefixed namespace and is usable for load and "
             "lookup runs without further flags."
+        ),
+    )
+    parser.add_argument(
+        "--write-key-prefix",
+        type=str,
+        default="",
+        help=(
+            "Distinct key namespace for stores in --read-write-ratio mode. "
+            "The read corpus stays under --key-prefix while mixed stores "
+            "advance monotonically in this namespace. Required and must "
+            "differ from --key-prefix when mixed mode is selected."
+        ),
+    )
+    parser.add_argument(
+        "--read-write-ratio",
+        type=_parse_read_write_ratio,
+        default=None,
+        metavar="READ:WRITE",
+        help=(
+            "Run one sustained mixed window with this requested positive "
+            "payload ratio, e.g. 5:1. Requires --duration-sec, a "
+            "prepopulated --key-prefix, and a distinct --write-key-prefix. "
+            "Cannot be combined with --only."
         ),
     )
     parser.add_argument(
@@ -288,6 +331,7 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
         bench_load,
         bench_load_sustained,
         bench_lookup,
+        bench_mixed_sustained,
         bench_store,
         bench_store_sustained,
         StoreFreshnessUnknownError,
@@ -339,6 +383,8 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
     duration_sec = float(getattr(args, "duration_sec", 0.0))
     warmup_sec = float(getattr(args, "warmup_sec", 0.0))
     sustained = duration_sec > 0
+    read_write_ratio = getattr(args, "read_write_ratio", None)
+    mixed = read_write_ratio is not None
     if duration_sec < 0:
         print("Error: --duration-sec must not be negative", file=sys.stderr)
         sys.exit(2)
@@ -349,6 +395,46 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
         print(
             "Error: --warmup-sec applies only to sustained mode; pass "
             "--duration-sec too, or use --warmup-rounds for rounds mode.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if mixed and not sustained:
+        print(
+            "Error: --read-write-ratio requires --duration-sec",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if mixed and args.only is not None:
+        print(
+            "Error: --read-write-ratio cannot be combined with --only",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if mixed and warmup_sec > 0:
+        print(
+            "Error: --warmup-sec is not supported with --read-write-ratio; "
+            "it would issue unaccounted stores",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if mixed and not args.key_prefix:
+        print(
+            "Error: --read-write-ratio requires --key-prefix for the "
+            "prepopulated read corpus",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    write_key_prefix = str(getattr(args, "write_key_prefix", ""))
+    if mixed and not write_key_prefix:
+        print(
+            "Error: --read-write-ratio requires --write-key-prefix for "
+            "monotonic stores",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if mixed and args.key_prefix == write_key_prefix:
+        print(
+            "Error: --write-key-prefix must differ from --key-prefix in mixed mode",
             file=sys.stderr,
         )
         sys.exit(2)
@@ -412,15 +498,18 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
         )
         sys.exit(2)
 
-    # Keys per round (one in-flight wave) and total measured keys per
-    # operation. Warmup rounds extend the consumed idx range.
+    # Keys per round (one in-flight wave) and total keys available to a
+    # wrapping sustained load. Mixed mode has no round warmup: its
+    # --warmup-rounds value is ignored so the parser default cannot make a
+    # corpus prepopulated with --warmup-rounds 0 miss after its first pass.
     keys_per_round = in_flight * num_keys
-    total_run_keys = total_rounds * keys_per_round  # warmup + measured
+    total_run_keys = (rounds if mixed else total_rounds) * keys_per_round
     # ``--key-prefix`` becomes part of the ObjectKey model_name, so it
     # partitions the key universe. Empty prefix keeps the historical
     # "bench-model" name, so existing rounds-mode corpora stay addressable.
     key_prefix = args.key_prefix
     key_namespace = f"{key_prefix}-bench-model" if key_prefix else "bench-model"
+    write_key_namespace = f"{write_key_prefix}-bench-model" if mixed else key_namespace
 
     def log(msg: str) -> None:
         # Per-round progress log; suppressed by --quiet.
@@ -708,7 +797,7 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
         """
         return make_object_keys(
             num_keys,
-            model_name=key_namespace,
+            model_name=write_key_namespace,
             key_offset=submit_index * num_keys,
         )
 
@@ -717,7 +806,8 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
 
         Wraps within ``total_run_keys`` -- the idx range a prepopulating
         store pass at matching geometry actually covered -- so reads hit
-        rather than measuring the miss path.
+        rather than measuring the miss path. Mixed mode intentionally uses
+        measured rounds only because it has no rounds warmup.
         """
         slot_idx = submit_index % total_submit_slots
         return make_object_keys(
@@ -788,8 +878,36 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
                 _load_objs(0)
             profiler.start(log)
 
+        if mixed:
+            # Stores use their own prefix. The existing first-wave guard is
+            # enough for this benchmark's fresh, driver-supplied namespace;
+            # capacity and lifecycle policy remain outside the harness.
+            require_empty_store_namespace(
+                adapter,
+                keys=_sustained_store_keys(0),
+                namespace=write_key_namespace,
+                log=log,
+            )
+            load_result, store_result, accepted = bench_mixed_sustained(
+                adapter,
+                in_flight=in_flight,
+                num_keys=num_keys,
+                data_size=data_size,
+                duration_sec=duration_sec,
+                read_write_ratio=read_write_ratio,
+                load_keys_for_submit=_sustained_load_keys,
+                store_keys_for_submit=_sustained_store_keys,
+                load_objs_for_slot=_sustained_load_objs,
+                store_objs_for_slot=_sustained_store_objs,
+                log=log,
+                on_result=_publish_measured,
+            )
+            results.extend([load_result, store_result])
+            failed = not accepted
+            log("")
+
         # ---- Store ----
-        if args.only is None or args.only == "store":
+        if not mixed and (args.only is None or args.only == "store"):
             # Probe before writing anything: the first wave's keys are
             # enough to tell whether this namespace was already used at
             # this geometry. A hit means the run would measure existence
@@ -839,7 +957,7 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
         # into a sustained run would put two incomparable measurement
         # modes in one report. ``--only lookup`` with --duration-sec is
         # rejected up front.
-        if not sustained and (args.only is None or args.only == "lookup"):
+        if not mixed and not sustained and (args.only is None or args.only == "lookup"):
             log(f"[Lookup] Running {warmup} warmup + {rounds} measurement rounds...")
             all_lookup = bench_lookup(
                 adapter,
@@ -856,7 +974,7 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
             log("")
 
         # ---- Load ----
-        if args.only is None or args.only == "load":
+        if not mixed and (args.only is None or args.only == "load"):
             if sustained:
                 results.append(
                     bench_load_sustained(
@@ -1039,6 +1157,19 @@ def _emit_l2_adapter_metrics(
             "Warmup window (s)",
             round(float(getattr(args, "warmup_sec", 0.0)), 3),
         )
+        read_write_ratio = getattr(args, "read_write_ratio", None)
+        if read_write_ratio is not None:
+            read_count, write_count = read_write_ratio
+            cfg_section.add(
+                "read_write_ratio_requested",
+                "Requested read:write",
+                f"{read_count}:{write_count}",
+            )
+            cfg_section.add(
+                "write_key_prefix",
+                "Write key prefix",
+                getattr(args, "write_key_prefix", ""),
+            )
     else:
         cfg_section.add("mode", "Measurement mode", "rounds")
         cfg_section.add("measurement_rounds", "Measurement rounds", args.rounds)
@@ -1227,6 +1358,35 @@ def _emit_l2_adapter_metrics(
                 "actual_hit_rate",
                 "Actual hit rate",
                 round(r.actual_hit_rate, 4),
+            )
+
+    read_write_ratio = getattr(args, "read_write_ratio", None)
+    if read_write_ratio is not None:
+        load_result = next((r for r in results if r.operation == "Load"), None)
+        store_result = next((r for r in results if r.operation == "Store"), None)
+        if load_result is not None and store_result is not None:
+            mixed_section = metrics.add_section("mixed", "Mixed Payloads")
+            read_bytes = load_result.total_success_bytes
+            write_bytes = store_result.total_success_bytes
+            mixed_section.add(
+                "read_success_bytes",
+                "Successful read payload (bytes)",
+                read_bytes,
+            )
+            mixed_section.add(
+                "write_success_bytes",
+                "Successful write payload (bytes)",
+                write_bytes,
+            )
+            mixed_section.add(
+                "aggregate_success_bytes",
+                "Successful aggregate payload (bytes)",
+                read_bytes + write_bytes,
+            )
+            mixed_section.add(
+                "read_write_ratio_achieved",
+                "Achieved read:write",
+                round(read_bytes / write_bytes, 4) if write_bytes else "n/a",
             )
 
     metrics.emit()
