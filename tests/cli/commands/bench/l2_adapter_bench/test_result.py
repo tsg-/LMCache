@@ -91,6 +91,29 @@ def test_wall_clock_span_zero_on_length_mismatch() -> None:
     assert result.wall_clock_span_sec == 0.0
 
 
+def test_wall_clock_span_zero_when_an_earlier_round_timed_out() -> None:
+    # The timeout is in the FIRST round, so the last start plus the last
+    # duration is still finite and the span alone looks jointly plausible
+    # (10.5 + 1.0 - 10.0 = 1.5 s). Publishing a throughput here would report a
+    # number for a run that never completed.
+    result = _rounds_result([float("inf"), 1.0], starts=[10.0, 10.5])
+
+    assert result.wall_clock_span_sec == 0.0
+    assert result.wall_clock_throughput_mbps == 0.0
+    assert result.barrier_idle_fraction == 0.0
+
+
+def test_wall_clock_span_zero_when_timed_out_flag_set() -> None:
+    # A run can be flagged timed_out while every recorded duration is finite
+    # (the timeout aborts before the offending round's duration is stored), so
+    # the finite-duration check alone would not catch it.
+    result = _rounds_result([0.1, 0.1], starts=[10.0, 10.5])
+    result.timed_out = True
+
+    assert result.wall_clock_span_sec == 0.0
+    assert result.wall_clock_throughput_mbps == 0.0
+
+
 # ---------------------------------------------------------------------------
 # Aggregate vs per-round-mean throughput
 # ---------------------------------------------------------------------------

@@ -293,6 +293,12 @@ class BenchResult:
             return 0.0
         if not self.round_starts or len(self.round_starts) != len(self.round_durations):
             return 0.0
+        # Every round must be finite, not just the last one: a timeout in an
+        # earlier round leaves the final start/duration finite, so checking only
+        # the computed span would publish a plausible throughput for a run that
+        # never completed.
+        if self.timed_out or not all(math.isfinite(d) for d in self.round_durations):
+            return 0.0
         end = self.round_starts[-1] + self.round_durations[-1]
         span = end - self.round_starts[0]
         return span if math.isfinite(span) else 0.0
