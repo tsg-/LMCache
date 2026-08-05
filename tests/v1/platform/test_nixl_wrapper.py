@@ -13,7 +13,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
-from lmcache.v1.platform.base_ipc_wrapper import DeviceIPCWrapper
+from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 
 
 # ---------------------------------------------------------------------------

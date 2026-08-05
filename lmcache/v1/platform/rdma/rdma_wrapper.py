@@ -24,7 +24,7 @@ import weakref
 import torch
 
 from lmcache.logging import init_logger
-from lmcache.v1.platform.base_ipc_wrapper import DeviceIPCWrapper
+from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 from lmcache.v1.platform.rdma.rdma_transport import (
     MrInfo,
     RegisteredBuffer,

@@ -27,7 +27,7 @@ from typing import ClassVar, Optional
 import torch
 
 from lmcache.logging import init_logger
-from lmcache.v1.platform.base_ipc_wrapper import DeviceIPCWrapper
+from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 
 logger = init_logger(__name__)
 

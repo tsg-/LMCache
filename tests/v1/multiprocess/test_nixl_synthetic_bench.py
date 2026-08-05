@@ -61,7 +61,7 @@ from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocols.base import RequestType
 from lmcache.v1.multiprocess.server import run_cache_server
-from lmcache.v1.platform.base_ipc_wrapper import DeviceIPCWrapper
+from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 from lmcache.v1.platform.rdma.nixl_wrapper import NixlWrapper
 from lmcache.v1.platform.rdma.thin_client import RdmaThinClient
 

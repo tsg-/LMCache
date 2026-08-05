@@ -22,7 +22,7 @@ from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.engine_module import EngineModule, HandlerSpec, ThreadPoolType
-from lmcache.v1.platform.base_ipc_wrapper import DeviceIPCWrapper
+from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 from lmcache.v1.platform.rdma.rdma_transport import (
     RegisteredBuffer,
     StubRdmaTransport,
