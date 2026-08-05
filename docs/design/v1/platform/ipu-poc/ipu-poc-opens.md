@@ -182,28 +182,8 @@ style: |
 ## LMCache remote tiering over RDMA/Falcon; preliminary MEV bring-up against the completed CX7 reference baseline
 
 <div class="byline">
-July 2026
+August 2026
 </div>
-
----
-<!-- _footer: "IPU KV Cache PoC" -->
-
-# Scope questions (superseded 2026-07-21)
-
-The following questions were raised early in scoping and have since been
-answered by the two-track split. Retained here as historical context.
-
-- Is NVMe-on-initiator a hard requirement, or open to direct RDMA? → Both
-  tracks are now measured independently. See
-  [nvmeof-initiator-only-alternative.md](nvmeof-initiator-only-alternative.md)
-  for the initiator-only + remote NVMe-oF path.
-- Was the early storage-owned baseline intended as an NVMe-oF
-  bandwidth/offload proof? → No. That work was the storage-owned RDMA
-  baseline (M1 raw-verbs, done). The NVMe-oF alternative is a
-  parallel track with its own durability + recovery gate before any
-  headline number is claimed.
-- Or do they want to see the full cache serving model (dedup, admission)? →
-  Full cache serving lives on the storage-owned track (M2+).
 
 ---
 <!-- _footer: "IPU KV Cache PoC" -->
@@ -463,59 +443,6 @@ KV-cache trace?
 ---
 <!-- _footer: "IPU KV Cache PoC" -->
 
-# Architecture B — Raw-Verbs Test Plan (Parallel Track)
-
-Storage-owned RDMA path, shown here for completeness. Not part of
-the Architecture A NVMe-oF POC (Stages 0–5).
-
-<div class="cols">
-<div class="card card-blue">
-
-### Hard gates (non-zero exit)
-
-- **Manifest preflight** — NUMA, MTU 4096, GID, port active
-- **RC-QP connect + completions** — READ/WRITE actually finish
-- **Digest match** — payload integrity
-
-<br/>
-
-### Diagnostic (JSON + `eligible_for_baseline=false`)
-
-- NIC counters ±10% wire-byte comparison
-- MR-flag evidence
-- `BENCH_RDMA_CONTROL` split
-
-<br/>
-
-Row persisted; ingestion filters on `eligible_for_baseline` — no silent promotion.
-
-</div>
-<div class="card card-purple">
-
-### Sweep families
-
-- **CX7 baseline** — READ 72 / 128 / 144 / 256 KiB × qd 1, 4, 16
-- **Asymmetric** — CX7 source ↔ IPU storage, same shape
-
-<br/>
-
-### IPU progression
-
-- **MEV IPU** — 2× 100 GbE, first Falcon-offload target
-- **MMG IPU** — 1× 400 GbE, single-port line-rate proof
-- **MMG next-gen** — 4× 400 GbE, aggregate scaling
-
-<br/>
-
-Runner scope freezes after M1: two sweeps, one runner. Transport-neutral verifier and NIXL publish deferred to M4.
-
-</div>
-</div>
-
----
-<!-- _class: small -->
-<!-- _footer: "IPU KV Cache PoC" -->
-
 # The LMCache storage-backend benchmark — vs. our goals
 
 **Project goal:** validate that D1 (RAID0 remote NVMe-oF, 100 → 400 → 1600 GbE)
@@ -525,7 +452,7 @@ production tail latency**.
 <div class="cols">
 <div class="card card-green">
 
-### What it DOES answer
+### What it measures
 
 - **On-disk bandwidth ceiling** of the backend read / write implementation
 - **Bytes / op and file layout** — one flat-dir file per KV chunk, real DeepSeek-V3 shape (28 MiB @ 256-token bf16)
@@ -536,15 +463,15 @@ production tail latency**.
 </div>
 <div class="card card-amber">
 
-### What it DOES NOT answer — and matters for us
+### Still outside this benchmark
 
 - **End-to-end retrieve latency to the GPU** — no CPU→GPU staging; H2D PCIe / NVLink cost invisible. That step is where a real serve-loop actually pays.
-- **Sustained mixed R/W** — strictly two-phase (write-all, then read-all). Real inference traffic overlaps them.
-- **Tail latency (p50 / p95 / p99)** — only aggregate ops/s + total elapsed. Cannot tell if the median is fine while p99 is 10×.
+- **End-to-end mixed traffic** — an accepted 5:1 `fs_native` run exists, but it uses one process and existing controllers. It does not cover a serving pipeline or explain why reads fall under write load.
+- **Serving latency (p50 / p95 / p99)** — `bench l2` now records per-submit p50/p99, but it does not include CPU→GPU staging or a representative serving trace.
 - **Back-pressure / pipeline stalls** — no counter surfaced. Cannot tell where the pipeline stalls at 12 GB/s.
 - **Memory-pressure eviction** — CPU pool defaults skip this path.
-- **Capacity eviction** — can be provoked, but the harness reports attempted operations, not successful reads (needs success accounting first).
-- **Cold-cache reads today** — no cache-invalidation between phases → reads hit page cache unless `O_DIRECT` engages **and** the buffer is aligned (it isn't — see next slide).
+- **Capacity eviction** — can be provoked, but its effect on a serving workload is still unmeasured.
+- **Page-cache behavior without `O_DIRECT`** — not characterized for these runs.
 
 </div>
 </div>
@@ -552,11 +479,11 @@ production tail latency**.
 <div class="cols">
 <div class="card card-blue">
 
-### What this means for the plan
+### How we use it
 
 - The bench is **necessary but not sufficient for an LMCache / vLLM scaling claim at 400 / 1600 GbE.** It bounds the disk-tier ceiling; it does **not** bound the end-to-end retrieve latency vLLM will see. D1's own remote-NVMe baseline exit is a separate, already-scoped step.
 - Once the read path is fixed, we get: (a) cold-cache read GB/s at various I/O-pool sizes, (b) put-side bandwidth vs. concurrency.
-- We still need a **separate integrated test** (or a harness extension) to cover CPU → GPU staging, sustained mixed R/W, and tail-latency behavior.
+- We still need an **integrated test** to cover CPU → GPU staging, sustained mixed R/W, and tail-latency behavior.
 
 </div>
 </div>
@@ -573,9 +500,9 @@ production tail latency**.
 <div class="cols">
 <div class="card card-red">
 
-### What we saw
+### What happened
 
-- **Executive one-liner: writes moved data over the wire; reads did not.** We corrected the test before making any performance claim.
+- **Bottom line: writes moved data over the wire; reads did not.** We corrected the test before making any performance claim.
 - Read cell reported **7,746 ops/s at c=1** (≈ 228 GB/s — impossible on 100 GbE)
 - RDMA verbs counters: **write phase moved 15.03 GB over the wire; read phase moved ZERO**
 - Every "read" was actually an `EINVAL` on the `O_DIRECT` `readinto` syscall
@@ -595,11 +522,11 @@ production tail latency**.
 - **Write path** — harness aligns its write buffers manually; the backend put path is exercised
 - **Single-drive O_DIRECT write** = 2.66 GB/s — an observation, not a bottleneck claim (needs a matched **single-drive** direct-write fio control before it can be compared)
 
-### What we can't (from this harness, today)
+### What that smoke run did not prove
 
 - Cold-cache read bandwidth end-to-end
 - CPU → GPU staging (never invoked)
-- Tail latency, sustained mixed R/W, memory-pressure eviction
+- Per-submit tail latency, sustained mixed R/W, memory-pressure eviction
 - Last night's smoke doc's **6.21 GB/s single-drive O_DIRECT read = 89 % of fio** is invalid and needs retraction
 
 </div>
@@ -608,7 +535,7 @@ production tail latency**.
 <div class="cols">
 <div class="card card-green">
 
-### Fixes required before Stage 2 reads are trustworthy
+### Before we trust Stage 2 reads
 
 1. **Page-align the read buffer.** `O_DIRECT` requires page alignment; pinning alone is not sufficient.
 2. **Invalidate cache between phases** — page-drop each written path before the read phase begins.
@@ -618,12 +545,15 @@ production tail latency**.
 </div>
 <div class="card card-blue">
 
-### Retractions from last night's smoke doc
+### Corrections to last night's smoke doc
 
-- ❌ **"6.21 GB/s single-drive O_DIRECT read = 89 % of fio ceiling"** — was 512 immediate `EINVAL`s
-- ❌ **"The backend does NOT collapse at chunk size"** — not proven; the read path was never measured
-- ✅ **Still valid: write observation.** 2.66 GB/s O_DIRECT single-drive is a real number (RDMA counters agree). No comparative claim against fio yet.
-- 📋 Doc needs an addendum
+- **Retracted:** "6.21 GB/s single-drive O_DIRECT read = 89% of fio ceiling"
+  was 512 immediate `EINVAL`s.
+- **Retracted:** "The backend does NOT collapse at chunk size" was not proven;
+  the read path was never measured.
+- **Retained:** 2.66 GB/s O_DIRECT single-drive write is a real observation
+  (RDMA counters agree), but has no matched fio comparison yet.
+- Add an addendum to the smoke document.
 
 </div>
 </div>
@@ -632,91 +562,215 @@ production tail latency**.
 <!-- _class: small -->
 <!-- _footer: "IPU KV Cache PoC" -->
 
-# `bench l2` + `fs_native`: payload size is the throughput knob, not queue depth
+# Single-Process Functional-Test Topology — 100 GbE Falcon-Backed NVMe-oF
 
-**Setup.** mkp1 (initiator) ↔ mkp2 (target), 100 GbE Falcon, remote NVMe-oF
-(md0 RAID0 + XFS, 2× PM9A3), `fs_native` L2 adapter. Every cell below is
-RDMA-counter-validated — observed `InRdmaWrites` / `InRdmaReads` ops within
-1 % of the payload-derived expectation.
+<pre><code>mkp1 (initiator)
+  LMCache bench l2, one fs_native process, O_DIRECT
+       ↓
+  XFS on md0 RAID0 (256 KiB chunk)
+       ↓
+  kernel nvme_rdma: 2 existing controllers, 16 I/O queues each
+       ↓  100 GbE direct IPU ↔ IPU, active_mtu=4096
+  Falcon-backed link: idpf + irdma / rocep69s0f0
+       ↓
+mkp2 (target)
+  kernel nvmet_rdma
+       ↓
+  PM9A3 nvme1n1 (NQN 1) + PM9A3 nvme2n1 (NQN 2)</code></pre>
 
 <div class="cols">
 <div class="card card-blue">
 
-### How the harness actually behaves
+### What is exercised
 
-- `submit_store_task` / `submit_load_task` return a task ID immediately;
-  non-blocking all the way down (`runner.py:163`,
-  `raw_block_l2_adapter.py:430`, `native_connector_l2_adapter.py:189`)
-- Each round issues **all** `in_flight` submits, then does ONE eventfd wait
-  for the group → **per-round drain barrier, not per-request serialization**
-- Real C++ `std::thread` workers, blocking syscalls, GIL dropped before
-  queueing (`connector_base.h:293`, `fs/connector.cpp:91`,
-  `connector_pybind_utils.h:60`)
-- **Concurrency ceiling:** each submit fans into `min(num_workers, num_keys)`
-  tiles (`connector_base.h:313`), so active filesystem I/O =
-  `min(num_workers, queued tiles)`. **`num_workers` and `in_flight` must be
-  swept together** — `in_flight 256` with `num_workers 4` just queues 252
-  requests behind 4 active reads.
+- Full kernel storage path: `fs_native` → XFS → md0 → NVMe-oF →
+  `nvmet-rdma` → two SSDs
+- 34 established RC QPs are live: 2 controllers × (16 I/O + 1 admin)
+- 303–400 GiB working sets exceed mkp1's 251 GiB DRAM; reads use `O_DIRECT`
 
 </div>
 <div class="card card-amber">
 
-### What the sweeps measured
+### Scope of this test
 
-- **Reads scale with payload, not depth** — 256 K / 512 K / 1 M / 4 M per
-  key → 64.1 / 84.9 / 87.3 / **95.1 Gbps**
-- 28 MiB keys (`num_keys=1`), `in_flight` 4 / 16 / 64 → 84.6 / 74.5 /
-  95.1 Gbps — non-monotonic; **no depth win**
-- **Longest rounds-mode run: 89.5 Gbps over 100 GiB** (102,400 keys, 200
-  rounds) — still wave-barriered, not steady state
-- **Stores saturate at concurrency 2.** `num_workers` 1→64 at `inf=4, nk=8`
-  gives active I/O 1/2/4/8/16/32/32 → 3.76 / **5.48** / 5.56 / 5.67 / 5.63 /
-  5.63 / 5.59 GB/s. Knee at 2; matches the 5.6 GB/s fio write ceiling.
-- 95.1 Gbps read = **99.1 %** of the 11.99 GB/s fio wire ceiling
-- ⚠️ The `in_flight` 1→32 sweep is **degenerate** — at `w=16, nk=8`,
-  `min(16, inf×8)` pins active I/O at 16 from `inf=2` up. Its flatness is
-  mostly an artifact; the latency ramp (1.55→48.06 ms) is real queue wait.
+- Falcon-backed transport, **not Falcon endpoint offload**
+- Existing controllers and one process only; `--in-flight` is not QP count
+- Not a 64-QP/R2, physical multi-initiator, 400 GbE, or 4×400 GbE result
 
 </div>
 </div>
+
+---
+<!-- _class: small -->
+<!-- _footer: "IPU KV Cache PoC" -->
+
+# FIO Baselines — Storage Is Faster Than the 100 GbE Read Path
+
+| Surface | Read cell | Aggregate result | Interpretation |
+|---|---|---:|---|
+| Target local, 2 PM9A3 | random read, 256 KiB, QD 16 | **14.28 GB/s** | Local two-SSD ceiling |
+| Initiator, raw remote namespaces | random read, 256 KiB, QD ≥16 | **11.99 GB/s** / 95.92 Gbps | NVMe-oF wire ceiling |
+| Initiator, XFS on md0 | random read, 256 KiB, QD 64/256 | **11.98 GB/s** / 95.84 Gbps | Matched filesystem surface |
+| Initiator, XFS on md0 | 28 MiB random read, numjobs 8/16 | **12.01/12.04 GB/s** | Payload-matched LMCache comparator |
 
 <div class="cols">
 <div class="card card-green">
 
-### Why an async / sliding-window mode is NOT the throughput fix
+### Useful controls
 
-- Store side is **media-bound** — the 45 Gbps ceiling is the SSDs, not the
-  harness
-- Read side is at **99.1 % of the fio ceiling** at 4 MiB per key
-- Latency doubles exactly with `in_flight` (1.55 → 48.06 ms over 1→32) while
-  throughput stays flat — and per the tiling formula the extra depth never
-  reached the disks. Deeper queueing bought pure wait time.
-- **Correction accepted:** buffer reuse does *not* block a window — existing
-  `in_flight` batches become slots and store source buffers are read-only.
-  No buffer pool needed.
+- Aggregate writes plateau at **5.6 GB/s**: two-drive media limit, not fabric
+- XFS costs at most 3% throughput against the raw remote surface at these QDs
+- The 28 MiB numjobs=32 result (12.31 GB/s) exceeds the 4096-MTU wire model;
+  it is retained but not used as a ceiling
 
 </div>
-<div class="card card-red">
+<div class="card card-amber">
 
-### What IS worth fixing — observability, not concurrency
+### What these baselines cannot separate
 
-- Percentiles are over **round durations** (`result.py:98`), not per request —
-  useful (they caught a straggler) but cannot separate one slow I/O from a
-  uniformly slow round. `latency_per_key_ms` is round ÷ keys (`:165`), an
-  artifact, not a latency.
-- Reported throughput is a mean of per-round rates and so excludes
-  inter-round barrier stalls — optimistic vs wall clock
-- `--skip-verify` defaults **True**, and the gate structurally requires both
-  store *and* load batches → `--only load` can never verify. Arm it explicitly.
-- The **wave barrier** drains every submitted I/O before refilling, so the
-  worker pool idles at each round edge — a sawtooth at high throughput. Costs
-  wall-clock, but it is not per-I/O serialization.
+- Local-to-remote read gap is aggregate: framing, target dispatch,
+  initiator stack, queue-count limit, and wire latency are not separated
+- Baselines establish a 100 GbE kernel-path reference, not Falcon offload
+- Per-SSD rates were not captured during the accepted LMCache windows
 
 </div>
 </div>
 
-**Recommendation.** Drive throughput with ≥ 1 MiB per key; sweep
-`num_workers` + `in_flight` together. Add `--duration-sec T` as a
-**measurement** fix, not a ceiling fix. Percentile latency is the larger gap.
+---
+<!-- _class: small -->
+<!-- _footer: "IPU KV Cache PoC" -->
+
+# LMCache `bench l2` Sustained Read — 28 MiB KV-Chunk Proxy
+
+**100% read, 120 s measured window, `fs_native` + O_DIRECT, 303 GiB corpus.**
+
+| in-flight | Goodput | Keys successful | Submit p50 / p99 | `InRdmaWrites` ratio |
+|---:|---:|---:|---:|---:|
+| 4 | 95.63 Gbps | 48,857 / 48,857 | 9.8 / 15.0 ms | 0.9999 |
+| 16 | **95.94 Gbps** | 49,024 / 49,024 | 41.1 / 67.3 ms | 1.0001 |
+| 64 | **95.94 Gbps** | 49,072 / 49,072 | 157.2 / 186.5 ms | 1.0000 |
+
+<div class="cols">
+<div class="card card-green">
+
+### Read result and RDMA counters agree
+
+- LMCache success-byte goodput matches the 28 MiB XFS/md0 fio comparator:
+  **95.94 vs. 96.04–96.28 Gbps**
+- The earlier 4 MiB sustained read reached **95.91 Gbps** with the same
+  counter-validation gate, so parity holds across a 7x payload range
+- Every key succeeded; no timeout; throughput is saturated at or below
+  in-flight 4, the smallest tested value
+- RDMA validation is independent of the app report: observed counter ops /
+  bytes ÷ 52,428 is within 0.01% of expected
+
+</div>
+<div class="card card-blue">
+
+### Supporting signals
+
+- md0 carries the accepted application goodput across both remote namespaces
+- All six RDMA error-counter deltas were zero: retransmits, NAK sequence,
+  RTO, RNR, out-of-order, and protocol errors
+- No synchronized `node_disk_*` capture exists for these cells, so this result
+  does **not** report invented per-NVMe bandwidth; add per-device deltas on
+  the next run to show md0 and each target SSD beside LMCache goodput
+
+</div>
+</div>
+
+---
+<!-- _class: small -->
+<!-- _footer: "IPU KV Cache PoC" -->
+
+# `bench l2` Performance Dials — 28 MiB Sustained Read
+
+| Dial | Value in the accepted sweep | What it controls | Why this value |
+|---|---|---|---|
+| `--only load` | load only | Direction of generated I/O | Measures the Falcon/NVMe-oF read path; the separately prepopulated corpus makes the measured cells read-only |
+| `--data-size-kb` | `28672` | Payload per LMCache key | 28 MiB is the DeepSeek-V3 256-token KV-chunk proxy |
+| `--num-keys` | `1` | KV chunks per adapter submit | Keeps one submit equal to one proxy chunk, so `--in-flight` is the only submission-width sweep axis |
+| `--in-flight` | `4`, `16`, `64` | Outstanding user-space submits | Tests how much request concurrency is needed to fill the link; it does **not** create NVMe/RDMA QPs |
+| `num_workers` | `16` | `fs_native` adapter worker pool | Held fixed so the sweep isolates submission concurrency; not claimed as a globally optimal worker count |
+| `use_odirect` | `true` | Filesystem cache bypass | Ensures the measured reads reach the NVMe-oF path rather than succeeding from host page cache |
+| `--rounds` | `11072 / in-flight` | Prepopulated load-wrap space | Holds the corpus at 303 GiB, above initiator DRAM, so repeated reads do not fit in memory |
+
+<div class="cols">
+<div class="card card-green">
+
+### Results
+
+- At 28 MiB/key, even four outstanding chunks carry 112 MiB of payload
+- 4 / 16 / 64 in-flight reached 95.63 / 95.94 / 95.94 Gbps
+- The saturation knee is at or below 4; it was **not** located because 1 and 2 were not run
+
+</div>
+<div class="card card-amber">
+
+### Still outside this read sweep
+
+- One accepted 5:1 run reached **63.89 Gbps read + 12.78 Gbps write**
+  (**76.67 Gbps aggregate**). It uses the same controllers and a single
+  global `--in-flight 16` window; it does not isolate the cause of its lower
+  read goodput.
+- No new controllers or QPs: the test uses the two established controllers with 16 I/O queues each
+- This single-process sweep did not exercise local multi-process or physical
+  multi-initiator traffic
+
+</div>
+</div>
+
+---
+<!-- _class: small -->
+<!-- _footer: "IPU KV Cache PoC" -->
+
+# Multi-Instance Context — Shared Readers Now, Shared Writers Later
+
+| Current local test | 2/4 `bench l2` processes on mkp1, same immutable `ds28m` corpus |
+|---|---|
+| 4-process result | **95.9436 Gbps**, 1 ms measured-start skew, all keys succeeded |
+| Why aggregate throughput is flat | A single process already fills the one 100 GbE path |
+
+The local driver, report, and result document are not committed yet. Treat this
+as experimental evidence, not a reproducible released result.
+
+<div class="cols">
+<div class="card card-green">
+
+### What the local reader test shows
+
+- Independent LMCache adapter instances concurrently load the same 303 GiB
+  `fs_native` corpus through existing NVMe-oF controllers
+- No misses, corpus mutation, or RDMA error-counter deltas in the accepted runs
+- This establishes local process fan-in and shared immutable-L2 reads
+
+</div>
+<div class="card card-amber">
+
+### What shared writers would need
+
+- No MP server, coordinator, P2P directory, physical second initiator, or
+  shared writer was exercised
+- Current `raw_block` metadata is process-local; concurrent writers need a
+  target-side authority for conditional create, allocation, WAL/replay,
+  checksum validation, and GC
+- The 4x400 baseline keeps L2 pools exclusive per initiator before considering
+  a shared writable namespace
+
+</div>
+</div>
+
+---
+<!-- _class: small -->
+<!-- _footer: "IPU KV Cache PoC" -->
+
+# Test Architecture — MkP Functional Proof, Then 4x400 Replication
+
+![w:650](diagrams/mkp-fsnative-4x400-test-architecture.png)
+
+**MkP:** local process fan-in over one 100 GbE path, not 1.6 Tb/s capacity.
+
+**4x400 baseline:** four physical initiators with exclusive L2 pools; shared
+writes require the target-side B1 metadata authority.
 
 ---

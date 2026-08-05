@@ -1,0 +1,21 @@
+flowchart LR
+  subgraph current["Current MkP proof: shared immutable readers"]
+    direction TB
+    p1["bench l2 process 1"]
+    pn["bench l2 processes 2..N"]
+    p1 & pn --> workload["Same prepopulated read-only fs_native prefix"]
+    workload --> nvme["NVMe-oF/RDMA: 100 GbE Falcon-backed link"]
+    nvme --> target["mkp2: nvmet-rdma"]
+    target --> media["md0 + XFS: 2x PM9A3"]
+  end
+
+  media -. "replicate the proven read topology" .-> future
+
+  subgraph future["Future 4x400 baseline: exclusive L2 pools"]
+    direction TB
+    i0["Initiator 0: kv-pool-0"]
+    i1["Initiator 1: kv-pool-1"]
+    i2["Initiator 2: kv-pool-2"]
+    i3["Initiator 3: kv-pool-3"]
+    i0 & i1 & i2 & i3 -->|"one 400 GbE port each"| target400["NVMe-oF target: 16 SSDs in disjoint pools"]
+  end
