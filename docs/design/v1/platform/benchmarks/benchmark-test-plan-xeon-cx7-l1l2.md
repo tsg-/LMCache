@@ -73,6 +73,34 @@ Results collected on CX7 (M1):
 - **M2 and beyond (admission-gated commit)**: mandatory on every committed
   page — the commit gate depends on it.
 
+### Verification evidence
+
+Every M1–M5 result row requires a transport-neutral verification JSON produced
+by `scripts/bench_verify.py`. The record contains the producer-only digest,
+receiver digest, normalized wire-counter evidence, transport assertion, and
+separate control-plane and DMA medians. A row is not publishable when the
+digests differ, no recognized wire counter moves, the normalized wire bytes
+fall outside the configured tolerance, or the transport assertion fails.
+
+Counter units are normalized before comparison:
+
+| Driver counter family | Unit | Normalization |
+|---|---|---|
+| `*_bytes`, `*_octets` | bytes | multiply by 1 |
+| Mellanox `port_*_data` | four-byte PMA lanes | multiply by 4 |
+| `*_packets` | packets | evidence only; excluded from byte validation |
+
+The verifier uses the largest independently reported normalized byte counter,
+not a sum, to avoid double-counting nested driver counters. The default
+tolerance is 10 percent of the producer payload. `control_plane_dominated` is
+set when the control-plane median is at least the DMA median and must be shown
+in the result table rather than hidden.
+
+Transport assertions are fail-closed: verbs requires RC-QP and `rc_mlx5`
+evidence; UCX requires an active `rc_mlx5` transport-layer report; NIXL
+requires an explicit agent/backend/peer record; IPU host-RDMA requires
+`queue_depth=`, `submitted=`, and `completed=` telemetry in the runner log.
+
 ### NIXL P2P status
 
 The LMCache P2P integration path via NIXL is currently a **diagnostic
