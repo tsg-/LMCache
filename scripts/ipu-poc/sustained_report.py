@@ -6,7 +6,7 @@ Accept ONLY when:
      tolerance (read model: ops = bytes / 52428);
   2. every key succeeded;
   3. no timeout, retransmit, NAK, RTO, RNR, out-of-order or proto error;
-  4. the pre-existing corpus file count is unchanged.
+  4. the pre-existing read corpus file count is unchanged.
 """
 
 import json
@@ -102,8 +102,8 @@ for name, v in (
 ):
     if v != 0:
         fail.append(f"{name} advanced by {v}")
-if c_after < c_before:
-    fail.append(f"corpus shrank: {c_before} -> {c_after}")
+if c_after != c_before:
+    fail.append(f"read corpus changed: {c_before} -> {c_after}")
 if run_mode != "sustained":
     fail.append(f"not sustained mode: {run_mode}")
 

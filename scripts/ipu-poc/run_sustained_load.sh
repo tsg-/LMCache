@@ -57,7 +57,7 @@ echo "=== wrap range: $KEYS keys / ${GIB} GiB (DRAM 251 GiB, so it exceeds DRAM)
 have=$(find "$B" -name "${PREFIX}-bench-model@*.data" | wc -l)
 echo "=== corpus for prefix: $have files (need $KEYS)"
 if [ "$have" -lt "$KEYS" ]; then echo "ABORT: corpus short"; exit 1; fi
-corpus_before=$(ls "$B" | wc -l)
+corpus_before=$(find "$B" -name "${PREFIX}-bench-model@*.data" | wc -l)
 
 sync; echo 3 > /proc/sys/vm/drop_caches; sleep 2
 
@@ -102,9 +102,12 @@ d_rto=$(( $(cat "$H/RTO") - pre_rto ))
 d_rnr=$(( $(cat "$H/RNR received") - pre_rnr ))
 d_oo=$(( $(cat "$H/Rcvd Out of order packets") - pre_oo ))
 d_pe=$(( $(cat "$H/InProtoErrors") - pre_pe ))
-corpus_after=$(ls "$B" | wc -l)
+corpus_after=$(find "$B" -name "${PREFIX}-bench-model@*.data" | wc -l)
 
-[ $rc -ne 0 ] && echo "LOAD FAILED rc=$rc — see $OUT/${RUN}_load.log"
+if [ $rc -ne 0 ]; then
+  echo "LOAD FAILED rc=$rc — see $OUT/${RUN}_load.log"
+  exit "$rc"
+fi
 
 # ---------------------------------------------------------------------------
 # Acceptance estimator: INTERIOR STEADY-STATE RATE.
@@ -149,5 +152,7 @@ USE=$win_delta
 python3 "$(dirname "$0")/sustained_report.py" "$OUT/${RUN}_load.json" \
   "$USE" "$d_rt" "$d_nak" "$d_rto" "$d_rnr" "$d_oo" "$d_pe" \
   "$corpus_before" "$corpus_after" "$RUN" "$KB" 2>&1
+report_rc=$?
 
 echo "=== artifacts: $OUT/${RUN}_load.json  $OUT/${RUN}_load.log  $POLLF"
+exit "$report_rc"

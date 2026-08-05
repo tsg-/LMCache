@@ -178,6 +178,8 @@ cell() {
   p_nak=$(cat "$H/Nak Sequence Error"); p_rto=$(cat "$H/RTO")
   p_rnr=$(cat "$H/RNR received"); p_oo=$(cat "$H/Rcvd Out of order packets")
   p_pe=$(cat "$H/InProtoErrors")
+  local corpus_before corpus_after
+  corpus_before=$(find "$B" -name "${PREFIX}-bench-model@*.data" | wc -l)
 
   PYTHONUNBUFFERED=1 "$VENV" bench l2 --l2-adapter "$ADP" --only load \
     --key-prefix "$PREFIX" --num-keys $NK --data-size-kb "$KB" --in-flight $INF \
@@ -198,7 +200,6 @@ for l in sys.stdin: sys.stdout.write("%.3f %s" % (time.time(), l))' \
   local d_rnr=$(( $(cat "$H/RNR received") - p_rnr ))
   local d_oo=$(( $(cat "$H/Rcvd Out of order packets") - p_oo ))
   local d_pe=$(( $(cat "$H/InProtoErrors") - p_pe ))
-  local cn; cn=$(ls "$B" | wc -l)
 
   [ $rc -ne 0 ] && { echo "LOAD FAILED rc=$rc"; tail -15 "$OUT/${RUN}_load.log"; exit 1; }
 
@@ -215,8 +216,10 @@ for l in sys.stdin: sys.stdout.write("%.3f %s" % (time.time(), l))' \
   fi
   local USE=$wd
 
+  corpus_after=$(find "$B" -name "${PREFIX}-bench-model@*.data" | wc -l)
   python3 "$SD/sustained_report.py" "$OUT/${RUN}_load.json" \
-    "$USE" "$d_rt" "$d_nak" "$d_rto" "$d_rnr" "$d_oo" "$d_pe" "$cn" "$cn" "$RUN" "$KB"
+    "$USE" "$d_rt" "$d_nak" "$d_rto" "$d_rnr" "$d_oo" "$d_pe" \
+    "$corpus_before" "$corpus_after" "$RUN" "$KB"
   local grc=$?
   # Stop on fabric errors or counter/app mismatch, per instruction.
   [ $grc -ne 0 ] && { echo ">>> CELL REJECTED — STOPPING SWEEP <<<"; exit 1; }
