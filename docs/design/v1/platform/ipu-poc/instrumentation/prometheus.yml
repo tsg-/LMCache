@@ -10,16 +10,31 @@ scrape_configs:
       # Scrape via SSH-forwarded local port OR mgmt-plane IP.
       # NEVER put a 192.168.200.x address here.
       - targets:
-          - 127.0.0.1:19100   # mkp1 via `ssh -L 19100:127.0.0.1:9100 mkp1`
-          - 127.0.0.1:19101   # mkp2 via `ssh -L 19101:127.0.0.1:9100 mkp2`
+          - host.docker.internal:19100 # mkp1 via `ssh -L 19100:127.0.0.1:9100 mkp1`
+          - host.docker.internal:19101 # mkp2 via `ssh -L 19101:127.0.0.1:9100 mkp2`
         labels:
           fabric: mgmt
     relabel_configs:
       - source_labels: [__address__]
-        regex: 127\.0\.0\.1:19100
+        regex: host\.docker\.internal:19100
         target_label: host
         replacement: mkp1
       - source_labels: [__address__]
-        regex: 127\.0\.0\.1:19101
+        regex: host\.docker\.internal:19101
         target_label: host
         replacement: mkp2
+
+  # bench l2 binds its short-lived endpoint to mkp1 loopback. The SSH
+  # tunnel keeps the scrape path on the management plane.
+  - job_name: lmcache_bench
+    static_configs:
+      - targets:
+          - host.docker.internal:19102 # mkp1 via `ssh -L 19102:127.0.0.1:9101 mkp1`
+        labels:
+          fabric: mgmt
+          workload: fs_native
+    relabel_configs:
+      - source_labels: [__address__]
+        regex: host\.docker\.internal:19102
+        target_label: host
+        replacement: mkp1

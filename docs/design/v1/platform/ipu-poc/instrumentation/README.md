@@ -1,9 +1,9 @@
-# mkp1/mkp2 Instrumentation (Parked)
+# mkp1/mkp2 Instrumentation
 
-Parked artifact — **not deployed**. Intended for LMCache Stage 2+ runs where a
-live cross-host view earns its keep. Skip for Stage 1 FIO preflights (self-
-contained JSON is sufficient and a background scraper risks perturbing DDIO
-measurements at the QD 256/256k knee).
+Deployed on the control host as of 2026-08-04 and used to cross-check the
+`fs_native` sustained-load results. Still skip it for Stage 1 FIO preflights:
+self-contained JSON is sufficient there, and a background scraper risks
+perturbing DDIO measurements at the QD 256/256k knee.
 
 ## Topology (mkp lab)
 
@@ -35,6 +35,31 @@ measurements at the QD 256/256k knee).
 | NIC counters (RDMA fabric)         | textfile collector wrapping `ethtool -S ens1f1np1` |
 | NVMe SMART / per-ns queue          | textfile collector wrapping `nvme smart-log` |
 | LMCache internal counters (Stage 2+) | textfile collector wrapping app stats JSON |
+| `bench l2` live counters            | `--serve-metrics` endpoint, job `lmcache_bench` |
+
+### The `lmcache_bench` job
+
+`bench l2 --serve-metrics 9101 --metrics-bind-address 127.0.0.1` publishes live
+submit/success/bytes counters for the duration of the CLI process. Forward it
+over the mgmt plane and Prometheus picks it up as job `lmcache_bench`:
+
+```bash
+ssh -N -L 19102:127.0.0.1:9101 mkp1
+```
+
+Two properties matter when reading the series:
+
+- **The target is down between cells.** The endpoint lives only as long as one
+  `bench l2` invocation, so `up == 0` between sweep cells is expected, not a
+  scrape failure. A 120 s cell at the 5 s interval yields roughly 24 samples.
+- **`phase` separates `warmup` from `measured`**, which is what lets a
+  Prometheus-side rate be compared against the run's JSON independently. Rate
+  over the measured phase only; including warmup biases it.
+
+`--web.enable-lifecycle` is set on the Prometheus container so `curl -X POST
+http://127.0.0.1:9090/-/reload` picks up config edits. Reload (or recreate)
+**before** a sweep starts — a restart mid-sweep loses samples for the cell in
+flight.
 
 ## Cheap intermediate (no Prometheus)
 
