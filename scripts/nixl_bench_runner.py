@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -48,6 +49,8 @@ import threading
 import time
 from dataclasses import dataclass, field
 from typing import Optional
+
+from bench_verify import Transport, build_diagnostic_result, parse_ethtool_statistics
 
 # ---------------------------------------------------------------------------
 # Constants — match .claude/CLAUDE.md test-node config
@@ -73,10 +76,14 @@ _PIP_UCX_LIBS = (
     f"{REPO}/.venv-ipu/lib/python3.12/site-packages/nixl_cu12.libs"
 )
 
-# UCX device name differs by node: bmg0 uses mlx5_1:1, bmg1 uses rocep153s0f1:1
-# (same physical NIC/port, different kernel naming convention on each machine)
+# UCX device name differs by node: bmg0 uses mlx5_1:1, bmg1 uses rocep153s0f0:1
+# (same physical NIC/port, different kernel naming convention on each machine).
+# The bmg1 f1 port is the management plane; use f0 for the 192.168.200
+# RDMA fabric and its corresponding counter interface.
 BMG0_UCX_NET_DEV = "mlx5_1:1"
-BMG1_UCX_NET_DEV = "rocep153s0f1:1"
+BMG1_UCX_NET_DEV = "rocep153s0f0:1"
+BMG0_ETHTOOL_IFACE = "ens1f1np1"
+BMG1_ETHTOOL_IFACE = "ens1f0np0"
 
 _NO_PROXY = f"localhost,127.0.0.1,{BMG0_IP},{BMG1_IP}"
 
@@ -252,6 +259,7 @@ class _ParseState:
     current_section: str = ""
     cold_lookup: dict = field(default_factory=dict)
     warm_retrieve: dict = field(default_factory=dict)
+    output: list[str] = field(default_factory=list)
 
 
 def stream_and_collect(
@@ -264,6 +272,7 @@ def stream_and_collect(
 ) -> None:
     assert proc.stdout is not None
     for line in proc.stdout:
+        state.output.append(line)
         stripped = line.strip()
         if verbose:
             sys.stdout.write(f"[{prefix}] {line}")
@@ -285,6 +294,57 @@ def stream_and_collect(
         if done_marker in line:
             done_event.set()
     done_event.set()  # EOF
+
+
+def snapshot_nic(host: str, interface: str) -> dict[str, int]:
+    """Capture driver counters from the benchmark endpoint."""
+    rc, output = ssh_run(host, f"ethtool -S {shlex.quote(interface)}", timeout=10.0)
+    if rc != 0:
+        raise RuntimeError(f"ethtool -S failed on {host}: {output.strip()}")
+    return parse_ethtool_statistics(output).counters
+
+
+def write_diagnostic_verification(
+    output_dir: str,
+    label: str,
+    num_tokens: int,
+    control_ms: float,
+    evidence: list[str],
+    source_before: dict[str, int],
+    source_after: dict[str, int],
+    storage_before: dict[str, int],
+    storage_after: dict[str, int],
+    source_log: list[str],
+    storage_log: list[str],
+) -> str:
+    """Write a NIXL diagnostic record with retained logs and NIC snapshots."""
+    record = build_diagnostic_result(
+        Transport.NIXL,
+        evidence,
+        [control_ms],
+        [
+            "producer_digest",
+            "wire_bytes_total",
+            "wire_bytes_within_tolerance",
+            "dma_ms_median",
+            "control_dominated",
+        ],
+        "nixl_bench_client emits truncated aggregate MD5; no BENCH_RDMA_DMA records",
+    )
+    record["nic_counters"] = {
+        "source": {"before": source_before, "after": source_after},
+        "storage": {"before": storage_before, "after": storage_after},
+    }
+    record["client_logs"] = {
+        "source": "".join(source_log),
+        "storage": "".join(storage_log),
+    }
+    os.makedirs(output_dir, exist_ok=True)
+    output = f"{output_dir}/verification_{label}_{num_tokens}.json"
+    with open(output, "w", encoding="ascii") as handle:
+        json.dump(record, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    return output
 
 
 def _percentile(sorted_vals: list[float], pct: float) -> float:
@@ -528,7 +588,9 @@ def run_bench(args: argparse.Namespace) -> BenchRun:
         print(f"\n--- {num_tokens} tokens ---")
         result = RunResult(num_tokens=num_tokens)
         try:
-            _pop_state, pull_state = run_one(
+            source_before = snapshot_nic(src_host, BMG0_ETHTOOL_IFACE)
+            storage_before = snapshot_nic(dst_host, BMG1_ETHTOOL_IFACE)
+            pop_state, pull_state = run_one(
                 server_host=dst_host,
                 client_host=src_host,
                 num_tokens=num_tokens,
@@ -551,6 +613,21 @@ def run_bench(args: argparse.Namespace) -> BenchRun:
                     result.p99_ms = warm.get("p99")
             if not cold and not warm:
                 result.error = "no latency sections found in bench output"
+            else:
+                verification = write_diagnostic_verification(
+                    args.verification_dir,
+                    run_label,
+                    num_tokens,
+                    result.cold_mean_ms or result.warm_mean_ms or 0.0,
+                    pop_state.output + pull_state.output,
+                    source_before,
+                    snapshot_nic(src_host, BMG0_ETHTOOL_IFACE),
+                    storage_before,
+                    snapshot_nic(dst_host, BMG1_ETHTOOL_IFACE),
+                    pop_state.output,
+                    pull_state.output,
+                )
+                print(f"  verification={verification}")
         except (TimeoutError, RuntimeError) as exc:
             result.error = str(exc)
             print(f"  ERROR: {exc}", file=sys.stderr)
@@ -670,6 +747,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--verbose", "-v",
         action="store_true",
         help="Stream server/bench output to stdout",
+    )
+    parser.add_argument(
+        "--verification-dir",
+        default=".",
+        help="Local directory for per-run verification JSON records",
     )
     return parser.parse_args(argv)
 
