@@ -19,10 +19,11 @@ sits at the fabric ceiling, with no adapter overhead resolvable at this speed.
 > bench's own, so a future units change surfaces as a visible divergence.
 
 **Classification — read this before citing any number here.** This is a
-**Falcon-backed kernel NVMe-oF** measurement. The IPU acts solely as the
-`irdma` verbs device beneath the kernel `nvme_rdma`/`nvmet_rdma` path. It is
-**not** a Falcon-offload result and **not** a 400 GbE result. Nothing here
-extrapolates to the 400/4×400 GbE MMG platform, which remains unavailable.
+**Falcon-offloaded kernel NVMe-oF** measurement, using the MEV IPU's
+Falcon/`irdma` transport beneath kernel `nvme_rdma`/`nvmet_rdma`. It is
+**not** a fresh-QP or 64-QP result, a comparison against an unoffloaded path,
+or a 400 GbE result. Nothing here extrapolates to the 400/4×400 GbE MMG
+platform, which remains unavailable.
 
 ## Result
 
@@ -223,8 +224,8 @@ never counts as a pass.
 
 **Does NOT establish:**
 
-- **Any Falcon offload capability.** The IPU is only the verbs device here.
-  Do not cite this against the offload beads.
+- **Falcon-offload benefit or fresh-QP scale.** Falcon offload carries this
+  kernel path, but the run has no unoffloaded control and reuses existing QPs.
 - **Anything about 400 GbE / 4×400 GbE.** No figure here extrapolates.
 - **Host CPU cost.** Not measured in this run; no cores-per-100-Gbps claim is
   made or implied.

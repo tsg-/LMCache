@@ -4126,8 +4126,9 @@ mkp2 (target)
 <div class="card card-amber">
 <h3 id="scope-of-this-test">Scope of this test</h3>
 <ul>
-<li>Falcon-backed transport, <strong>not Falcon endpoint offload</strong></li>
-<li>Existing controllers and one process only; <code>--in-flight</code> is not QP count</li>
+<li>Falcon-offloaded kernel NVMe-oF at 100 GbE, through the existing controllers</li>
+<li><code>--in-flight</code> is not QP count; this run does not test fresh-QP creation or<br />
+compare Falcon offload with an unoffloaded path</li>
 <li>Not a 64-QP/R2, physical multi-initiator, 400 GbE, or 4×400 GbE result</li>
 </ul>
 </div>
@@ -4525,7 +4526,8 @@ it is retained but not used as a ceiling</li>
 <ul>
 <li>Local-to-remote read gap is aggregate: framing, target dispatch,<br />
 initiator stack, queue-count limit, and wire latency are not separated</li>
-<li>Baselines establish a 100 GbE kernel-path reference, not Falcon offload</li>
+<li>Baselines establish a 100 GbE Falcon-offloaded kernel-path reference; they<br />
+do not isolate an offload benefit against an unoffloaded control</li>
 <li>Per-SSD rates were not captured during the accepted LMCache windows</li>
 </ul>
 </div>

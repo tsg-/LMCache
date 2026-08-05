@@ -374,10 +374,10 @@ total_keys` on every cell.
   is comfortably in the efficient regime.
 - **`num_workers` and `in_flight` must be swept jointly**, with effective active
   I/O recorded per cell. `LMCache-ca4` amended accordingly.
-- **A bandwidth-visible offload result is blocked on faster fabric or more
-  drives**, not on software work. 400 GbE lifts the read ceiling; more PM9A3s
-  lift the write plateau. A *CPU-reduction* offload result is not blocked — it is
-  simply unmeasured, and needs the CPU methodology fix first.
+- **A bandwidth-visible offload-benefit result is blocked on faster fabric or
+  more drives**, not on software work. 400 GbE lifts the read ceiling; more
+  PM9A3s lift the write plateau. A *CPU-reduction* offload result is not
+  blocked — it is simply unmeasured, and needs the CPU methodology fix first.
 - **Must NOT be inferred from this run:** GPU staging cost (no GPU in path),
   mixed R/W behavior (strictly two-phase), durability or crash semantics
   (`fs_native` has none), per-request tail latency (finding 5), host-CPU-per-GB

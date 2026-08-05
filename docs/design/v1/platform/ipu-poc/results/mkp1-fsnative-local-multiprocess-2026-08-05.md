@@ -11,7 +11,8 @@ This is **existing-controller, local multi-process, read-only functional
 evidence**. It proves that independent LMCache adapter instances on one
 initiator host can share read traffic against the prepopulated corpus without
 misses or fabric errors. It is not physical multi-initiator, MP/coordinator,
-shared-writer, 64-QP/R2, 400 GbE, or Falcon-offload evidence.
+shared-writer, 64-QP/R2, or 400 GbE evidence. It also does not test fresh-QP
+scale or compare Falcon offload with an unoffloaded path.
 
 | Local processes | Aggregate goodput | Start skew | Counter/app rate | Result |
 |---:|---:|---:|---:|---|

@@ -50,7 +50,7 @@ attribute the delta to it explicitly. Failed connect verbatim:
 Two configs completed:
 
 - **Config A (local block)** — FIO on MKP2 directly against `/dev/nvme1n1` and `/dev/nvme2n1`, no `nvmet`, no RDMA. Hardware ceiling on the target host.
-- **Config C (wire baseline over the Falcon link)** — FIO on MKP1 against `/dev/nvme{2,3}n1` (remote namespaces from MKP2 attached via `nvme_rdma` over the 100 GbE Falcon link). Full NVMe-oF stack + fabric. **This is a Falcon-backed kernel NVMe-oF measurement, not an IPU-offload measurement** — the IPU acts only as the `irdma` verbs device under the kernel path.
+- **Config C (wire baseline over the Falcon link)** — FIO on MKP1 against `/dev/nvme{2,3}n1` (remote namespaces from MKP2 attached via `nvme_rdma` over the 100 GbE Falcon link). Full NVMe-oF stack + Falcon-offloaded transport. It is **not a comparative offload measurement**: there is no unoffloaded control, and the run reuses the established controller QPs.
 
 **Config B (NVMe-oF loopback on MKP2)** was attempted with `rdma_rxe` on `lo` and separately with `nvme-loop`; both failed at connect time (route resolution timeouts on rxe; nvme-loop module not loadable on this kernel). Skipped. Note: skipping Config B is compatible with the plan's aggregate D1/T7 baseline, which does not require a stack-vs-wire decomposition. It is **not** valid to attribute the A→C delta to any specific component (framing, target dispatch, queue count, wire latency) without further isolation.
 
@@ -125,7 +125,7 @@ For read workloads, DRAM-write traffic during the run indicates SSD→LLC DMA is
 
 ## For §4.2 planning
 
-- **Read side, 100 GbE Falcon goodput ceiling at `active_mtu` 4096: ~12.0 GB/s.** This *is* a Falcon-link number, so it is the right order-of-magnitude reference for this rig — but it is still a pre-flight run (15 s cells, no repetition), so it is not the protocol-conformant T7 baseline. What remains missing is not "Falcon" but the T2b protocol and, separately, any IPU-offload path: this measures the kernel `nvme_rdma`/`nvmet_rdma` path with the IPU serving as the verbs device.
+- **Read side, 100 GbE Falcon goodput ceiling at `active_mtu` 4096: ~12.0 GB/s.** This *is* a Falcon-offloaded kernel-path number, so it is the right order-of-magnitude reference for this rig — but it is still a pre-flight run (15 s cells, no repetition), so it is not the protocol-conformant T7 baseline. What remains missing is the T2b protocol and an unoffloaded comparison; this run does not quantify Falcon offload benefit.
 - **Write side is media-bound at ~5.6 GB/s** on 2 drives. Cannot be improved by network changes on this rig.
 - **DDIO way-count tuning (`iio_llc_ways`) is a candidate knob for §4.2** — the local-path knee at (QD 256, 256k) gives a rough concurrency bound, but the wire-path knee needs its own measurement before it can be cited as a concurrency ceiling.
 - **A→C delta interpretation.** The 16% delta at QD ≥ 16 on reads is an aggregate number that includes wire framing, target `nvmet-rdma` dispatch, initiator `nvme_rdma` cost, and the `--nr-io-queues=16` operational cap. **It is not a "stack tax" datum**; that label was misapplied in earlier drafts (R1 in the plan means initiator-only ownership, not a stack-tax measurement). A separated stack-vs-wire number requires a working Config B — e.g., `nvmet-tcp` loopback or a second local NIC binding.

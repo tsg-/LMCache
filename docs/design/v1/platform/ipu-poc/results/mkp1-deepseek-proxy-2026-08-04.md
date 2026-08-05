@@ -6,14 +6,14 @@ fabric ceiling, with no adapter overhead resolvable at this speed, and
 `--in-flight` is already saturated at the smallest value tested (4).
 
 **Classification — read this before citing any number here.** All figures are
-**Falcon-backed kernel NVMe-oF, existing-controller, single-process `fs_native`
-sustained load**. The IPU acts solely as the `irdma` verbs device beneath the
-kernel `nvme_rdma`/`nvmet_rdma` path. These are **not** 64-QP, **not** R2,
-**not** physical multi-initiator, **not** 400 GbE, and **not** Falcon offload
-evidence. `--in-flight` is user-space submission concurrency; it does not
-create QPs. No perftest was run, no controller was created, no NVMe-oF
-reconnect occurred, and no queue count was changed — the already-established
-controllers carried every byte.
+**Falcon-offloaded kernel NVMe-oF, existing-controller, single-process
+`fs_native` sustained load**. The MEV IPU provides the Falcon/`irdma`
+transport beneath kernel `nvme_rdma`/`nvmet_rdma`. These are **not** 64-QP,
+**not** R2, **not** physical multi-initiator, and **not** 400 GbE.
+`--in-flight` is user-space submission concurrency; it does not create QPs.
+No perftest was run, no controller was created, no NVMe-oF reconnect occurred,
+and no queue count was changed — the already-established controllers carried
+every byte.
 
 ## Payload rationale
 
@@ -275,7 +275,8 @@ under `/root/mkp1-sustained/` and target telemetry under `/tmp/` on `mkp2`.
 
 **Does NOT establish:**
 
-- **Any Falcon offload capability.** The IPU is only the verbs device here.
+- **Falcon-offload benefit or fresh-QP scale.** Falcon offload carries this
+  kernel path, but the run has no unoffloaded control and reuses existing QPs.
 - **Anything about 400 GbE / 4×400 GbE.** No figure extrapolates.
 - **64-QP, R2, or physical multi-initiator behavior.** Single process, existing
   controllers, 16 I/O queues per controller.

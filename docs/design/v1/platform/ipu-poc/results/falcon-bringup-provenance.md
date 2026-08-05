@@ -125,10 +125,9 @@ Operational note: on gRPC errors, delete the generated certs folder on the ACC
   The plan's §5.2 Falcon/perftest gate asks for reproduction on the *current*
   feature pack, and therefore remains **unmet**: closing it needs a manifest
   pinning the running feature pack plus a fresh perftest run.
-- **Any Falcon offload capability.** Falcon transport being available is not
-  Falcon offload being implemented. In every measurement on this rig to date the
-  IPU acts solely as the `irdma` verbs device under the kernel
-  `nvme_rdma`/`nvmet_rdma` path — no completion-polling offload, no admission
-  offload. Do not cite this file as progress on the offload beads.
+- **Falcon-offload benefit or scalable QP support.** The IPU offloads the
+  Falcon/`irdma` transport beneath kernel `nvme_rdma`/`nvmet_rdma`, but this
+  historical capture has no unoffloaded control. Current fresh-RC-QP creation
+  remains blocked, so it also cannot establish stable higher-QP operation.
 - **Anything about the 400 GbE / 4×400 GbE MMG platform**, which remains
   unavailable. No figure here extrapolates to it.
