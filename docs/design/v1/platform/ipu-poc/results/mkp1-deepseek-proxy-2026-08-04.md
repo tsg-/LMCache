@@ -219,6 +219,46 @@ independently.
 no longer require a restart that would interrupt scraping mid-benchmark. The
 container was recreated **before** the sweep started, not during it.
 
+## Result — 28 MiB/key, 5:1 read:write
+
+The mixed runner was added after the 100% read sweep and exercised on the same
+existing-controller `fs_native` path. It uses one global user-space
+`--in-flight 16` window, a prepopulated read prefix (`ds28m`), and a distinct
+monotonic write prefix. This is not a 64-QP test: it does not create QPs.
+
+| Run | Window | Read goodput | Write goodput | Aggregate | Achieved ratio |
+|---|---:|---:|---:|---:|---:|
+| `mix51201785858700` | 120.037 s | 63.89 Gbps | 12.78 Gbps | **76.67 Gbps** | **5.0000:1** |
+
+All 32,650 read keys and 6,530 written keys completed successfully. Three
+deterministic samples from the new write prefix were loaded back after the
+window and matched their source buffers. The read counter gate uses the
+previously calibrated `InRdmaWrites * 52428` model; the write-only calibration
+established `InRdmaReads * 4096` for stores:
+
+| Direction | App-expected ops | Interior-slope ops | Ratio |
+|---|---:|---:|---:|
+| Read | 18,284,279 | 18,272,828 | 0.99937 |
+| Write | 46,807,040 | 46,778,795 | 0.99940 |
+
+All six fabric-error deltas were zero. On `mkp2`, both PM9A3s held roughly
+15.5k read IOPS plus 3.1k write IOPS at 256 KiB request size and about 100%
+utilization, with zero SMART media-error and error-log deltas.
+
+This accepts the current mixed-harness measurement, but it does **not**
+attribute the 100%-read to 5:1 read-goodput reduction solely to NAND. The
+single global window can let slow stores occupy slots, and the IPU, driver,
+PCIe, filesystem, and target media remain shared. A 1:1 falsifier and
+operation-level effective-concurrency telemetry are still needed for causal
+attribution.
+
+The write-only calibration (`calw1785857800`) ran first: 3,832 successful
+stores, 104.78 GiB app bytes, and `InRdmaReads` ratio 1.00001 against the
+4,096-byte model. The 120 s mixed cell consumed 178.55 GiB under its fresh
+write prefix. No existing corpus was deleted. Source is `f44b42f9` on
+`feat/bench-l2-sustained-only`, applied to the rig as `4ad45386`; artifacts are
+under `/root/mkp1-sustained/` and target telemetry under `/tmp/` on `mkp2`.
+
 ## What this does and does not establish
 
 **Establishes:**
@@ -242,25 +282,19 @@ container was recreated **before** the sweep started, not during it.
 - **Any adapter-side headroom claim.** Parity means this measurement cannot
   resolve `fs_native` overhead from zero, not that the overhead is zero.
 - **56 MiB / 512-token behavior.** Not yet run.
-- **Mixed read/write behavior.** 100% read only. The existing `bench l2`
-  store-then-load flow is *sequential* and cannot establish a 5:1 steady-state
-  ratio; calling it mixed R/W would be a mislabel.
+- **A bounded 5:1 mixed payload result.** The 120 s cell above proves the
+  completed-byte ratio and separate counter models at `--in-flight 16`; it does
+  not establish 1:1 behavior, 64-QP behavior, or a causal bottleneck.
 - **Host CPU cost.** Not measured.
 
 ## Outstanding
 
 1. **56 MiB / 512-token geometry** — 5,568 files = 304 GiB, same sweep. Capacity
    is available (2.7 TB free); needs its own integrity gate and prepop.
-2. **5:1 read:write mixed workload** — requires a real harness extension, since
-   no bounded mixed sustained runner exists (`--only` accepts only `lookup`,
-   `store`, `load`, all sequential). Contract: schedule five completed load
-   payloads per one completed store payload, record read and write bytes
-   separately, read from a prepopulated prefix, write to a distinct monotonic
-   prefix kept disjoint from all readers, and confirm the measured byte ratio is
-   5:1 within a stated tolerance. Note `wait_eventfd` (`data.py:168`) polls a
-   single fd, so a mixed runner must poll two completion fds. Since read and
-   write payloads are the same size, 5:1 by completed payload count equals 5:1
-   by bytes.
+2. **Mixed follow-up** — repeat the 5:1 cell, add `--in-flight 64`, and run a
+   bounded 1:1 falsifier. Keep fresh write prefixes and a documented reclaim
+   policy; add operation-level effective-concurrency telemetry before making a
+   causal claim about any read-goodput change.
 3. **The current-feature-pack perftest gate remains BLOCKED** — unchanged by this
    run; see [the 4 MiB result](mkp1-fsnative-sustained-2026-08-04.md).
 

@@ -29,6 +29,18 @@ Reclassifying the transport does **not** relax any measurement caveat: this
 is still rounds mode (not sustained), CPU-buffers-only with no GPU, and a
 full filesystem + NVMe-oF + media path rather than a bare link test.
 
+> **Throughput retraction (2026-08-05).** Do not cite the GB/s, Gbps, or
+> percent-of-fio figures in this document. The historical
+> `throughput_avg_mbps` field was computed in MiB/s (`1024 * 1024`) but was
+> interpreted here as decimal MB/s. Its raw JSON retains only aggregate
+> round statistics, not the individual round durations required to recompute a
+> valid aggregate goodput after the correction. This affects the 95.1 Gbps
+> read ladder, the 89.5 Gbps longest-run value, and the write figures. The
+> later sustained-read results use successful bytes divided by the measured
+> window with the correct binary-to-decimal conversion; use
+> `mkp1-fsnative-sustained-2026-08-04.md` and
+> `mkp1-deepseek-proxy-2026-08-04.md` for reportable read measurements.
+
 ## Headline
 
 | Path | Achieved | Matched comparator | % of comparator |
