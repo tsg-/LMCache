@@ -262,7 +262,7 @@ def test_every_completed_submit_yields_one_latency_and_one_success() -> None:
     adapter.join()
 
     assert len(result.submit_latencies) == result.completed_submits
-    assert len(result.success_counts) == result.completed_submits
+    assert result.success_counts == []
     assert result.total_keys == result.completed_submits * 5
     assert result.total_success == result.completed_submits * 5
 

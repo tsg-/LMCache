@@ -1248,6 +1248,12 @@ def _emit_l2_adapter_metrics(
         # BenchResult.submit_latencies.
         if r.submit_count > 0:
             section.add("submit_latency_count", "Submits measured", r.submit_count)
+            if r.submit_latency_sample_count != r.submit_count:
+                section.add(
+                    "submit_latency_sample_count",
+                    "Latency samples retained",
+                    r.submit_latency_sample_count,
+                )
             section.add(
                 "submit_latency_avg_ms",
                 "Submit latency avg (ms)",

@@ -250,6 +250,29 @@ def test_sustained_timeout_suppresses_partial_window_throughput() -> None:
     assert result.success_throughput_mbps == 0.0
 
 
+def test_sustained_bookkeeping_is_bounded_but_totals_remain_exact() -> None:
+    """Long windows retain bounded samples without losing exact totals."""
+    result = BenchResult(
+        operation="Load",
+        in_flight=4,
+        num_keys=2,
+        data_size_bytes=_MB,
+        mode=BenchMode.SUSTAINED,
+    )
+    observations = 5000
+    for _ in range(observations):
+        result.record_success(result.num_keys)
+        result.record_latency(0.002)
+        result.completed_submits += 1
+
+    assert result.success_counts == []
+    assert result.total_success == observations * result.num_keys
+    assert result.submit_count == observations
+    assert result.submit_latency_sample_count == 4096
+    assert result.submit_latency_total_sec == pytest.approx(observations * 0.002)
+    assert result.submit_latency_avg_ms == pytest.approx(2.0)
+
+
 def test_success_throughput_excludes_missed_keys() -> None:
     """An all-miss load must not report the requested rate as throughput.
 

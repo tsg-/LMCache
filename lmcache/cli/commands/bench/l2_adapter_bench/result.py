@@ -12,6 +12,7 @@ import statistics
 
 _KB = 1024
 _MB = 1024 * 1024
+_MAX_SUSTAINED_LATENCY_SAMPLES = 4096
 
 
 class BenchMode(Enum):
@@ -60,13 +61,16 @@ class BenchResult:
     ``completed_submits`` and ``sustained_window_sec`` describe the
     measured window and the round lists stay empty.
 
-    ``submit_latencies`` is populated in both modes: one entry per
-    completed submit, in seconds. **It is an upper bound on the true
-    service time** -- the clock stops when the single producer thread
-    *observes* the completion during a harvest, not when the adapter's
-    demux thread recorded it, and every completion harvested in the same
-    wakeup shares one timestamp. Treat it as submit-to-observed-completion
-    for a batch of ``num_keys`` keys, never as a per-key latency.
+    ``submit_latencies`` contains observed submit latencies in seconds.
+    Rounds mode retains every completion. Sustained mode retains only the
+    most recent :data:`_MAX_SUSTAINED_LATENCY_SAMPLES` observations so a
+    long run cannot accumulate unbounded Python objects in its hot path.
+    ``submit_latency_total_sec`` and ``submit_count`` still cover every
+    completion. A latency is an upper bound on the true service time: the
+    clock stops when the single producer thread *observes* the completion,
+    not when the adapter's demux thread recorded it. Treat it as
+    submit-to-observed-completion for a batch of ``num_keys`` keys, never
+    as a per-key latency.
     """
 
     operation: str
@@ -91,6 +95,13 @@ class BenchResult:
     # ``submit_latencies``. Normally ``in_flight``, but fewer for a round
     # that timed out. Lets warmup rounds be stripped exactly.
     round_latency_counts: list[int] = field(default_factory=list)
+    # Number of observed submit latencies, including samples no longer
+    # retained in the bounded sustained-mode history.
+    latency_observation_count: int = field(init=False, default=0)
+    # Number of latency samples retained for percentile reporting. Kept
+    # separately so the sustained hot path never needs to inspect the list.
+    latency_sample_count: int = field(init=False, default=0)
+    _latency_sample_cursor: int = field(init=False, default=0, repr=False)
     # Submits that completed, in BOTH modes. In ROUNDS mode this equals
     # ``sum(round_latency_counts)`` and is *not* used to derive
     # :attr:`total_keys` (rounds mode counts whole rounds); it exists so a
@@ -120,6 +131,14 @@ class BenchResult:
         """
         self.success_total = sum(self.success_counts)
         self.submit_latency_total_sec = math.fsum(self.submit_latencies)
+        self.latency_observation_count = len(self.submit_latencies)
+        if self.mode is BenchMode.SUSTAINED:
+            self.success_counts.clear()
+            if len(self.submit_latencies) > _MAX_SUSTAINED_LATENCY_SAMPLES:
+                self.submit_latencies[:] = self.submit_latencies[
+                    -_MAX_SUSTAINED_LATENCY_SAMPLES:
+                ]
+        self.latency_sample_count = len(self.submit_latencies)
 
     # ------------------------------------------------------------------
     # Hot-path recording
@@ -135,7 +154,8 @@ class BenchResult:
             keys: Keys the adapter reported successful for one submit
                 (rounds mode: for one whole round).
         """
-        self.success_counts.append(keys)
+        if self.mode is BenchMode.ROUNDS:
+            self.success_counts.append(keys)
         self.success_total += keys
 
     def record_latency(self, seconds: float) -> None:
@@ -149,7 +169,18 @@ class BenchResult:
                 See the class docstring for what that does and does not
                 measure.
         """
-        self.submit_latencies.append(seconds)
+        self.latency_observation_count += 1
+        if (
+            self.mode is BenchMode.SUSTAINED
+            and self.latency_sample_count == _MAX_SUSTAINED_LATENCY_SAMPLES
+        ):
+            self.submit_latencies[self._latency_sample_cursor] = seconds
+            self._latency_sample_cursor = (
+                self._latency_sample_cursor + 1
+            ) % _MAX_SUSTAINED_LATENCY_SAMPLES
+        else:
+            self.submit_latencies.append(seconds)
+            self.latency_sample_count += 1
         self.submit_latency_total_sec += seconds
 
     # ------------------------------------------------------------------
@@ -379,12 +410,26 @@ class BenchResult:
 
     @property
     def submit_count(self) -> int:
-        return len(self.submit_latencies)
+        if self.mode is BenchMode.ROUNDS:
+            return len(self.submit_latencies)
+        return self.latency_observation_count
+
+    @property
+    def submit_latency_sample_count(self) -> int:
+        """Number of latency samples retained for distribution statistics."""
+        if self.mode is BenchMode.ROUNDS:
+            return len(self.submit_latencies)
+        return self.latency_sample_count
 
     @property
     def submit_latency_avg_ms(self) -> float:
-        vals = self.submit_latencies
-        return statistics.mean(vals) * 1000 if vals else 0.0
+        if self.mode is BenchMode.ROUNDS:
+            if not self.submit_latencies:
+                return 0.0
+            return math.fsum(self.submit_latencies) * 1000 / len(self.submit_latencies)
+        if self.submit_count == 0:
+            return 0.0
+        return self.submit_latency_total_sec * 1000 / self.submit_count
 
     @property
     def submit_latency_min_ms(self) -> float:
