@@ -2,6 +2,7 @@
 """Tests for ``bench l2`` argument validation and warmup stripping."""
 
 # Standard
+from hashlib import sha256
 from pathlib import Path
 from unittest.mock import MagicMock
 import argparse
@@ -11,11 +12,17 @@ import json
 import pytest
 
 # First Party
+from lmcache.cli.metrics import Metrics
 from lmcache.cli.commands.bench.l2_adapter_bench.command import (
     _parse_read_write_ratio,
     _strip_warmup,
     add_l2_arguments,
     run_l2_adapter_bench,
+)
+from lmcache.cli.commands.bench.l2_adapter_bench.geometry import (
+    GeometryProfileError,
+    resolve_geometry_profile,
+    resolve_inline_shape_spec,
 )
 from lmcache.cli.commands.bench.l2_adapter_bench.result import BenchResult
 
@@ -33,6 +40,61 @@ def _parse(*argv: str, adapter_json: str = _ADAPTER_JSON) -> argparse.Namespace:
 
 def _fs_adapter_json(tmp_path: Path) -> str:
     return json.dumps({"type": "fs", "base_path": str(tmp_path / "l2")})
+
+
+def _write_deepseek_profile(tmp_path: Path) -> Path:
+    """Write the uniform 256-token DeepSeek-V3 MLA profile used by the PoC."""
+    profile = tmp_path / "deepseek_v3_fp8.yaml"
+    profile.write_text(
+        "\n".join(
+            [
+                'model: {name: "deepseek-ai/DeepSeek-V3"}',
+                (
+                    "architecture: {num_layers: 61, attention: mla, "
+                    "cached_elems_per_token: 576}"
+                ),
+                "quantization: {dtype_bytes: 1}",
+                "chunking: {tokens_per_chunk: 256}",
+                "page: {page_size_bytes: 147456}",
+                "burst: {layers_per_burst: 61, burst_bytes: 8994816}",
+            ]
+        )
+    )
+    return profile
+
+
+def _write_gqa_profile(tmp_path: Path) -> Path:
+    """Write a uniform GQA profile with 256 KiB pages."""
+    profile = tmp_path / "gqa.yaml"
+    profile.write_text(
+        "\n".join(
+            [
+                "model: {name: test-gqa}",
+                (
+                    "architecture: {num_layers: 2, kv_size: 2, "
+                    "num_kv_heads: 8, head_size: 128}"
+                ),
+                "quantization: {dtype_bytes: 1}",
+                "chunking: {tokens_per_chunk: 128}",
+                "page: {page_size_bytes: 262144}",
+                "burst: {layers_per_burst: 2, burst_bytes: 524288}",
+            ]
+        )
+    )
+    return profile
+
+
+class _MetricsCommand:
+    """Minimal command surface that retains the emitted metrics."""
+
+    def __init__(self) -> None:
+        self.metrics: Metrics | None = None
+
+    def create_metrics(
+        self, title: str, _args: argparse.Namespace, width: int
+    ) -> Metrics:
+        self.metrics = Metrics(title)
+        return self.metrics
 
 
 # ---------------------------------------------------------------------------
@@ -57,6 +119,330 @@ def test_duration_sec_and_warmup_sec_parse() -> None:
 
     assert args.duration_sec == 30.0
     assert args.warmup_sec == 5.0
+
+
+def test_kvcache_shape_profile_resolves_deepseek_page_burst(
+    tmp_path: Path,
+) -> None:
+    """A profile must set the submitted object count and page size."""
+    profile = _write_deepseek_profile(tmp_path)
+    command = _MetricsCommand()
+    args = _parse(
+        "--only",
+        "store",
+        "--key-prefix",
+        "deepseek-profile",
+        "--kvcache-shape-profile",
+        str(profile),
+        "--in-flight",
+        "1",
+        "--rounds",
+        "1",
+        "--warmup-rounds",
+        "0",
+        adapter_json=_fs_adapter_json(tmp_path),
+    )
+
+    run_l2_adapter_bench(command, args)
+
+    assert args.num_keys == 61
+    assert args.data_size_kb == 144
+    assert command.metrics is not None
+    geometry = command.metrics.to_dict()["metrics"]["geometry"]
+    assert geometry == {
+        "profile_path": str(profile.resolve()),
+        "profile_sha256": sha256(profile.read_bytes()).hexdigest(),
+        "model_name": "deepseek-ai/DeepSeek-V3",
+        "tokens_per_chunk": 256,
+        "objects_per_submit": 61,
+        "page_size_bytes": 147456,
+        "task_size_bytes": 8994816,
+    }
+    # A file-backed profile records no inline spec.
+    assert "shape_spec" not in geometry
+
+
+def test_kvcache_shape_profile_resolves_gqa_page_formula(tmp_path: Path) -> None:
+    """GQA profiles resolve the per-layer page from KV heads and head size."""
+    geometry = resolve_geometry_profile(str(_write_gqa_profile(tmp_path)))
+
+    assert geometry.model_name == "test-gqa"
+    assert geometry.objects_per_submit == 2
+    assert geometry.page_size_bytes == 262144
+    assert geometry.data_size_kb == 256
+    assert geometry.task_size_bytes == 524288
+
+
+@pytest.mark.parametrize(
+    ("flag", "value"),
+    [
+        pytest.param(
+            "--num-keys",
+            "61",
+            id="explicit-num-keys",
+        ),
+        pytest.param(
+            "--data-size-kb",
+            "144",
+            id="explicit-data-size",
+        ),
+    ],
+)
+def test_kvcache_shape_profile_rejects_manual_raw_geometry(
+    tmp_path: Path, flag: str, value: str
+) -> None:
+    """Profile mode must have one unambiguous source for object geometry."""
+    args = _parse(
+        "--kvcache-shape-profile",
+        str(_write_deepseek_profile(tmp_path)),
+        flag,
+        value,
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        run_l2_adapter_bench(MagicMock(), args)
+
+    assert exc.value.code == 2
+
+
+def test_default_raw_geometry_does_not_conflict_with_a_profile(
+    tmp_path: Path,
+) -> None:
+    """Only a user-supplied --num-keys conflicts; the default must not."""
+    args = _parse("--kvcache-shape-profile", str(_write_deepseek_profile(tmp_path)))
+
+    assert args.num_keys == 32
+    assert not getattr(args, "_explicit_raw_geometry", set())
+
+
+def test_shape_spec_and_shape_profile_are_mutually_exclusive(
+    tmp_path: Path,
+) -> None:
+    """The two flags are alternative spellings, so argparse rejects both."""
+    with pytest.raises(SystemExit) as exc:
+        _parse(
+            "--kvcache-shape-spec",
+            "(1,1024,256,1,576):uint8:61",
+            "--kvcache-shape-profile",
+            str(_write_deepseek_profile(tmp_path)),
+        )
+
+    assert exc.value.code == 2
+
+
+def test_inline_shape_spec_matches_the_deepseek_profile_geometry() -> None:
+    """The inline server grammar must resolve the same page as the YAML."""
+    geometry = resolve_inline_shape_spec("(1,1024,256,1,576):uint8:61")
+
+    # NB (1024) is the paged-KV pool's block count, not part of one page,
+    # so it must not appear in the page size.
+    assert geometry.page_size_bytes == 147456
+    assert geometry.data_size_kb == 144
+    assert geometry.objects_per_submit == 61
+    assert geometry.tokens_per_chunk == 256
+    assert geometry.task_size_bytes == 8994816
+    # An inline spec has no file, so it records the spec instead.
+    assert geometry.source_path == ""
+    assert geometry.sha256 == ""
+    assert geometry.shape_spec == "(1,1024,256,1,576):uint8:61"
+
+
+def test_inline_shape_spec_sums_layers_across_uniform_groups() -> None:
+    """Groups may differ in layer count as long as the page size matches."""
+    geometry = resolve_inline_shape_spec(
+        "(1,1024,256,1,576):uint8:30;(1,512,256,1,576):uint8:31"
+    )
+
+    assert geometry.objects_per_submit == 61
+    assert geometry.page_size_bytes == 147456
+    assert geometry.shape_spec == (
+        "(1,1024,256,1,576):uint8:30;(1,512,256,1,576):uint8:31"
+    )
+
+
+@pytest.mark.parametrize(
+    ("spec", "field"),
+    [
+        pytest.param("(0,1024,256,1,576):uint8:61", "kv_size", id="zero-kv-size"),
+        # NB never reaches the page size, so only the explicit check
+        # catches it -- and it is recorded as replayable provenance.
+        pytest.param("(1,0,256,1,576):uint8:61", "NB", id="zero-num-blocks"),
+        pytest.param("(1,-4,256,1,576):uint8:61", "NB", id="negative-num-blocks"),
+        pytest.param("(1,1024,0,1,576):uint8:61", "BS", id="zero-block-size"),
+        pytest.param("(1,1024,256,0,576):uint8:61", "NH", id="zero-heads"),
+        pytest.param("(1,1024,256,1,0):uint8:61", "HS", id="zero-head-size"),
+        pytest.param("(1,1024,256,1,-576):uint8:61", "HS", id="negative-head-size"),
+    ],
+)
+def test_inline_shape_spec_rejects_non_positive_dimensions(
+    spec: str, field: str
+) -> None:
+    """A zero page passes the KiB check, so reject the dimension instead."""
+    with pytest.raises(GeometryProfileError, match=f"{field} must be positive"):
+        resolve_inline_shape_spec(spec)
+
+
+def test_inline_shape_spec_rejects_differing_block_sizes() -> None:
+    """Equal page bytes do not imply equal BS, and BS sets tokens_per_chunk."""
+    # Both groups are 147456 B: 256*1*576 and 128*2*576.
+    with pytest.raises(GeometryProfileError, match="uniform block size"):
+        resolve_inline_shape_spec(
+            "(1,1024,256,1,576):uint8:30;(1,1024,128,2,576):uint8:31"
+        )
+
+
+def test_inline_shape_spec_records_the_spec_as_its_provenance(
+    tmp_path: Path,
+) -> None:
+    """The run must be reproducible from the structured output alone."""
+    command = _MetricsCommand()
+    args = _parse(
+        "--only",
+        "store",
+        "--key-prefix",
+        "inline-spec",
+        "--kvcache-shape-spec",
+        "(1,1024,256,1,576):uint8:61",
+        "--in-flight",
+        "1",
+        "--rounds",
+        "1",
+        "--warmup-rounds",
+        "0",
+        adapter_json=_fs_adapter_json(tmp_path),
+    )
+
+    run_l2_adapter_bench(command, args)
+
+    assert command.metrics is not None
+    geometry = command.metrics.to_dict()["metrics"]["geometry"]
+    assert geometry == {
+        "shape_spec": "(1,1024,256,1,576):uint8:61",
+        "model_name": "inline-shape-spec",
+        "tokens_per_chunk": 256,
+        "objects_per_submit": 61,
+        "page_size_bytes": 147456,
+        "task_size_bytes": 8994816,
+    }
+    # The file-provenance form is absent, not empty.
+    assert "profile_path" not in geometry
+    assert "profile_sha256" not in geometry
+
+
+def test_inline_shape_spec_rejects_heterogeneous_page_sizes() -> None:
+    """bench l2 submits flat buffers, so mixed pages cannot be averaged."""
+    with pytest.raises(GeometryProfileError, match="uniform page size"):
+        resolve_inline_shape_spec(
+            "(1,1024,256,1,576):uint8:61;(2,1024,256,8,128):uint8:2"
+        )
+
+
+def test_inline_shape_spec_rejects_non_kib_page() -> None:
+    """--data-size-kb can express whole KiB only."""
+    with pytest.raises(GeometryProfileError, match="multiple of 1024"):
+        resolve_inline_shape_spec("(1,1024,1,1,1):uint8:1")
+
+
+def test_inline_shape_spec_rejects_malformed_grammar() -> None:
+    """A parse failure must surface as a geometry error, not a ValueError."""
+    with pytest.raises(GeometryProfileError, match="invalid --kvcache-shape-spec"):
+        resolve_inline_shape_spec("not-a-spec")
+
+
+def test_mla_page_derives_from_lora_rank_and_rope_dim(tmp_path: Path) -> None:
+    """MLA caches one shared latent, so kv_lora_rank + qk_rope_head_dim wins."""
+    profile = tmp_path / "mla-components.yaml"
+    profile.write_text(
+        "\n".join(
+            [
+                "model: {name: test-mla}",
+                (
+                    "architecture: {num_layers: 61, attention: mla, "
+                    "kv_lora_rank: 512, qk_rope_head_dim: 64}"
+                ),
+                "quantization: {dtype_bytes: 1}",
+                "chunking: {tokens_per_chunk: 256}",
+                "page: {page_size_bytes: 147456}",
+                "burst: {layers_per_burst: 61}",
+            ]
+        )
+    )
+
+    geometry = resolve_geometry_profile(str(profile))
+
+    assert geometry.page_size_bytes == 147456
+
+
+def test_mla_page_cross_checks_a_redundant_declared_total(tmp_path: Path) -> None:
+    """A declared cached_elems_per_token must agree with the components."""
+    profile = tmp_path / "mla-mismatch.yaml"
+    profile.write_text(
+        "\n".join(
+            [
+                "model: {name: test-mla}",
+                (
+                    "architecture: {num_layers: 61, attention: mla, "
+                    "kv_lora_rank: 512, qk_rope_head_dim: 64, "
+                    "cached_elems_per_token: 640}"
+                ),
+                "quantization: {dtype_bytes: 1}",
+                "chunking: {tokens_per_chunk: 256}",
+                "page: {page_size_bytes: 147456}",
+                "burst: {layers_per_burst: 61}",
+            ]
+        )
+    )
+
+    with pytest.raises(GeometryProfileError, match="cached_elems_per_token"):
+        resolve_geometry_profile(str(profile))
+
+
+def test_mla_page_requires_components_or_a_total(tmp_path: Path) -> None:
+    """An MLA profile with no element source cannot be validated."""
+    profile = tmp_path / "mla-empty.yaml"
+    profile.write_text(
+        "\n".join(
+            [
+                "model: {name: test-mla}",
+                "architecture: {num_layers: 1, attention: mla}",
+                "quantization: {dtype_bytes: 1}",
+                "chunking: {tokens_per_chunk: 256}",
+                "page: {page_size_bytes: 147456}",
+                "burst: {layers_per_burst: 1}",
+            ]
+        )
+    )
+
+    with pytest.raises(GeometryProfileError, match="must declare kv_lora_rank"):
+        resolve_geometry_profile(str(profile))
+
+
+def test_kvcache_shape_profile_rejects_non_kib_page_before_adapter(
+    tmp_path: Path,
+) -> None:
+    """The L2 CLI can express whole KiB only, so reject partial pages."""
+    profile = tmp_path / "non-kib.yaml"
+    profile.write_text(
+        "\n".join(
+            [
+                "model: {name: test}",
+                (
+                    "architecture: {num_layers: 1, kv_size: 1, "
+                    "num_kv_heads: 1, head_size: 1}"
+                ),
+                "quantization: {dtype_bytes: 1}",
+                "chunking: {tokens_per_chunk: 1}",
+                "page: {page_size_bytes: 1}",
+                "burst: {layers_per_burst: 1, burst_bytes: 1}",
+            ]
+        )
+    )
+    args = _parse("--kvcache-shape-profile", str(profile))
+
+    with pytest.raises(SystemExit) as exc:
+        run_l2_adapter_bench(MagicMock(), args)
+
+    assert exc.value.code == 2
 
 
 @pytest.mark.parametrize(

@@ -1093,6 +1093,48 @@ Stress the adapter with more in-flight submits and larger payloads:
        --data-size-kb 512 \
        --rounds 5 --warmup-rounds 1
 
+Use a YAML model profile to submit one uniform page per layer of a
+full retrieval burst:
+
+.. code-block:: bash
+
+   lmcache bench l2 \
+       --l2-adapter '{"type":"fs","base_path":"/data/lmcache-bench"}' \
+       --kvcache-shape-profile /path/to/deepseek_v3_fp8.yaml \
+       --only store --key-prefix deepseek-v3-256-run1 \
+       --in-flight 16 --rounds 100 --warmup-rounds 0
+
+The profile above resolves to 61 objects of 147456 bytes (144 KiB) per
+submit. Give each store run a fresh ``--key-prefix``; reusing a prefix
+writes over an existing corpus, and the freshness check exists to catch
+that.
+
+The same geometry can be given inline, using the tensor-group grammar
+that :ref:`lmcache-bench-server` accepts:
+
+.. code-block:: bash
+
+   lmcache bench l2 \
+       --l2-adapter '{"type":"fs","base_path":"/data/lmcache-bench"}' \
+       --kvcache-shape-spec '(1,1024,256,1,576):uint8:61' \
+       --only load --key-prefix deepseek-v3-256-run1 \
+       --in-flight 16 --rounds 100 --warmup-rounds 0
+
+Warmup rounds are part of the key universe, so the load pass must repeat the
+store pass's ``--warmup-rounds`` as well as its ``--rounds``. Omitting it
+here would take the default of 1 and ask for a wave of keys the store run
+never wrote.
+
+The two forms are alternative spellings of one input and cannot be
+combined. ``--kvcache-shape-spec`` is the inline tensor-group grammar and
+records the canonicalized spec in the structured output;
+``--kvcache-shape-profile`` reads a hand-authored YAML file and records its
+path and SHA-256 instead. Either way
+``bench l2`` uses only the resolved page size and layer count to make flat
+CPU-buffer requests; it does not allocate tensor groups or exercise the MP
+server, so a spec that declares differing page sizes across groups is
+rejected rather than averaged.
+
 Benchmark an O_DIRECT adapter with aligned L1 buffers:
 
 .. code-block:: bash
@@ -1160,6 +1202,25 @@ Options
    * - ``--num-keys N``
      - ``32``
      - Number of keys per submit.
+   * - ``--kvcache-shape-spec SPEC``
+     - *(unset)*
+     - Resolve the objects per submit and the byte size of each object from an
+       inline tensor-group spec, using the same grammar as
+       :ref:`lmcache-bench-server`. The per-layer page is
+       ``kv_size * BS * NH * HS * element_size``; ``NB`` is the paged-KV pool's
+       block count, not part of one page, so it does not participate. Every
+       shape field must be positive, and every group must resolve to the same
+       page size and the same ``BS``. The canonicalized spec is recorded in the
+       structured output. Mutually exclusive with ``--kvcache-shape-profile``,
+       and cannot be combined with explicit ``--num-keys`` or
+       ``--data-size-kb``.
+   * - ``--kvcache-shape-profile YAML``
+     - *(unset)*
+     - Resolve the same geometry from a hand-authored YAML model profile,
+       which additionally records the profile path and SHA-256 in the
+       structured result. Mutually exclusive with ``--kvcache-shape-spec``,
+       and cannot be combined with explicit ``--num-keys`` or
+       ``--data-size-kb``.
    * - ``--in-flight N``
      - ``1``
      - In-flight submits per round. Each round issues this many

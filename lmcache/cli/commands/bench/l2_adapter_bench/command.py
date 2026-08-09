@@ -18,6 +18,9 @@ import sys
 if TYPE_CHECKING:
     # First Party
     from lmcache.cli.commands.base import BaseCommand
+    from lmcache.cli.commands.bench.l2_adapter_bench.geometry import (
+        L2GeometryProfile,
+    )
     from lmcache.cli.commands.bench.l2_adapter_bench.result import BenchResult
 
 
@@ -43,6 +46,22 @@ def _parse_read_write_ratio(value: str) -> tuple[int, int]:
             "--read-write-ratio values must both be positive, e.g. 5:1"
         )
     return read_count, write_count
+
+
+class _ExplicitGeometryAction(argparse.Action):
+    """Store a raw geometry value and remember that the user supplied it."""
+
+    def __call__(
+        self,
+        _parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: object,
+        _option_string: str | None = None,
+    ) -> None:
+        setattr(namespace, self.dest, values)
+        explicit = set(getattr(namespace, "_explicit_raw_geometry", ()))
+        explicit.add(self.dest)
+        namespace._explicit_raw_geometry = explicit
 
 
 # ---------------------------------------------------------------------------
@@ -73,6 +92,7 @@ def add_l2_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--num-keys",
+        action=_ExplicitGeometryAction,
         type=int,
         default=32,
         help="Keys per submit (default: 32).",
@@ -89,9 +109,45 @@ def add_l2_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--data-size-kb",
+        action=_ExplicitGeometryAction,
         type=int,
         default=256,
         help="Data size per key in KB (default: 256).",
+    )
+    # The two geometry sources are alternative spellings of one input, so
+    # argparse rejects supplying both.
+    geometry_source = parser.add_mutually_exclusive_group()
+    geometry_source.add_argument(
+        "--kvcache-shape-spec",
+        type=str,
+        metavar="SPEC",
+        help=(
+            "Resolve KV cache page geometry from an inline tensor-group "
+            "spec, using the same grammar as 'lmcache bench server "
+            "--kvcache-shape-spec': (kv_size,NB,BS,NH,HS):dtype:layers, "
+            "groups separated by ';'. Every group must resolve to the same "
+            "page size and the same BS, since bench l2 submits flat byte "
+            "buffers, and every shape field must be positive. Sets "
+            "--num-keys from the total layer count and --data-size-kb from "
+            "the per-layer page. Cannot be combined with explicit "
+            "--num-keys or --data-size-kb."
+        ),
+    )
+    geometry_source.add_argument(
+        "--kvcache-shape-profile",
+        type=str,
+        metavar="YAML",
+        help=(
+            "Resolve a uniform KV cache page shape from a hand-authored YAML "
+            "model profile. Sets --num-keys from burst.layers_per_burst and "
+            "--data-size-kb from page.page_size_bytes, then records the "
+            "source and SHA-256 in structured output. Cannot be combined "
+            "with explicit --num-keys or --data-size-kb. Distinct from "
+            "'lmcache bench server --kvcache-shape-spec', which takes an "
+            "inline tensor-group grammar rather than a file path; the two "
+            "forms are not interchangeable. This models L2 object count and "
+            "payload size; it does not allocate model-shaped tensors."
+        ),
     )
     parser.add_argument(
         "--l1-align-bytes",
@@ -318,6 +374,45 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
             ``command.create_metrics``.
         args: Parsed CLI arguments from the ``bench l2`` subparser.
     """
+    geometry_profile: L2GeometryProfile | None = None
+    geometry_profile_path = getattr(args, "kvcache_shape_profile", None)
+    inline_shape_spec = getattr(args, "kvcache_shape_spec", None)
+    if geometry_profile_path or inline_shape_spec:
+        # First Party
+        from lmcache.cli.commands.bench.l2_adapter_bench.geometry import (
+            GeometryProfileError,
+            resolve_geometry_profile,
+            resolve_inline_shape_spec,
+        )
+
+        source_flag = (
+            "--kvcache-shape-profile"
+            if geometry_profile_path
+            else "--kvcache-shape-spec"
+        )
+        explicit_raw_geometry = getattr(args, "_explicit_raw_geometry", set())
+        if explicit_raw_geometry:
+            supplied = ", ".join(
+                f"--{field.replace('_', '-')}"
+                for field in sorted(explicit_raw_geometry)
+            )
+            print(
+                f"Error: {source_flag} cannot be combined with "
+                f"{supplied}; the resolved geometry supplies both values.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        try:
+            if geometry_profile_path:
+                geometry_profile = resolve_geometry_profile(geometry_profile_path)
+            else:
+                geometry_profile = resolve_inline_shape_spec(inline_shape_spec)
+        except GeometryProfileError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(2)
+        args.num_keys = geometry_profile.objects_per_submit
+        args.data_size_kb = geometry_profile.data_size_kb
+
     # Lazy imports: keep CLI loadable without torch / native deps.
     # First Party
     from lmcache.cli.commands.bench.l2_adapter_bench.data import (
@@ -517,6 +612,15 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
         # Per-round progress log; suppressed by --quiet.
         if not quiet:
             print(msg)
+
+    if geometry_profile is not None:
+        log(
+            "[KV Cache Shape] "
+            f"{geometry_profile.model_name}: "
+            f"{geometry_profile.objects_per_submit} objects x "
+            f"{geometry_profile.page_size_bytes} B "
+            f"({geometry_profile.tokens_per_chunk} tokens/chunk)"
+        )
 
     # Resolve L2 adapter JSON: CLI arg takes priority, then env var
     l2_adapter_specs = args.l2_adapter
@@ -1048,6 +1152,7 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
             l2_adapter_json=l2_adapter_specs[0],
             keys_per_round=keys_per_round,
             data_per_round_mb=(keys_per_round * data_size) / mb,
+            geometry_profile=geometry_profile,
             results=results,
         )
     except (StoreNamespaceNotEmptyError, StoreFreshnessUnknownError) as e:
@@ -1130,6 +1235,7 @@ def _emit_l2_adapter_metrics(
     l2_adapter_json: str,
     keys_per_round: int,
     data_per_round_mb: float,
+    geometry_profile: "L2GeometryProfile | None",
     results: list,
 ) -> None:
     """Emit L2 adapter benchmark summary using the CLI metrics system."""
@@ -1151,6 +1257,37 @@ def _emit_l2_adapter_metrics(
         "Data / round (MB)",
         round(data_per_round_mb, 2),
     )
+    if geometry_profile is not None:
+        geometry_section = metrics.add_section("geometry", "KV Cache Shape")
+        # Record whichever provenance form the source actually has, so the
+        # run is reproducible from this output alone. Emitting the unused
+        # form as an empty string would read as a missing file or spec.
+        if geometry_profile.source_path:
+            geometry_section.add(
+                "profile_path", "Profile path", geometry_profile.source_path
+            )
+            geometry_section.add(
+                "profile_sha256", "Profile SHA-256", geometry_profile.sha256
+            )
+        if geometry_profile.shape_spec:
+            geometry_section.add(
+                "shape_spec", "Shape spec", geometry_profile.shape_spec
+            )
+        geometry_section.add("model_name", "Model", geometry_profile.model_name)
+        geometry_section.add(
+            "tokens_per_chunk", "Tokens / chunk", geometry_profile.tokens_per_chunk
+        )
+        geometry_section.add(
+            "objects_per_submit",
+            "Objects / submit",
+            geometry_profile.objects_per_submit,
+        )
+        geometry_section.add(
+            "page_size_bytes", "Page size (bytes)", geometry_profile.page_size_bytes
+        )
+        geometry_section.add(
+            "task_size_bytes", "Task payload (bytes)", geometry_profile.task_size_bytes
+        )
     duration_sec = float(getattr(args, "duration_sec", 0.0))
     if duration_sec > 0:
         cfg_section.add("mode", "Measurement mode", "sustained")
