@@ -16,6 +16,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.cli.commands.bench.l2_adapter_bench import runner as runner_module
 from lmcache.cli.commands.bench.l2_adapter_bench.result import (
     BenchMode,
     BenchResult,
@@ -344,6 +345,31 @@ def test_drain_tail_is_reported() -> None:
     # Window spans past the deadline by roughly one service time.
     assert result.sustained_window_sec >= 0.25
     assert result.sustained_drain_sec > 0
+
+
+def test_drain_tail_starts_at_the_refill_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first completion after the deadline belongs to the drain tail."""
+    timestamps = iter([0.0, 0.0, 1.2])
+    monkeypatch.setattr(runner_module.time, "perf_counter", lambda: next(timestamps))
+    monkeypatch.setattr(runner_module, "wait_eventfd", lambda *_args, **_kwargs: True)
+    result = _sustained(in_flight=1, num_keys=1)
+
+    _next, outstanding = run_sustained_window(
+        result,
+        submit=lambda _index, _slot: 1,
+        harvest=lambda _pending: {1: 1},
+        event_fd=0,
+        duration_sec=1.0,
+        timeout=1.0,
+        success_for=int,
+        log=lambda _message: None,
+    )
+
+    assert outstanding == 0
+    assert result.sustained_window_sec == pytest.approx(1.2)
+    assert result.sustained_drain_sec == pytest.approx(0.2)
 
 
 def test_throughput_reflects_the_measured_window() -> None:
@@ -696,7 +722,7 @@ def test_mixed_window_accepts_overlapping_task_ids() -> None:
     """Task id zero is valid concurrently for one store and one load."""
     adapter = _MixedFakeAdapter()
     try:
-        load_result, store_result, accepted = _run_mixed(adapter, duration_sec=0.5)
+        load_result, store_result, accepted = _run_mixed(adapter, duration_sec=1.0)
     finally:
         adapter.close()
 

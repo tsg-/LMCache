@@ -490,6 +490,7 @@ def test_mixed_sustained_run_uses_distinct_read_and_write_prefixes(
         "0.3",
         "--read-write-ratio",
         "5:1",
+        "--no-skip-verify",
         "--key-prefix",
         "mixed-read",
         "--write-key-prefix",

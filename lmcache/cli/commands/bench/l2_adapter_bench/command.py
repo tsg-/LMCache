@@ -474,13 +474,15 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
             file=sys.stderr,
         )
         sys.exit(2)
-    if sustained and not args.skip_verify:
+    if sustained and not mixed and not args.skip_verify:
         # Sustained mode recycles buffers across submits and does not
-        # zero load buffers, so the round-trip comparison has no stable
-        # pair to check. Fail rather than silently skip the gate.
+        # retain a stable source/destination pair for a full round-trip
+        # comparison. Mixed mode instead does bounded post-window
+        # write-prefix readbacks.
         print(
-            "Error: --no-skip-verify requires rounds mode; "
-            "--duration-sec cannot verify round-trip integrity",
+            "Error: --no-skip-verify requires rounds mode or sustained "
+            "--read-write-ratio mode; a pure sustained direction cannot "
+            "perform a byte-level round-trip check.",
             file=sys.stderr,
         )
         sys.exit(2)
@@ -901,6 +903,7 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
                 store_objs_for_slot=_sustained_store_objs,
                 log=log,
                 on_result=_publish_measured,
+                verify_write_samples=not args.skip_verify,
             )
             results.extend([load_result, store_result])
             failed = not accepted

@@ -368,10 +368,10 @@ def run_sustained_window(
 
     Issues ``result.in_flight`` submits, then exactly one replacement per
     completion until the deadline passes, then drains the remaining
-    window. Populates ``result.submit_latencies``,
-    ``result.success_counts`` (one entry per *submit*, not per round),
-    ``result.completed_submits``, ``result.sustained_window_sec`` and
-    ``result.sustained_drain_sec``.
+    window. Records one success and one observed latency per completion,
+    then updates ``result.completed_submits``, ``result.sustained_window_sec``
+    and ``result.sustained_drain_sec``. Sustained results retain exact
+    running totals while bounding the retained latency sample.
 
     ``sustained_window_sec`` spans the first submit to the last observed
     completion, so the ramp-down tail is charged to the run. That makes
@@ -470,7 +470,7 @@ def run_sustained_window(
                 pending[submit(submit_index, slot)] = (submitted_at, slot)
                 submit_index += 1
         elif refill_end == 0.0:
-            refill_end = now
+            refill_end = deadline
 
     result.sustained_window_sec = last_observed - t_start
     result.sustained_drain_sec = (
@@ -491,6 +491,7 @@ def run_sustained_mixed_window(
     duration_sec: float,
     timeout: float,
     log: LogFn,
+    verify_write_samples: bool = True,
 ) -> bool:
     """Run a sustained read/write window under one global in-flight limit.
 
@@ -511,6 +512,8 @@ def run_sustained_mixed_window(
         duration_sec: Measured refill-window duration in seconds.
         timeout: Maximum wait for a completion event in seconds.
         log: Progress logger.
+        verify_write_samples: Whether to read back a bounded sample of
+            mixed-window stores before accepting the result.
 
     Returns:
         ``True`` when every completion was successful and the final successful
@@ -649,9 +652,9 @@ def run_sustained_mixed_window(
             while free_slots and time.perf_counter() < deadline:
                 issue(free_slots.pop())
         elif refill_end == 0.0:
-            refill_end = now
+            refill_end = deadline
 
-    if not rejected and not pending:
+    if verify_write_samples and not rejected and not pending:
         if not verify_mixed_write_samples(
             adapter,
             write_samples,
@@ -714,6 +717,8 @@ def verify_mixed_write_samples(
     """
     for keys, expected_objects, slot in samples:
         loaded_objects = load_objs_for_slot(slot)
+        for loaded in loaded_objects:
+            loaded.raw_data.fill_(0xA5)
         task_id = adapter.submit_load_task(keys, loaded_objects)
         if not wait_eventfd(adapter.get_load_event_fd(), timeout=timeout):
             log("  [Mixed Verify] TIMEOUT waiting for write-prefix readback")
@@ -744,6 +749,7 @@ def bench_mixed_sustained(
     store_objs_for_slot: SlotObjProvider,
     log: LogFn,
     on_result: ResultHook = _discard_result_hook,
+    verify_write_samples: bool = True,
 ) -> tuple[BenchResult, BenchResult, bool]:
     """Benchmark a sustained read/write payload mix.
 
@@ -765,6 +771,8 @@ def bench_mixed_sustained(
         store_objs_for_slot: Store buffers for a global window slot.
         log: Progress logger.
         on_result: Receives each measured direction before submissions begin.
+        verify_write_samples: Whether to read back a bounded sample of
+            successful stores before accepting the result.
 
     Returns:
         ``(load_result, store_result, accepted)``. ``accepted`` is false on
@@ -805,6 +813,7 @@ def bench_mixed_sustained(
         duration_sec=duration_sec,
         timeout=max(_LOAD_TIMEOUT_SEC, _STORE_TIMEOUT_SEC),
         log=log,
+        verify_write_samples=verify_write_samples,
     )
     _log_sustained_summary(load_result, log)
     _log_sustained_summary(store_result, log)
