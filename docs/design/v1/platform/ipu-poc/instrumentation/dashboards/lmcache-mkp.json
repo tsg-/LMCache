@@ -24,12 +24,12 @@
     {
       "collapsed": false,
       "gridPos": {
-        "h": 1,
-        "w": 24,
         "x": 0,
-        "y": 0
+        "y": 0,
+        "w": 24,
+        "h": 1
       },
-      "title": "LMCache bench l2 (short-lived endpoint)",
+      "title": "LMCache bench l2 (measured window; short-lived endpoint)",
       "type": "row"
     },
     {
@@ -44,18 +44,44 @@
         }
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
         "x": 0,
-        "y": 1
+        "y": 1,
+        "w": 12,
+        "h": 8
       },
       "targets": [
         {
-          "expr": "rate(lmcache_bench_l2_success_bytes_total{job=\"lmcache_bench\",phase=\"measured\"}[60s]) * 8",
-          "legendFormat": "{{host}} {{operation}}"
+          "expr": "sum by (operation) (rate(lmcache_bench_l2_success_bytes_total{job=\"lmcache_bench\",phase=\"measured\"}[60s])) * 8",
+          "legendFormat": "aggregate {{operation}}"
         }
       ],
-      "title": "LMCache measured goodput [TREND ONLY]",
+      "title": "LMCache aggregate goodput [TREND ONLY]",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM"
+      },
+      "description": "Total application payload goodput per initiator. Operations are summed here to expose initiator imbalance without combining the read and write aggregate lines.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bps"
+        }
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 1,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum by (host, initiator) (rate(lmcache_bench_l2_success_bytes_total{job=\"lmcache_bench\",phase=\"measured\"}[60s])) * 8",
+          "legendFormat": "{{host}} i{{initiator}}"
+        }
+      ],
+      "title": "LMCache goodput by initiator [TREND ONLY]",
       "type": "timeseries"
     },
     {
@@ -65,23 +91,41 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "ops"
+          "unit": "ops",
+          "noValue": "No active run"
         }
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 1
+        "x": 0,
+        "y": 9,
+        "w": 8,
+        "h": 4
       },
       "targets": [
         {
-          "expr": "rate(lmcache_bench_l2_completed_submits_total{job=\"lmcache_bench\",phase=\"measured\"}[60s])",
-          "legendFormat": "{{host}} {{operation}}"
+          "expr": "sum(rate(lmcache_bench_l2_completed_submits_total{job=\"lmcache_bench\",phase=\"measured\"}[60s]) and on (host, initiator) (up{job=\"lmcache_bench\"} == 1))",
+          "instant": true,
+          "legendFormat": "aggregate",
+          "range": false
         }
       ],
       "title": "LMCache completed submits/s",
-      "type": "timeseries"
+      "type": "stat",
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "last"
+          ],
+          "fields": ""
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "showPercentChange": false
+      }
     },
     {
       "datasource": {
@@ -91,23 +135,41 @@
       "description": "Mean submit-to-completion latency over the query window. The endpoint intentionally does not expose live percentiles; use the final benchmark summary for p50/p99.",
       "fieldConfig": {
         "defaults": {
-          "unit": "s"
+          "unit": "s",
+          "noValue": "No active run"
         }
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 9
+        "x": 8,
+        "y": 9,
+        "w": 8,
+        "h": 4
       },
       "targets": [
         {
-          "expr": "rate(lmcache_bench_l2_submit_latency_seconds_total{job=\"lmcache_bench\",phase=\"measured\"}[60s]) / rate(lmcache_bench_l2_completed_submits_total{job=\"lmcache_bench\",phase=\"measured\"}[60s])",
-          "legendFormat": "{{host}} {{operation}}"
+          "expr": "sum by (operation) (rate(lmcache_bench_l2_submit_latency_seconds_total{job=\"lmcache_bench\",phase=\"measured\"}[60s]) and on (host, initiator) (up{job=\"lmcache_bench\"} == 1)) / sum by (operation) (rate(lmcache_bench_l2_completed_submits_total{job=\"lmcache_bench\",phase=\"measured\"}[60s]) and on (host, initiator) (up{job=\"lmcache_bench\"} == 1))",
+          "instant": true,
+          "legendFormat": "{{operation}}",
+          "range": false
         }
       ],
-      "title": "LMCache mean submit latency",
-      "type": "timeseries"
+      "title": "LMCache mean submit latency by operation",
+      "type": "stat",
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "last"
+          ],
+          "fields": ""
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "showPercentChange": false
+      }
     },
     {
       "datasource": {
@@ -116,31 +178,49 @@
       },
       "fieldConfig": {
         "defaults": {
-          "min": 0
+          "min": 0,
+          "noValue": "No active run"
         }
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 9
+        "x": 16,
+        "y": 9,
+        "w": 8,
+        "h": 4
       },
       "targets": [
         {
-          "expr": "lmcache_bench_l2_in_flight_target{job=\"lmcache_bench\",phase=\"measured\"}",
-          "legendFormat": "{{host}} {{operation}}"
+          "expr": "max by (host, initiator) (lmcache_bench_l2_in_flight_target{job=\"lmcache_bench\",phase=\"measured\"} and on (host, initiator) (up{job=\"lmcache_bench\"} == 1))",
+          "instant": true,
+          "legendFormat": "{{host}} i{{initiator}}",
+          "range": false
         }
       ],
-      "title": "LMCache configured in-flight submits",
-      "type": "timeseries"
+      "title": "LMCache configured in-flight submits per initiator",
+      "type": "stat",
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "last"
+          ],
+          "fields": ""
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "showPercentChange": false
+      }
     },
     {
       "collapsed": false,
       "gridPos": {
-        "h": 1,
-        "w": 24,
         "x": 0,
-        "y": 17
+        "y": 13,
+        "w": 24,
+        "h": 1
       },
       "title": "Block I/O by role",
       "type": "row"
@@ -156,10 +236,10 @@
         }
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
         "x": 0,
-        "y": 18
+        "y": 14,
+        "w": 12,
+        "h": 8
       },
       "targets": [
         {
@@ -185,10 +265,10 @@
         }
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
         "x": 12,
-        "y": 18
+        "y": 14,
+        "w": 12,
+        "h": 8
       },
       "targets": [
         {
@@ -209,10 +289,10 @@
         "uid": "PROM"
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
         "x": 0,
-        "y": 26
+        "y": 22,
+        "w": 12,
+        "h": 8
       },
       "targets": [
         {
@@ -229,10 +309,10 @@
         "uid": "PROM"
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
         "x": 12,
-        "y": 26
+        "y": 22,
+        "w": 12,
+        "h": 8
       },
       "targets": [
         {
@@ -246,10 +326,10 @@
     {
       "collapsed": false,
       "gridPos": {
-        "h": 1,
-        "w": 24,
         "x": 0,
-        "y": 34
+        "y": 30,
+        "w": 24,
+        "h": 1
       },
       "title": "RDMA fabric (200.0.0.x plane, ens2f0 / irdma)",
       "type": "row"
@@ -266,10 +346,10 @@
         }
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
         "x": 0,
-        "y": 35
+        "y": 31,
+        "w": 12,
+        "h": 8
       },
       "targets": [
         {
@@ -292,10 +372,10 @@
         }
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
         "x": 12,
-        "y": 35
+        "y": 31,
+        "w": 12,
+        "h": 8
       },
       "targets": [
         {
@@ -318,10 +398,10 @@
         }
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
         "x": 0,
-        "y": 43
+        "y": 39,
+        "w": 12,
+        "h": 8
       },
       "targets": [
         {
@@ -343,10 +423,10 @@
       },
       "description": "irdma names xon/xoff events rather than mlx5's *_pause_phy. Nonzero xoff means the link is asserting backpressure.",
       "gridPos": {
-        "h": 8,
-        "w": 12,
         "x": 12,
-        "y": 43
+        "y": 39,
+        "w": 12,
+        "h": 8
       },
       "targets": [
         {
@@ -368,10 +448,10 @@
       },
       "description": "irdma hw_counters error family. Retransmits under load indicate fabric trouble, not host trouble.",
       "gridPos": {
-        "h": 8,
-        "w": 12,
         "x": 0,
-        "y": 51
+        "y": 47,
+        "w": 12,
+        "h": 8
       },
       "targets": [
         {
@@ -394,10 +474,10 @@
         }
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
         "x": 12,
-        "y": 51
+        "y": 47,
+        "w": 12,
+        "h": 8
       },
       "targets": [
         {
@@ -411,12 +491,12 @@
     {
       "collapsed": false,
       "gridPos": {
-        "h": 1,
-        "w": 24,
         "x": 0,
-        "y": 59
+        "y": 55,
+        "w": 24,
+        "h": 1
       },
-      "title": "CPU / Memory",
+      "title": "Host headroom",
       "type": "row"
     },
     {
@@ -432,10 +512,10 @@
         }
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
         "x": 0,
-        "y": 60
+        "y": 56,
+        "w": 12,
+        "h": 8
       },
       "targets": [
         {
@@ -457,10 +537,10 @@
         }
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
         "x": 12,
-        "y": 60
+        "y": 56,
+        "w": 12,
+        "h": 8
       },
       "targets": [
         {

@@ -89,6 +89,42 @@ if ! docker info >/dev/null 2>&1; then
 fi
 docker compose up -d
 
+host_prometheus_sha="$(shasum -a 256 prometheus.yml | cut -d' ' -f1)"
+container_prometheus_sha=
+for i in 1 2 3 4 5; do
+    container_prometheus_sha="$(
+        docker compose exec -T prometheus \
+            sh -c 'sha256sum /etc/prometheus/prometheus.yml' 2>/dev/null \
+            | cut -d' ' -f1 || true
+    )"
+    [ -n "$container_prometheus_sha" ] && break
+    sleep 1
+done
+[ -n "$container_prometheus_sha" ] || {
+    echo "ERROR: Prometheus did not start"
+    exit 1
+}
+if [ "$host_prometheus_sha" != "$container_prometheus_sha" ]; then
+    # Replacing a single-file bind mount can leave Docker Desktop serving the
+    # old inode. A reload would then succeed while retaining stale targets.
+    echo "  mounted Prometheus config is stale; recreating Prometheus"
+    docker compose up -d --force-recreate prometheus
+fi
+
+echo "== Prometheus reload =="
+reloaded=
+for i in 1 2 3 4 5; do
+    if curl -fsS -X POST --max-time 5 http://127.0.0.1:9090/-/reload >/dev/null; then
+        reloaded=1
+        break
+    fi
+    sleep 1
+done
+[ -n "$reloaded" ] || {
+    echo "ERROR: Prometheus did not accept a configuration reload"
+    exit 1
+}
+
 echo "== health check =="
 sleep 5
 # lmcache_bench targets are expected DOWN unless a bench is running right now --

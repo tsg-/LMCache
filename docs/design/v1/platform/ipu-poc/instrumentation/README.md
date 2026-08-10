@@ -57,8 +57,8 @@ HOSTS="<newhost1>:19100 <newhost2>:19101" ./up.sh
 ```
 
 `up.sh` opens the SSH tunnels (idempotent), starts Docker Desktop if needed,
-brings up the compose stack, and prints target health. Grafana provisions the
-datasource and dashboard automatically.
+brings up the compose stack, reloads Prometheus, and prints target health.
+Grafana provisions the datasource and dashboard automatically.
 
 ## What's in the box
 
@@ -72,7 +72,7 @@ datasource and dashboard automatically.
 | `prometheus.yml` | control | 5s scrape of the node tunnels (relabelled to `host=`) plus the `lmcache_bench` initiator ports (relabelled to `initiator=`) |
 | `docker-compose.yml` | control | Prometheus 2.55.1 + Grafana 11.3.0, loopback-bound |
 | `provisioning/` | control | Grafana datasource (uid `PROM`) + dashboard provider |
-| `dashboards/lmcache-mkp.json` | control | 20 panels, uid `ipu-poc-mkp-stub` — provisioned copy; LMCache row first |
+| `dashboards/lmcache-mkp.json` | control | 21 panels, uid `ipu-poc-mkp-stub` — provisioned copy; LMCache row first |
 | `up.sh` | control | Tunnels + stack + health check |
 
 ### The `lmcache_bench` job
