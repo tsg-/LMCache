@@ -21,9 +21,16 @@ services:
     container_name: lmcache-grafana
     volumes:
       - grafana-data:/var/lib/grafana
+      # Datasource uid must stay PROM -- the dashboard JSON pins it.
+      - ./provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./dashboards:/var/lib/grafana/dashboards:ro
     environment:
       - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=admin
+      # Required, no default: a committed default password is a known
+      # credential the moment this file is pushed. up.sh generates one
+      # into .env on first run if GRAFANA_PASSWORD is unset.
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:?set GRAFANA_PASSWORD or run ./up.sh}
       - GF_AUTH_ANONYMOUS_ENABLED=false
     ports:
       - "127.0.0.1:3000:3000"

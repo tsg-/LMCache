@@ -1,0 +1,10 @@
+[Unit]
+Description=Refresh irdma hw_counters every 2s (Prometheus scrapes at 5s)
+
+[Timer]
+OnBootSec=10s
+OnUnitActiveSec=2s
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target
