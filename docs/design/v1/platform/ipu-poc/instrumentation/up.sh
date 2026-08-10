@@ -30,12 +30,16 @@ check_tunnel() {
 }
 
 ensure_tunnel() {
-    local host="$1" local_port="$2"
+    local host="$1" local_port="$2" remote_port="$3"
     if check_tunnel "$local_port"; then
-        echo "  tunnel $host -> :$local_port already up"
+        echo "  tunnel $host:$remote_port -> :$local_port already up"
     else
-        ssh -f -N -L "$local_port:127.0.0.1:9100" "$host"
-        echo "  tunnel $host -> :$local_port opened"
+        # ExitOnForwardFailure: without it ssh backgrounds happily even when the
+        # forward could not bind, leaving Prometheus scraping a dead local port
+        # and reporting it as a target that is simply down.
+        ssh -f -N -o ExitOnForwardFailure=yes \
+            -L "$local_port:127.0.0.1:$remote_port" "$host"
+        echo "  tunnel $host:$remote_port -> :$local_port opened"
     fi
 }
 
@@ -44,13 +48,35 @@ ensure_tunnel() {
 # Keep the local ports aligned with the targets in prometheus.yml.
 HOSTS="${HOSTS:-mkp1:19100 mkp2:19101}"
 
+# Benchmark tunnels for the lmcache_bench job. Off by default: the endpoint
+# exists only while a `bench l2` process runs, so opening these when no
+# benchmark is planned just adds targets that are permanently down.
+#   BENCH_TUNNELS=1 ./up.sh              # mkp1 initiators 0..3 -> :19102-19105
+#   BENCH_TUNNELS=1 BENCH_INITIATORS=2 ./up.sh
+# The drivers assign METRICS_BASE_PORT + id on the initiator host; these map to
+# the four targets configured in prometheus.yml.
+BENCH_HOST="${BENCH_HOST:-mkp1}"
+BENCH_INITIATORS="${BENCH_INITIATORS:-4}"
+BENCH_REMOTE_BASE="${BENCH_REMOTE_BASE:-9101}"
+BENCH_LOCAL_BASE="${BENCH_LOCAL_BASE:-19102}"
+
 echo "== credentials =="
 ensure_password
 
 echo "== SSH tunnels =="
 for entry in $HOSTS; do
-    ensure_tunnel "${entry%%:*}" "${entry##*:}"
+    ensure_tunnel "${entry%%:*}" "${entry##*:}" 9100
 done
+
+if [ -n "${BENCH_TUNNELS:-}" ]; then
+    for ((i = 0; i < BENCH_INITIATORS; i++)); do
+        ensure_tunnel "$BENCH_HOST" \
+            "$((BENCH_LOCAL_BASE + i))" "$((BENCH_REMOTE_BASE + i))"
+    done
+else
+    echo "  bench tunnels skipped (BENCH_TUNNELS=1 to open" \
+        "$BENCH_LOCAL_BASE-$((BENCH_LOCAL_BASE + BENCH_INITIATORS - 1)))"
+fi
 
 echo "== docker stack =="
 if ! docker info >/dev/null 2>&1; then
@@ -65,12 +91,22 @@ docker compose up -d
 
 echo "== health check =="
 sleep 5
+# lmcache_bench targets are expected DOWN unless a bench is running right now --
+# the endpoint lives only as long as one `bench l2` process. Group by job so a
+# down bench target does not read as a broken node scrape.
 curl -s --max-time 5 'http://127.0.0.1:9090/api/v1/targets?state=active' \
     | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
-for t in d['data']['activeTargets']:
-    print(f\"  {t['labels'].get('host','?')} health={t['health']}\")
+for t in sorted(d['data']['activeTargets'], key=lambda t: t['labels'].get('job', '')):
+    lb = t['labels']
+    who = lb.get('host', '?')
+    if lb.get('initiator') is not None:
+        who += f\" initiator={lb['initiator']}\"
+    note = ''
+    if lb.get('job') == 'lmcache_bench' and t['health'] != 'up':
+        note = '  (expected unless a bench is running)'
+    print(f\"  {lb.get('job','?'):14} {who:22} health={t['health']}{note}\")
 "
 
 echo

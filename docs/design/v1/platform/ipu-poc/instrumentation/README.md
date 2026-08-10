@@ -72,7 +72,7 @@ datasource and dashboard automatically.
 | `prometheus.yml` | control | 5s scrape of the node tunnels (relabelled to `host=`) plus the `lmcache_bench` initiator ports (relabelled to `initiator=`) |
 | `docker-compose.yml` | control | Prometheus 2.55.1 + Grafana 11.3.0, loopback-bound |
 | `provisioning/` | control | Grafana datasource (uid `PROM`) + dashboard provider |
-| `dashboards/lmcache-mkp.json` | control | 16 panels, uid `ipu-poc-mkp-stub` — provisioned copy |
+| `dashboards/lmcache-mkp.json` | control | 20 panels, uid `ipu-poc-mkp-stub` — provisioned copy; LMCache row first |
 | `up.sh` | control | Tunnels + stack + health check |
 
 ### The `lmcache_bench` job
@@ -80,12 +80,23 @@ datasource and dashboard automatically.
 `bench l2 --serve-metrics <port> --metrics-bind-address 127.0.0.1` publishes
 live submit/success/bytes counters for the lifetime of one CLI process. The
 multi-initiator drivers assign `METRICS_BASE_PORT + id` (default base 9101), so
-forward one local port per initiator:
+`prometheus.yml` configures four targets and `up.sh` can open the matching
+tunnels:
 
 ```bash
-ssh -N -L 19102:127.0.0.1:9101 mkp1    # initiator 0
-ssh -N -L 19103:127.0.0.1:9102 mkp1    # initiator 1, and so on
+BENCH_TUNNELS=1 ./up.sh                      # initiators 0..3 -> :19102-19105
+BENCH_TUNNELS=1 BENCH_INITIATORS=2 ./up.sh   # just 0..1
 ```
+
+Off by default — with no benchmark running these are four permanently-down
+targets. Override `BENCH_HOST`, `BENCH_REMOTE_BASE`, `BENCH_LOCAL_BASE` to match
+a different rig, keeping them aligned with `prometheus.yml`.
+
+**Not exercisable from this branch yet.** `--serve-metrics` lives on
+`feat/bench-l2-sustained-only` (`0d88de0a`), and the `run_multi_initiator_*.sh`
+drivers that assign the per-id ports are untracked and absent from that branch
+too. The scrape config and the dashboard row are ready; the source that feeds
+them is not here. Ports 19104/19105 have never seen a real 4-initiator run.
 
 Two properties matter when reading the series:
 
@@ -184,14 +195,16 @@ a local secret into `.env` (mode 600, gitignored) on first run; export
 
 ## Known gaps
 
-- **NVMe panels exclude `md0`.** They filter `device=~"nvme.+"`, so the RAID0
-  aggregate is invisible. Widen to `device=~"nvme.+|md.+"` to see it.
+- **The LMCache row renders nothing until its source branch lands.** The four
+  panels and the scrape job are in place; `--serve-metrics` is not on this
+  branch. See the `lmcache_bench` job above.
+- **Block I/O panels are split by role, and the split is hardcoded.**
+  `mkp1` is filtered to `md.+` (initiator RAID0) and `mkp2` to `nvme.+` (target
+  SSDs). Swapping the roles or renaming a host means editing four panels.
 - **No NVMe IOPS or latency panels** — only throughput, queue depth, and SMART
   temperature.
-- **The dashboard has no LMCache panels yet.** `bench l2` now *does* serve
-  metrics (see the `lmcache_bench` job below), and `prometheus.yml` scrapes it,
-  but `dashboards/lmcache-mkp.json` still ends in an empty placeholder row —
-  the series arrive with nowhere to render.
+- **No SMART temperature panel anymore.** The role-split Block I/O row replaced
+  the old NVMe row, which carried it.
 - **Prometheus does not replace in-process measurement for per-run figures.** A
   1–15 s scrape is too coarse for host CPU per GB in particular; that stays
   bracketed in-process around the measured window. The scrape is for live

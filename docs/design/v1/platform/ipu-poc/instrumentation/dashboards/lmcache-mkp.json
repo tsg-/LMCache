@@ -15,7 +15,7 @@
       }
     ]
   },
-  "description": "IPU PoC \u2014 mkp1/mkp2 host + fabric + NVMe view. Stub; wire LMCache app metrics in Stage 2+.",
+  "description": "IPU PoC — mkp1/mkp2 host, fabric, NVMe, and bench l2 view.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -29,7 +29,7 @@
         "x": 0,
         "y": 0
       },
-      "title": "CPU / Memory",
+      "title": "LMCache bench l2 (short-lived endpoint)",
       "type": "row"
     },
     {
@@ -37,11 +37,10 @@
         "type": "prometheus",
         "uid": "PROM"
       },
+      "description": "Application payload goodput reported by the running bench l2 process. Use the end-of-run JSON and counter gate for publishable throughput; this panel aligns the workload with host and RDMA trends.",
       "fieldConfig": {
         "defaults": {
-          "max": 100,
-          "min": 0,
-          "unit": "percent"
+          "unit": "bps"
         }
       },
       "gridPos": {
@@ -52,11 +51,11 @@
       },
       "targets": [
         {
-          "expr": "100 - (avg by (host) (rate(node_cpu_seconds_total{mode=\"idle\"}[30s])) * 100)",
-          "legendFormat": "{{host}}"
+          "expr": "rate(lmcache_bench_l2_success_bytes_total{job=\"lmcache_bench\",phase=\"measured\"}[60s]) * 8",
+          "legendFormat": "{{host}} {{operation}}"
         }
       ],
-      "title": "CPU usage % (per host)",
+      "title": "LMCache measured goodput [TREND ONLY]",
       "type": "timeseries"
     },
     {
@@ -66,7 +65,7 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "bytes"
+          "unit": "ops"
         }
       },
       "gridPos": {
@@ -77,22 +76,73 @@
       },
       "targets": [
         {
-          "expr": "node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes",
-          "legendFormat": "{{host}}"
+          "expr": "rate(lmcache_bench_l2_completed_submits_total{job=\"lmcache_bench\",phase=\"measured\"}[60s])",
+          "legendFormat": "{{host}} {{operation}}"
         }
       ],
-      "title": "Memory used (per host)",
+      "title": "LMCache completed submits/s",
       "type": "timeseries"
     },
     {
-      "collapsed": false,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM"
+      },
+      "description": "Mean submit-to-completion latency over the query window. The endpoint intentionally does not expose live percentiles; use the final benchmark summary for p50/p99.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      },
       "gridPos": {
-        "h": 1,
-        "w": 24,
+        "h": 8,
+        "w": 12,
         "x": 0,
         "y": 9
       },
-      "title": "NVMe I/O (target: mkp1)",
+      "targets": [
+        {
+          "expr": "rate(lmcache_bench_l2_submit_latency_seconds_total{job=\"lmcache_bench\",phase=\"measured\"}[60s]) / rate(lmcache_bench_l2_completed_submits_total{job=\"lmcache_bench\",phase=\"measured\"}[60s])",
+          "legendFormat": "{{host}} {{operation}}"
+        }
+      ],
+      "title": "LMCache mean submit latency",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "min": 0
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 9
+      },
+      "targets": [
+        {
+          "expr": "lmcache_bench_l2_in_flight_target{job=\"lmcache_bench\",phase=\"measured\"}",
+          "legendFormat": "{{host}} {{operation}}"
+        }
+      ],
+      "title": "LMCache configured in-flight submits",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 17
+      },
+      "title": "Block I/O by role",
       "type": "row"
     },
     {
@@ -109,15 +159,19 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 10
+        "y": 18
       },
       "targets": [
         {
-          "expr": "rate(node_disk_read_bytes_total{device=~\"nvme.+\"}[15s])",
-          "legendFormat": "{{host}}:{{device}}"
+          "expr": "rate(node_disk_read_bytes_total{host=\"mkp1\",device=~\"md.+\"}[15s])",
+          "legendFormat": "{{device}} read"
+        },
+        {
+          "expr": "rate(node_disk_written_bytes_total{host=\"mkp1\",device=~\"md.+\"}[15s])",
+          "legendFormat": "{{device}} write"
         }
       ],
-      "title": "Read throughput per NVMe ns",
+      "title": "Initiator RAID0 throughput (mkp1 md0)",
       "type": "timeseries"
     },
     {
@@ -134,15 +188,19 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 10
+        "y": 18
       },
       "targets": [
         {
-          "expr": "rate(node_disk_written_bytes_total{device=~\"nvme.+\"}[15s])",
-          "legendFormat": "{{host}}:{{device}}"
+          "expr": "rate(node_disk_read_bytes_total{host=\"mkp2\",device=~\"nvme.+\"}[15s])",
+          "legendFormat": "{{device}} read"
+        },
+        {
+          "expr": "rate(node_disk_written_bytes_total{host=\"mkp2\",device=~\"nvme.+\"}[15s])",
+          "legendFormat": "{{device}} write"
         }
       ],
-      "title": "Write throughput per NVMe ns",
+      "title": "Target SSD throughput (mkp2 NVMe)",
       "type": "timeseries"
     },
     {
@@ -154,15 +212,15 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 18
+        "y": 26
       },
       "targets": [
         {
-          "expr": "node_disk_io_now{device=~\"nvme.+\"}",
-          "legendFormat": "{{host}}:{{device}}"
+          "expr": "node_disk_io_now{host=\"mkp1\",device=~\"md.+\"}",
+          "legendFormat": "{{device}}"
         }
       ],
-      "title": "NVMe queue depth (in-flight)",
+      "title": "Initiator RAID0 queue depth (mkp1)",
       "type": "timeseries"
     },
     {
@@ -170,24 +228,19 @@
         "type": "prometheus",
         "uid": "PROM"
       },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "celsius"
-        }
-      },
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 18
+        "y": 26
       },
       "targets": [
         {
-          "expr": "nvme_smart_field{field=\"temperature\"}",
-          "legendFormat": "{{host}}:{{ns}}"
+          "expr": "node_disk_io_now{host=\"mkp2\",device=~\"nvme.+\"}",
+          "legendFormat": "{{device}}"
         }
       ],
-      "title": "NVMe SMART composite temp",
+      "title": "Target SSD queue depth (mkp2)",
       "type": "timeseries"
     },
     {
@@ -196,7 +249,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 26
+        "y": 34
       },
       "title": "RDMA fabric (200.0.0.x plane, ens2f0 / irdma)",
       "type": "row"
@@ -206,59 +259,7 @@
         "type": "prometheus",
         "uid": "PROM"
       },
-      "description": "InRdmaWrites: an NVMe-oF READ is satisfied by the target RDMA-writing into initiator memory. RDMA write segments cap at ~52428 B, so bytes = ops * 52428 for I/O >= 256 KiB. This is the ONLY instrument that sees RDMA payload on irdma \u2014 ethtool port_rx_bytes does not account offloaded traffic.\n\nDO NOT QUOTE PEAKS FROM THIS PANEL. Three unsynchronized sampling stages (irdma refreshes hw_counters asynchronously ~1s, systemd timer regenerates the textfile at 2s, Prometheus scrapes at 5s) alias the rate. Measured 2026-08-03: a run the bench recorded at 94.4 Gbps showed a 75.6 Gbps peak here, with visibly stepped values. Integrated bytes over a long window are sound; instantaneous peak is understated. For a number that goes in a document, bracket the workload with an explicit counter delta.",
-      "fieldConfig": {
-        "defaults": {
-          "unit": "bps"
-        }
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 27
-      },
-      "targets": [
-        {
-          "expr": "rate(rdma_hw_counter{counter=\"InRdmaWrites\"}[15s]) * 52428 * 8",
-          "legendFormat": "{{host}}:{{device}} read payload"
-        }
-      ],
-      "title": "RDMA payload \u2014 reads (target\u2192initiator) [TREND ONLY]",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "PROM"
-      },
-      "description": "InRdmaReads: an NVMe-oF WRITE makes the target RDMA-read from initiator memory. Measured at exactly 4096 B per op, block-size invariant. Payloads <= 4 KiB ride in-capsule (OutRdmaSends only) and register zero RDMA read ops.\n\nSame aliasing caveat as the read panel \u2014 trend only, do not quote peaks. Note the store path is media-bound at ~5.6 GB/s (45 Gbps) on 2x PM9A3, so this panel should NOT be expected to approach the read panel's ceiling.",
-      "fieldConfig": {
-        "defaults": {
-          "unit": "bps"
-        }
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 27
-      },
-      "targets": [
-        {
-          "expr": "rate(rdma_hw_counter{counter=\"InRdmaReads\"}[15s]) * 4096 * 8",
-          "legendFormat": "{{host}}:{{device}} write payload"
-        }
-      ],
-      "title": "RDMA payload \u2014 writes (initiator\u2192target) [TREND ONLY]",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "PROM"
-      },
-      "description": "ethtool port counters. On irdma these do NOT include RDMA-offloaded payload \u2014 a 34 GB RDMA read moved port_rx_bytes by ~3.8 KB. Useful for control/TCP traffic and as a sanity check, NOT for throughput.",
+      "description": "InRdmaWrites: an NVMe-oF READ is satisfied by the target RDMA-writing into initiator memory. RDMA write segments cap at ~52428 B, so bytes = ops * 52428 for I/O >= 256 KiB. This is the ONLY instrument that sees RDMA payload on irdma — ethtool port_rx_bytes does not account offloaded traffic.\n\nDO NOT QUOTE PEAKS FROM THIS PANEL. Three unsynchronized sampling stages (irdma refreshes hw_counters asynchronously ~1s, systemd timer regenerates the textfile at 2s, Prometheus scrapes at 5s) alias the rate. Measured 2026-08-03: a run the bench recorded at 94.4 Gbps showed a 75.6 Gbps peak here, with visibly stepped values. Integrated bytes over a long window are sound; instantaneous peak is understated. For a number that goes in a document, bracket the workload with an explicit counter delta.",
       "fieldConfig": {
         "defaults": {
           "unit": "bps"
@@ -269,6 +270,58 @@
         "w": 12,
         "x": 0,
         "y": 35
+      },
+      "targets": [
+        {
+          "expr": "rate(rdma_hw_counter{counter=\"InRdmaWrites\"}[15s]) * 52428 * 8",
+          "legendFormat": "{{host}}:{{device}} read payload"
+        }
+      ],
+      "title": "RDMA payload — reads (target→initiator) [TREND ONLY]",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM"
+      },
+      "description": "InRdmaReads: an NVMe-oF WRITE makes the target RDMA-read from initiator memory. Measured at exactly 4096 B per op, block-size invariant. Payloads <= 4 KiB ride in-capsule (OutRdmaSends only) and register zero RDMA read ops.\n\nSame aliasing caveat as the read panel — trend only, do not quote peaks. Note the store path is media-bound at ~5.6 GB/s (45 Gbps) on 2x PM9A3, so this panel should NOT be expected to approach the read panel's ceiling.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bps"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 35
+      },
+      "targets": [
+        {
+          "expr": "rate(rdma_hw_counter{counter=\"InRdmaReads\"}[15s]) * 4096 * 8",
+          "legendFormat": "{{host}}:{{device}} write payload"
+        }
+      ],
+      "title": "RDMA payload — writes (initiator→target) [TREND ONLY]",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM"
+      },
+      "description": "ethtool port counters. On irdma these do NOT include RDMA-offloaded payload — a 34 GB RDMA read moved port_rx_bytes by ~3.8 KB. Useful for control/TCP traffic and as a sanity check, NOT for throughput.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bps"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 43
       },
       "targets": [
         {
@@ -293,7 +346,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 35
+        "y": 43
       },
       "targets": [
         {
@@ -318,7 +371,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 43
+        "y": 51
       },
       "targets": [
         {
@@ -344,7 +397,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 43
+        "y": 51
       },
       "targets": [
         {
@@ -356,15 +409,67 @@
       "type": "timeseries"
     },
     {
-      "collapsed": true,
+      "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 51
+        "y": 59
       },
-      "title": "LMCache app \u2014 scraped as job lmcache_bench, no panels built yet",
+      "title": "CPU / Memory",
       "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "max": 100,
+          "min": 0,
+          "unit": "percent"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 60
+      },
+      "targets": [
+        {
+          "expr": "100 - (avg by (host) (rate(node_cpu_seconds_total{mode=\"idle\"}[30s])) * 100)",
+          "legendFormat": "{{host}}"
+        }
+      ],
+      "title": "CPU usage % (per host)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 60
+      },
+      "targets": [
+        {
+          "expr": "node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes",
+          "legendFormat": "{{host}}"
+        }
+      ],
+      "title": "Memory used (per host)",
+      "type": "timeseries"
     }
   ],
   "refresh": "10s",
@@ -403,7 +508,7 @@
     "to": "now"
   },
   "timezone": "",
-  "title": "IPU PoC \u2014 mkp1/mkp2 (stub)",
+  "title": "IPU PoC — mkp1/mkp2",
   "uid": "ipu-poc-mkp-stub",
   "weekStart": ""
 }
