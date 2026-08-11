@@ -28,11 +28,13 @@ class L2GeometryProfile:
     ``bench l2`` drives flat byte buffers, so a source is accepted only when
     every object in a full retrieval burst has the same page size.
 
-    Exactly one provenance form is populated. A YAML profile records
-    ``source_path`` and ``sha256`` and leaves ``shape_spec`` empty; an inline
-    tensor-group spec has no file, so it records the canonicalized
-    ``shape_spec`` instead. Either way the run is reproducible from the
-    structured output alone.
+    Exactly one provenance form is populated, and the two differ in strength.
+    An inline tensor-group spec records the canonicalized ``shape_spec``, which
+    fully determines the geometry, so such a run is reproducible from the
+    structured output alone. A YAML profile records ``source_path`` and
+    ``sha256`` instead -- not the file's bytes -- so the output identifies the
+    profile and can verify a candidate copy of it, but does not carry it.
+    Reproducing that run needs the file as well.
     """
 
     source_path: str
@@ -58,10 +60,10 @@ def resolve_geometry_profile(path: str) -> L2GeometryProfile:
     """Load and validate a uniform-page model geometry profile.
 
     The supported profile contract is the one used by
-    ``docs/design/tools/ipu_traffic_benchmarks/models``: a model name,
-    token chunk size, uniform ``page_size_bytes``, and
-    ``layers_per_burst``. The resolver validates the declared page size
-    against the model's MLA or GQA fields when they are present.
+    ``scripts/ipu-poc/models``: a model name, token chunk size, uniform
+    ``page_size_bytes``, and ``layers_per_burst``. The resolver validates
+    the declared page size against the model's MLA or GQA fields when they
+    are present.
 
     Args:
         path: Path to the YAML profile.

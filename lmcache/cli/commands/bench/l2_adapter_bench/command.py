@@ -1259,9 +1259,10 @@ def _emit_l2_adapter_metrics(
     )
     if geometry_profile is not None:
         geometry_section = metrics.add_section("geometry", "KV Cache Shape")
-        # Record whichever provenance form the source actually has, so the
-        # run is reproducible from this output alone. Emitting the unused
-        # form as an empty string would read as a missing file or spec.
+        # Record whichever provenance form the source actually has: a spec is
+        # self-contained, while a path plus SHA-256 identifies the profile and
+        # verifies a candidate copy without carrying its bytes. Emitting the
+        # unused form as an empty string would read as a missing file or spec.
         if geometry_profile.source_path:
             geometry_section.add(
                 "profile_path", "Profile path", geometry_profile.source_path

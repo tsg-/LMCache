@@ -3,7 +3,15 @@
 **Headline: the model-shaped read workload reaches 95.35 Gbps — parity with the
 28 MiB proxy — once `num_workers` is raised from 16 to 32.** At the default 16 it
 stalls at 82.29 Gbps, and the shortfall is a benchmark tuning artifact, not a
-property of the small-page workload.
+property of the small-page workload. That figure holds across 1, 2 and 4
+synchronized initiator processes (95.35 / 95.58 / 94.99 Gbps at a constant
+32-thread budget), so it is a property of the path, not of one process.
+
+**The 5:1 mixed cells are pre-verification and not citable.** They ran without
+`--no-skip-verify`, so nothing in them establishes that stored bytes are the
+bytes submitted, and a mixed number is exactly where that matters. The figures
+are retained below as a methodology record and as the rerun's expected range —
+they are not a mixed result. See [5:1 mixed](#51-mixed--pre-verification-awaiting-rerun).
 
 `fs_native` fans one submit into `min(num_workers, num_keys)` tiles, each handled
 by a worker thread that opens, `read()`s, and closes its files **serially**. So
@@ -26,7 +34,7 @@ A 256-token DeepSeek-V3 retrieval is **61 objects of 147,456 bytes**, not one
 28 MiB object. Every prior sweep used the 28 MiB proxy. This one drives the real
 page geometry, resolved by `--kvcache-shape-profile` rather than hand-computed:
 
-    profile   docs/design/tools/ipu_traffic_benchmarks/models/deepseek_v3_fp8.yaml
+    profile   scripts/ipu-poc/models/deepseek_v3_fp8.yaml
     sha256    b437f3aab29c557162e931a5761eda89299898fd26ee5ffa85433895fd211b63
     resolved  61 objects/submit × 144 KiB = 8.58 MiB per submit, 256 tokens/chunk
 
@@ -35,9 +43,9 @@ page geometry, resolved by `--kvcache-shape-profile` rather than hand-computed:
 **An O_DIRECT model-page geometry test over a re-read corpus** — not a
 replacement for the earlier >DRAM large-object saturation methodology.
 
-- Corpus is 292,800 objects = **40.2 GiB, well under the 251 GiB DRAM.** At
-  ~82 Gbps a 120 s window re-reads it **≈28 times.** Quote this caveat with
-  every number here.
+- Corpus is 292,800 objects = **40.2 GiB, well under the 251 GiB DRAM.** At the
+  headline 95.35 Gbps a 120 s window moves 1332 GiB — it re-reads the corpus
+  **≈33 times.** Quote this caveat with every number here.
 - `use_odirect: true` is what removes the data-page-cache concern, not corpus
   size. `md0` and XFS are on the *initiator*; `nvmet-rdma` exports raw block
   devices on the target and operates directly on them, so the initiator-side
@@ -112,8 +120,9 @@ Three observations point the same way:
    193 threads migrating) and W=64 recovered only to 55.87 Gbps — still 41% below
    peak. Most of the collapse survives the removal of cross-socket scheduling.
 3. **Which node makes little difference.** node 0 (with the NIC) 55.87 vs node 1
-   (without) 53.97 Gbps — 3.5%. Compare that to the 39% lost from W=32 → W=64.
-   NUMA locality is a small term next to the worker-count effect.
+   (without) 53.97 Gbps — 3.5%. Compare that to the W=32 → W=64 loss: 41.5% at
+   pinned placement (95.45 → 55.87) and 56.4% unpinned (95.27 → 41.55). NUMA
+   locality is a small term next to the worker-count effect.
 
 `numastat` deltas corroborate: `numa_miss` and `numa_foreign` are **0 across
 every cell**, so no allocation ever fell back to a remote node. (These counters
@@ -153,6 +162,86 @@ default.** 16 is well-tuned for multi-MiB objects and badly under-provisioned at
 near the storage path's aggregate I/O queue count rather than at any CPU-derived
 number — see the NUMA section for why the per-socket core count is not the
 ceiling it appeared to be.
+
+## Multi-initiator sweep — 1, 2, 4 synchronized local processes
+
+**Read throughput is indifferent to how many processes carry it.** All
+initiators read the same keys and write to their own prefix, released together
+through a fifo barrier. The **32-thread worker budget is held constant, not
+per-process** (1×32, 2×16, 4×8) — giving each of 4 initiators 32 workers would
+put 128 threads on the path and re-measure the collapse documented above instead
+of the initiator count.
+
+| initiators × workers | read Gbps | skew |
+|---|---:|---:|
+| 1 × 32 | 95.35 | 0.000 s |
+| 2 × 16 | **95.58** | 0.233 s |
+| 4 × 8 | 94.99 | 0.054 s |
+
+Every read cell: all pages succeeded, all six fabric-error counter deltas zero,
+corpus unchanged at 292,800, reported and independently derived per-initiator
+goodput agreeing to ~1e-5 relative, counter ratios 0.9970–1.0060.
+
+**Read scales flat, so 32 threads is the shared limit rather than one process
+being the bottleneck.** 95.35 / 95.58 / 94.99 Gbps across a 4× change in process
+count is a 0.6% spread — inside run-to-run noise, and all three at ~99% of the
+95.92 Gbps fio ceiling. Splitting the same thread budget across processes neither
+helps nor hurts, which is what a saturated shared path predicts. Per-initiator
+latency scales exactly inversely (6.0 → 12.0 → 24.2 ms at 8 in-flight each), so
+the added processes are queueing for the same capacity, not finding new capacity.
+
+### 5:1 mixed — pre-verification, awaiting rerun
+
+**These cells ran without `--no-skip-verify` and are not a mixed result.** They
+establish completions, byte counts, ratio, and counter correlation; they do not
+establish that stored bytes are the bytes submitted, so a corrupt or misplaced
+write would have been reported as an accepted cell. `run_geom_multi.sh` now
+passes the flag, enabling the bench's bounded post-window readback of the write
+prefix. Nothing below should be cited, compared against the 28 MiB mixed
+baseline, or used to characterize duplex behavior until the rerun lands. The
+read rows above are unaffected — their integrity comes from the combined
+store+load gate and `geom_readback.py`, both of which did run.
+
+The numbers are kept only so the rerun has an expected range and the
+methodology notes are not lost:
+
+| initiators × workers | read Gbps | write Gbps | total Gbps | ratio | skew |
+|---|---:|---:|---:|---:|---:|
+| 1 × 32 | 52.56 | 10.51 | 63.07 | 4.9995 | 0.000 s |
+| 2 × 16 | 57.70 | 11.54 | 69.24 | 4.9991 | 0.350 s |
+| 4 × 8 | 59.57 | 11.92 | 71.49 | 4.9988 | 0.263 s |
+
+Same fabric-error, corpus, and goodput-agreement evidence as the read cells.
+Each mixed cell's writes were reclaimed after reporting, so every cell read
+through a comparable directory; zero write objects remain.
+
+Three things the rerun should carry forward. First, **the ratio held at 4.999:1
+in every cell**, so the read/write split itself is not in question — whatever
+the rerun shows about magnitude, ratio drift is not the variable. Second,
+**mixed cells run 60 s where read cells run 120 s** (mixed store keys are
+monotonic and never wrap, so a saturated 120 s window would land ~220 GiB and
+~1.6M new files per cell) and have **no warmup at all** — `bench l2` rejects
+`--warmup-sec` with `--read-write-ratio` because a timed warmup would issue
+stores the mixed accounting cannot attribute. Both asymmetries bias mixed low
+and must be quoted with any read-vs-mixed comparison. Third, the apparent gain
+with process count is a hypothesis, not a finding: a tile blocked on a write may
+stall a slot a separate process would have kept reading, which independent
+adapter instances would decouple. A per-process thread-state sample during a
+mixed cell would settle it; none was taken.
+
+Prometheus scraped only initiator 0 during these cells: at run time
+`prometheus.yml` carried a single `lmcache_bench` target. The committed config
+now has all four (19102–19105 → mkp1 9101–9104, labelled `initiator=0..3`), so a
+re-run would capture every process; these numbers were not. The per-cell JSON and
+counter evidence is complete and independent of Prometheus, but the dashboard view
+of these particular multi-initiator cells is partial.
+
+    bash run_geom_multi.sh read     # 1,2,4 initiators, 100% read, 120 s
+    bash run_geom_multi.sh mixed    # 1,2,4 initiators, 5:1, 60 s
+
+`run_geom_multi.sh` and its reporter `geom_multi_report.py` are **not yet
+tracked in git**, so this section is currently unreproducible from a clean
+clone. Everything above it uses `run_model_geometry.sh`, which is tracked.
 
 ## Supporting baseline — 28 MiB, same rig, 2026-08-04
 
@@ -211,15 +300,31 @@ modes require an exact object count and a manifest whose profile SHA matches.
 The driver never deletes an existing corpus; on any mismatch it aborts and tells
 you to use a new `PREFIX`.
 
+`all` and `sweep` vary `--in-flight`, not `num_workers`. The worker sweep — the
+table that produces the headline 95.35 Gbps — is the separate `wsweep` mode, one
+invocation per worker count because `num_workers` is baked into the adapter JSON
+at construction:
+
+    for w in 16 24 32 40 48 64; do
+      W=$w DUR=60 bash run_model_geometry.sh wsweep
+    done
+
+`wsweep` holds in-flight at `WSWEEP_INF` (default 8) and takes the pool size from
+`W`.
+
 `run_payload_sweep.sh` is the historical 28 MiB driver and is deliberately
 untouched by this work.
 
 ## Not yet run
 
-- **5:1 mixed at this geometry.** Prerequisite for comparing against the 76.67
-  Gbps 28 MiB mixed result.
-- **2 and 4 synchronized local initiators** with shared read keys and distinct
-  write prefixes.
+- **A byte-verified 5:1 mixed sweep.** The archived cells predate
+  `--no-skip-verify` on the mixed branch, so there is currently no citable mixed
+  number at this geometry. This blocks the two questions below.
+- **Why mixed improves with process count.** The read/write-interference
+  hypothesis above is untested, and the trend itself is unverified.
+- **Mixed at a larger worker budget.** The 32-thread budget was fixed for read
+  comparability, so how mixed compares to the 28 MiB baseline with more threads
+  is unknown.
 - **Other profiles.** Llama-3 70B/405B and Mixtral 8x22B are provisioned with
   recorded SHAs but unmeasured.
 - **Why the pool collapses past 32 workers.** NUMA does not account for it (see
