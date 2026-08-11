@@ -1,10 +1,10 @@
 #!/bin/bash
 # DeepSeek-V3 proxy payload sweep — 100% READ, sustained windows.
 #
-# Falcon-backed kernel NVMe-oF, existing-controller, single-process fs_native
-# sustained load. NOT 64-QP, NOT R2, NOT physical multi-initiator, NOT 400 GbE,
-# NOT Falcon offload evidence. --in-flight is user-space submission concurrency;
-# it does not create QPs.
+# Falcon-offloaded kernel NVMe-oF, existing-controller, single-process fs_native
+# sustained load; no unoffloaded control, so no offload benefit is quantified.
+# NOT 64-QP, NOT R2, NOT physical multi-initiator, NOT 400 GbE. --in-flight is
+# user-space submission concurrency; it does not create QPs.
 #
 # HARD CONSTRAINTS honoured here:
 #   - No perftest, no new NVMe controller, no NVMe-oF reconnect, no queue-count

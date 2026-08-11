@@ -113,5 +113,5 @@ if fail:
     for f in fail:
         print(f"  - {f}")
     sys.exit(1)
-print("RESULT: ACCEPTED — Falcon-backed kernel NVMe-oF sustained read")
-print("  (NOT Falcon offload; NOT 400 GbE)")
+print("RESULT: ACCEPTED — Falcon-offloaded kernel NVMe-oF sustained read")
+print("  (no unoffloaded control, so no offload benefit is claimed; NOT 400 GbE)")

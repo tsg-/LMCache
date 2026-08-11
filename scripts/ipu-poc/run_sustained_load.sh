@@ -2,10 +2,11 @@
 # fs_native SUSTAINED-window read proof — mkp1 initiator / mkp2 target.
 #
 # GOAL: one defensible 120 s sustained load result over the existing 100 GbE
-# Falcon-backed kernel NVMe-oF path.
+# Falcon-offloaded kernel NVMe-oF path.
 #
-# CLASSIFICATION: Falcon-backed kernel NVMe-oF. NOT Falcon offload (the IPU is
-# only the irdma verbs device under nvme_rdma) and NOT 400 GbE.
+# CLASSIFICATION: Falcon-offloaded kernel NVMe-oF; the MEV IPU carries the
+# Falcon/irdma transport beneath kernel nvme_rdma. There is no unoffloaded
+# control, so no offload benefit is quantified. NOT 400 GbE.
 #
 # ---------------------------------------------------------------------------
 # WHY ATTEMPT 1 (sus1785851) WAS REJECTED, and what changed:
