@@ -46,7 +46,7 @@
 #   - max_capacity_gb far exceeds anything written, so eviction stays inert and
 #     the pre-existing 28 MiB corpora cannot be evicted.
 #
-# Usage: bash run_model_geometry.sh [gate|calib|prepop|sweep|all]
+# Usage: bash run_model_geometry.sh [gate|calib|prepop|calibr|sweep|wsweep|all]
 set -uo pipefail
 
 H=/sys/class/infiniband/rocep69s0f0/ports/1/hw_counters
@@ -56,7 +56,10 @@ GEOM=/root/lmcache-geom
 PY=/root/lmcache-stage2/.venv/bin/python
 LM=("$PY" -m lmcache.cli.main)
 B=/mnt/lmcache-stage2/kvcache
-OUT=/root/mkp1-geom
+# Overridable so two runs can be kept side by side. The default is also what
+# run_geom_multi.sh reads as GEOM_OUT for the corpus manifest and calibration,
+# so a non-default OUT here must be passed to that driver as GEOM_OUT.
+OUT=${OUT:-/root/mkp1-geom}
 SD=$(dirname "$0")
 PROFILE=${PROFILE:-$SD/models/deepseek_v3_fp8.yaml}
 [ -f "$PROFILE" ] || { echo "ABORT: profile not found: $PROFILE"; exit 1; }
@@ -549,6 +552,6 @@ case "$MODE" in
           readback pre-sweep
           for i in $SWEEP_INF; do cell "$i" ""; done
           readback post-sweep ;;
-  *) echo "usage: $0 [gate|calib|prepop|calibr|sweep|all]"; exit 2 ;;
+  *) echo "usage: $0 [gate|calib|prepop|calibr|sweep|wsweep|all]"; exit 2 ;;
 esac
 echo "=== done: mode $MODE, artifacts in $OUT/ ==="
