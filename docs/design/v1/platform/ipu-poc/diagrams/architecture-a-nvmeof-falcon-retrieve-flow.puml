@@ -1,9 +1,17 @@
 @startuml
+' Rendered with: plantuml -tsvg <file>.puml
+' Fonts: Carlito is metric-compatible with Calibri, so it lays the diagram out
+' at Calibri's advance widths even on hosts without Calibri installed. After
+' rendering, the SVG font-family is widened to a fallback stack:
+'   sed -i '' 's/font-family="Carlito"/font-family="Calibri, Carlito, Trebuchet MS, sans-serif"/g' <file>.svg
+' PlantUML cannot emit that stack itself -- it single-quotes a comma-separated
+' skinparam value, which SVG then reads as one bogus family name.
+skinparam defaultFontName Carlito
 skinparam TitleFontSize 24
 title NVMe/Falcon — RETRIEVE (Read) Flow
 
-' ─── IPU HOST (initiator side) ──────────────────────────────────
-box "<size:20><b>IPU host (initiator)</b></size>" #F0F6FF
+' ─── TPU/GPU HOST (initiator side) ──────────────────────────────
+box "<size:20><b>TPU/GPU Host (initiator)</b></size>" #F0F6FF
 participant "Application\n(LMCache)" as APP
 participant "NVMe-oF Initiator\n(nvme_rdma on Xeon)" as INIT
 participant "Initiator IPU\n(Falcon / irdma verbs)" as IFAL
@@ -23,7 +31,7 @@ INIT -> IFAL: SEND (NVMe-oF READ command capsule + SGL)
 IFAL -> TFAL: Falcon reliable transport\n(wire)
 TFAL -> CPU: Deliver NVMe-oF command\n(nvmet-rdma dispatch)
 
-CPU -> CPU: Allocate target DRAM buffers\n(gated by CPU policy)
+CPU -> CPU: Allocate request data buffers\n(nvmet_req_alloc_sgls)
 CPU -> SSD: NVMe READ
 SSD --> TDDR: DMA payload into target DRAM
 SSD --> CPU: Completion
@@ -31,7 +39,7 @@ SSD --> CPU: Completion
 CPU -> TFAL: Post RDMA WRITE\n(target DRAM → initiator RX MR)
 TFAL -> IFAL: Falcon reliable transport\n(wire, RDMA WRITE push)
 IFAL --> INIT: Payload placed in RX MR;\nCQE observed
-CPU -> CPU: Return target DRAM buffers\nto free pool
+CPU -> CPU: Free request data buffers\n(nvmet_req_free_sgls)
 
 CPU -> TFAL: SEND (NVMe-oF completion capsule)
 TFAL -> IFAL: Falcon reliable transport\n(wire, SEND)
@@ -45,9 +53,9 @@ note over IFAL, TFAL
 end note
 
 note over CPU, SSD
-  Standard nvmet-rdma read path.
-  Target-issued RDMA WRITE places payload directly into
-  the initiator's pre-registered RX MR; no host-side
-  post-completion transfer step (unlike NVMe/TCP C2H PDUs).
+  Pull model: standard nvmet-rdma read path. The target issues an
+  RDMA WRITE that places the payload directly in the initiator's
+  pre-registered RX buffer — no host-side post-completion copy
+  (unlike NVMe/TCP C2H PDUs).
 end note
 @enduml

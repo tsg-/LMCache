@@ -1,9 +1,17 @@
 @startuml
+' Rendered with: plantuml -tsvg <file>.puml
+' Fonts: Carlito is metric-compatible with Calibri, so it lays the diagram out
+' at Calibri's advance widths even on hosts without Calibri installed. After
+' rendering, the SVG font-family is widened to a fallback stack:
+'   sed -i '' 's/font-family="Carlito"/font-family="Calibri, Carlito, Trebuchet MS, sans-serif"/g' <file>.svg
+' PlantUML cannot emit that stack itself -- it single-quotes a comma-separated
+' skinparam value, which SVG then reads as one bogus family name.
+skinparam defaultFontName Carlito
 skinparam TitleFontSize 24
 title NVMe/Falcon — STORE (Write) Flow
 
-' ─── IPU HOST (initiator side) ──────────────────────────────────
-box "<size:20><b>IPU host (initiator)</b></size>" #F0F6FF
+' ─── TPU/GPU HOST (initiator side) ──────────────────────────────
+box "<size:20><b>TPU/GPU Host (initiator)</b></size>" #F0F6FF
 participant "Application\n(LMCache)" as APP
 participant "NVMe-oF Initiator\n(nvme_rdma on Xeon)" as INIT
 participant "Initiator IPU\n(Falcon / irdma verbs)" as IFAL
@@ -23,7 +31,7 @@ INIT -> IFAL: SEND (NVMe-oF WRITE command capsule + SGL)
 IFAL -> TFAL: Falcon reliable transport\n(wire)
 TFAL -> CPU: Deliver NVMe-oF command\n(nvmet-rdma dispatch)
 
-CPU -> CPU: Allocate target DRAM buffers\n(gated by CPU policy:\nfree buffers, SSD utilization, QoS)
+CPU -> CPU: Allocate request data buffers\n(nvmet_req_alloc_sgls)
 CPU -> TFAL: Post RDMA READ\n(initiator TX MR → target DRAM)
 TFAL -> IFAL: Falcon reliable transport\n(wire, RDMA READ pull)
 IFAL -> INIT: Read from initiator TX MR
@@ -35,7 +43,7 @@ TFAL --> CPU: RDMA READ completion
 CPU -> SSD: NVMe WRITE (FUA)
 SSD --> TDDR: DMA payload from target DRAM
 SSD --> CPU: Completion
-CPU -> CPU: Return target DRAM buffers\nto free pool
+CPU -> CPU: Free request data buffers\n(nvmet_req_free_sgls)
 
 CPU -> TFAL: SEND (NVMe-oF completion capsule)
 TFAL -> IFAL: Falcon reliable transport\n(wire, SEND)
@@ -49,11 +57,12 @@ note over IFAL, TFAL
 end note
 
 note over CPU, INIT
-  Pull model: initiator sends NVMe-oF WRITE command capsule;
-  target Xeon (nvmet-rdma) posts an RDMA READ against the
-  initiator's pre-registered TX MR. The CPU gates when to post
-  based on free target DRAM buffers, SSD utilization, and QoS;
-  the RDMA engine then executes the transfer. Buffers return to
-  the free pool after the SSD write completes.
+  Pull model: the initiator sends an NVMe-oF WRITE command capsule;
+  the target (stock nvmet-rdma) posts an RDMA READ to pull the payload
+  from the initiator's registered buffer, then commits to NVMe (FUA).
+  No admission control — the pull is paced by ordinary flow control:
+  negotiated SQ depth, per-QP RDMA-read credits (IRD/ORD), and
+  landing-buffer availability. A busy SSD back-pressures only
+  indirectly, by slowing buffer recycling.
 end note
 @enduml
