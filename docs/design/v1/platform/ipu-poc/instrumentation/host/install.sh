@@ -37,18 +37,18 @@ ip link show "$IFACE" >/dev/null 2>&1 || { echo "no such interface: $IFACE" >&2;
 
 echo "== dependencies =="
 missing=()
-for c in nvme ethtool jq; do command -v "$c" >/dev/null || missing+=("$c"); done
+for c in nvme ethtool jq pcm-memory; do command -v "$c" >/dev/null || missing+=("$c"); done
 if [ ${#missing[@]} -gt 0 ]; then
     echo "  installing: ${missing[*]}"
     if command -v dnf >/dev/null; then
-        dnf install -y nvme-cli ethtool jq
+        dnf install -y nvme-cli ethtool jq pcm
     elif command -v apt-get >/dev/null; then
-        apt-get update && apt-get install -y nvme-cli ethtool jq
+        apt-get update && apt-get install -y nvme-cli ethtool jq pcm
     else
         echo "  no dnf/apt; install manually: ${missing[*]}" >&2; exit 1
     fi
 else
-    echo "  nvme, ethtool, jq present"
+    echo "  nvme, ethtool, jq, pcm-memory present"
 fi
 
 echo "== node_exporter binary =="
@@ -68,7 +68,8 @@ id node_exporter >/dev/null 2>&1 || useradd --system --no-create-home --shell /s
 install -d -o node_exporter -g node_exporter -m 0755 "$TEXTFILE_DIR"
 
 echo "== collector scripts =="
-for f in nvme_stats_textfile.sh rdma_hwcounters_textfile.sh rdma_nic_textfile.sh; do
+for f in nvme_stats_textfile.sh rdma_hwcounters_textfile.sh rdma_nic_textfile.sh \
+         pcm_memory_textfile.sh numa_stats_textfile.sh; do
     install -m 0755 "$SRC/bin/$f" "/usr/local/bin/$f"
     echo "  /usr/local/bin/$f"
 done
@@ -77,7 +78,9 @@ echo "== systemd units =="
 for u in node_exporter.service \
          rdma-hwcounters.service rdma-hwcounters.timer \
          nvme-stats.service     nvme-stats.timer \
-         rdma-nic.service       rdma-nic.timer; do
+         rdma-nic.service       rdma-nic.timer \
+         pcm-memory.service     pcm-memory.timer \
+         numa-stats.service     numa-stats.timer; do
     install -m 0644 "$SRC/systemd/$u" "/etc/systemd/system/$u"
     echo "  /etc/systemd/system/$u"
 done
@@ -104,21 +107,24 @@ fi
 echo "== enable =="
 # Guard against the failure mode this script exists to prevent: a leftover cron
 # entry racing the timers, producing two writers for the same .prom file.
-if crontab -l 2>/dev/null | grep -qE 'nvme_stats_textfile|rdma_nic_textfile|rdma_hwcounters_textfile'; then
+if crontab -l 2>/dev/null | grep -qE 'nvme_stats_textfile|rdma_nic_textfile|rdma_hwcounters_textfile|pcm_memory_textfile|numa_stats_textfile'; then
     echo "  WARNING: root crontab still drives a textfile collector." >&2
     echo "           Remove those lines -- timers now own the schedule." >&2
-    crontab -l | grep -nE 'nvme_stats_textfile|rdma_nic_textfile|rdma_hwcounters_textfile' >&2
+    crontab -l | grep -nE 'nvme_stats_textfile|rdma_nic_textfile|rdma_hwcounters_textfile|pcm_memory_textfile|numa_stats_textfile' >&2
 fi
 
 systemctl daemon-reload
 systemctl enable --now node_exporter.service
-systemctl enable --now rdma-hwcounters.timer nvme-stats.timer rdma-nic.timer
+systemctl enable --now rdma-hwcounters.timer nvme-stats.timer rdma-nic.timer \
+    pcm-memory.timer numa-stats.timer
 # Prime the .prom files so the first scrape is not empty.
-systemctl start rdma-hwcounters.service nvme-stats.service rdma-nic.service
+systemctl start rdma-hwcounters.service nvme-stats.service rdma-nic.service \
+    pcm-memory.service numa-stats.service
 
 echo
 echo "== verify: $(hostname) =="
-systemctl list-timers --all --no-pager | grep -E 'rdma-hwcounters|nvme-stats|rdma-nic' || true
+systemctl list-timers --all --no-pager \
+    | grep -E 'rdma-hwcounters|nvme-stats|rdma-nic|pcm-memory|numa-stats' || true
 echo
 echo "  textfile freshness (now $(date '+%H:%M:%S')):"
 ls -l --time-style=+%H:%M:%S "$TEXTFILE_DIR"/*.prom | awk '{printf "    %s  %s\n", $6, $7}'
@@ -129,7 +135,8 @@ curl -s "http://${LISTEN}/metrics" \
     | sed 's/^/    /'
 echo
 echo "  sample series present:"
-for m in rdma_hw_counter rdma_nic_stat nvme_smart_field rdma_port_up; do
+for m in rdma_hw_counter rdma_nic_stat nvme_smart_field rdma_port_up \
+         pcm_memory_bandwidth_megabytes_per_second numa_node_memory_bytes; do
     n=$(curl -s "http://${LISTEN}/metrics" | grep -c "^${m}{") || n=0
     printf '    %-18s %s series\n' "$m" "$n"
 done

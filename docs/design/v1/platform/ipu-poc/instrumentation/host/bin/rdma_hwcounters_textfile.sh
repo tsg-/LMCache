@@ -6,18 +6,31 @@
 # EXPOSE (only hw_counters/). The collector therefore hard-fails with
 # node_scrape_collector_success{collector="infiniband"} 0 and emits nothing.
 #
-# WHY ethtool IS NOT ENOUGH: rdma_nic_textfile.sh scrapes `ethtool -S`
-# port_rx_bytes/port_tx_bytes, which do NOT account RDMA-offloaded traffic on
-# this driver -- measured 2026-08-03, a 34 GB RDMA read moved port_rx_bytes by
-# ~3.8 KB (control traffic only). Those panels look alive while being blind to
-# the workload under test. hw_counters is the only exact instrument here.
+# RELATIONSHIP TO ethtool (rdma_nic_textfile.sh): that script's port-rx_bytes /
+# port-tx-bytes ARE the byte-accurate throughput instrument on Falcon -- measured
+# 2026-08-12 at ratio 1.0347 against a known 96.05 Gb/s sustained load, i.e.
+# payload plus wire framing. An earlier version of this comment claimed they were
+# not a throughput instrument because short-window rates exceeded 100 GbE; that
+# was textfile staleness aliasing the rate, not a counter defect, and it is fixed
+# by using a >=60s window. hw_counters are kept for DIRECTION and TRANSACTION
+# SHAPE, which ethtool cannot give.
 #
-# COUNTER SEMANTICS on this rig (NVMe-oF over irdma/RoCEv2, measured):
+# COUNTER SEMANTICS (NVMe-oF over irdma on Falcon/MEV, measured):
 #   NVMe-oF READ  -> target RDMA-writes into initiator memory -> InRdmaWrites
-#                    ops = ceil(bytes / 52428)  (RDMA write segment cap)
 #   NVMe-oF WRITE -> target RDMA-reads from initiator memory  -> InRdmaReads
-#                    4096 B per op, block-size invariant
 #   Payloads <= 4 KiB ride in-capsule (OutRdmaSends only, zero RDMA r/w ops).
+#
+# THESE ARE TRANSACTION COUNTS, NOT BYTES, AND FALCON HAS NO FIXED CONVERSION.
+# Measured across all 20 cells of the 2026-08-12 remote_xfs read sweep, bytes per
+# InRdmaWrite is stable within a block size (+/-0.3% across reps) but varies 13x
+# across block sizes: 3,523 B at 4k, 14,004 at 16k, 38,991 at 144k, 45,073 at
+# 256k, 45,084 at 512k -- saturating near 45 KB. The 52,428 B segment cap that
+# holds on the RoCE path does NOT hold here, so ops*const is wrong at every block
+# size. Never compare this rate across block sizes.
+#
+# Note also that neither `rdma stat show link` nor netdev
+# /sys/class/net/<iface>/statistics/* track Falcon traffic at all: mkp1 sent
+# 1.25 GiB of RDMA WRITE and netdev tx_bytes moved 140 bytes.
 #
 # NOTE: irdma refreshes these counters ASYNCHRONOUSLY (~1s lag). Fine for a
 # 15s scrape interval, but a delta sampled immediately after a workload ends

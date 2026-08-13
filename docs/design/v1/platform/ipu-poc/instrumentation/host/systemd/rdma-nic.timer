@@ -1,10 +1,22 @@
 [Unit]
-Description=Run rdma-nic every 5s
+Description=Run rdma-nic every 1s (must out-pace the 5s Prometheus scrape)
 
 [Timer]
 OnBootSec=10s
-OnUnitActiveSec=5s
-AccuracySec=1s
+# MUST stay well below Prometheus's 5s scrape interval, and AccuracySec MUST stay
+# tight. This was 5s/1s, which aliased badly: OnUnitActiveSec measures from the
+# previous run's COMPLETION, so the real period was 5s + runtime + up to 1s of
+# accuracy slack -- observed writes 5.004s to 5.823s apart against a fixed 5s
+# scrape. Two nearly-equal-but-drifting periods means some scrapes saw the same
+# stale file twice (rate contribution 0) and others straddled two writes (double
+# contribution). Under a verified-constant 96.05 Gb/s load the 60s-window panel
+# swung 76.68 to 103.89 Gb/s, i.e. above the negotiated 100 GbE link.
+#
+# At 1s every scrape sees a value at most ~1s old, bounding the error to ~1.7% of
+# a 60s window instead of a whole sample. `ethtool -S` measures 0.00s, so the
+# extra cadence is free.
+OnUnitActiveSec=1s
+AccuracySec=1ms
 
 [Install]
 WantedBy=timers.target

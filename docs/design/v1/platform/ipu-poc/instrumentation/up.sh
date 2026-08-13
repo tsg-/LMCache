@@ -37,7 +37,11 @@ ensure_tunnel() {
         # ExitOnForwardFailure: without it ssh backgrounds happily even when the
         # forward could not bind, leaving Prometheus scraping a dead local port
         # and reporting it as a target that is simply down.
-        ssh -f -N -o ExitOnForwardFailure=yes \
+        # A background ControlMaster accepts additional -L listeners but can
+        # leave their remote forwarding channels stale. Every managed tunnel
+        # therefore owns a direct SSH connection.
+        ssh -f -N -o ControlMaster=no -o ControlPath=none \
+            -o ExitOnForwardFailure=yes \
             -L "$local_port:127.0.0.1:$remote_port" "$host"
         echo "  tunnel $host:$remote_port -> :$local_port opened"
     fi

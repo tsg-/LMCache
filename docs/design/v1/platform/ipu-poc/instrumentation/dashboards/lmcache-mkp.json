@@ -15,7 +15,7 @@
       }
     ]
   },
-  "description": "IPU PoC — mkp1/mkp2 host, fabric, NVMe, and bench l2 view.",
+  "description": "IPU PoC \u2014 mkp1/mkp2 host, fabric, NVMe, and bench l2 view.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -272,6 +272,14 @@
       },
       "targets": [
         {
+          "expr": "sum(rate(node_disk_read_bytes_total{host=\"mkp2\",device=~\"nvme.+\"}[15s]))",
+          "legendFormat": "total SSD read"
+        },
+        {
+          "expr": "sum(rate(node_disk_written_bytes_total{host=\"mkp2\",device=~\"nvme.+\"}[15s]))",
+          "legendFormat": "total SSD write"
+        },
+        {
           "expr": "rate(node_disk_read_bytes_total{host=\"mkp2\",device=~\"nvme.+\"}[15s])",
           "legendFormat": "{{device}} read"
         },
@@ -339,10 +347,10 @@
         "type": "prometheus",
         "uid": "PROM"
       },
-      "description": "InRdmaWrites: an NVMe-oF READ is satisfied by the target RDMA-writing into initiator memory. RDMA write segments cap at ~52428 B, so bytes = ops * 52428 for I/O >= 256 KiB. This is the ONLY instrument that sees RDMA payload on irdma — ethtool port_rx_bytes does not account offloaded traffic.\n\nDO NOT QUOTE PEAKS FROM THIS PANEL. Three unsynchronized sampling stages (irdma refreshes hw_counters asynchronously ~1s, systemd timer regenerates the textfile at 2s, Prometheus scrapes at 5s) alias the rate. Measured 2026-08-03: a run the bench recorded at 94.4 Gbps showed a 75.6 Gbps peak here, with visibly stepped values. Integrated bytes over a long window are sound; instantaneous peak is understated. For a number that goes in a document, bracket the workload with an explicit counter delta.",
+      "description": "InRdmaWrites increments when an NVMe-oF READ is satisfied by the target RDMA-writing into initiator memory. It is a TRANSACTION counter, not a byte counter, and it is valid as a traffic-shape gate only.\n\nMEASURED ON FALCON 2026-08-12 across all 20 cells of the remote_xfs read sweep: bytes per InRdmaWrite is stable within a block size (+/-0.3% across reps) but varies 13x ACROSS block sizes -- 3,523 B at bs=4k, 14,004 at 16k, 38,991 at 144k, 45,073 at 256k, 45,084 at 512k, saturating near 45 KB. So no fixed ops-to-bytes constant is valid, and the 52,428 B segment cap documented for the RoCE path does NOT hold here. Never compare this rate across block sizes.\n\nFor bytes use the ethtool fabric-throughput panel or ACC telemetry (bytes_from_ulp_rc for writes, bytes_to_ulp for reads).",
       "fieldConfig": {
         "defaults": {
-          "unit": "bps"
+          "unit": "ops"
         }
       },
       "gridPos": {
@@ -353,11 +361,11 @@
       },
       "targets": [
         {
-          "expr": "rate(rdma_hw_counter{counter=\"InRdmaWrites\"}[15s]) * 52428 * 8",
-          "legendFormat": "{{host}}:{{device}} read payload"
+          "expr": "rate(rdma_hw_counter{counter=\"InRdmaWrites\"}[60s])",
+          "legendFormat": "{{host}}:{{device}} RDMA write ops"
         }
       ],
-      "title": "RDMA payload — reads (target→initiator) [TREND ONLY]",
+      "title": "RDMA operations \u2014 read path (target\u2192initiator) [DIAGNOSTIC]",
       "type": "timeseries"
     },
     {
@@ -365,10 +373,10 @@
         "type": "prometheus",
         "uid": "PROM"
       },
-      "description": "InRdmaReads: an NVMe-oF WRITE makes the target RDMA-read from initiator memory. Measured at exactly 4096 B per op, block-size invariant. Payloads <= 4 KiB ride in-capsule (OutRdmaSends only) and register zero RDMA read ops.\n\nSame aliasing caveat as the read panel — trend only, do not quote peaks. Note the store path is media-bound at ~5.6 GB/s (45 Gbps) on 2x PM9A3, so this panel should NOT be expected to approach the read panel's ceiling.",
+      "description": "InRdmaReads increments when an NVMe-oF WRITE makes the target RDMA-read from initiator memory. Transaction counter, shape gate only -- see the read-path panel for why no generic byte conversion is valid on Falcon. Payloads <= 4 KiB ride in-capsule (OutRdmaSends only) and register zero RDMA read operations.\n\nThis stays near zero for read-only sweeps; that is correct, not a gap.",
       "fieldConfig": {
         "defaults": {
-          "unit": "bps"
+          "unit": "ops"
         }
       },
       "gridPos": {
@@ -379,11 +387,11 @@
       },
       "targets": [
         {
-          "expr": "rate(rdma_hw_counter{counter=\"InRdmaReads\"}[15s]) * 4096 * 8",
-          "legendFormat": "{{host}}:{{device}} write payload"
+          "expr": "rate(rdma_hw_counter{counter=\"InRdmaReads\"}[60s])",
+          "legendFormat": "{{host}}:{{device}} RDMA read ops"
         }
       ],
-      "title": "RDMA payload — writes (initiator→target) [TREND ONLY]",
+      "title": "RDMA operations \u2014 write path (initiator\u2192target) [DIAGNOSTIC]",
       "type": "timeseries"
     },
     {
@@ -391,10 +399,29 @@
         "type": "prometheus",
         "uid": "PROM"
       },
-      "description": "ethtool port counters. On irdma these do NOT include RDMA-offloaded payload — a 34 GB RDMA read moved port_rx_bytes by ~3.8 KB. Useful for control/TCP traffic and as a sanity check, NOT for throughput.",
+      "description": "Wire-level fabric throughput on the Falcon plane, and the primary throughput instrument on this rig.\n\nCALIBRATED 2026-08-12 against ib_write_bw at a known 96.05 Gb/s sustained for 70 s: port-tx-bytes tracked payload at ratio 1.0347, i.e. payload plus 3.5% wire framing, and the five 10 s sample means averaged 99 Gb/s. The counter is accurate.\n\nUSE A >=60s WINDOW. Shorter windows alias badly: the same sustained 96 Gb/s load rendered as 85.28 / 99.58 / 100.20 / 111.89 / 98.54 Gb/s across consecutive 10 s samples, and 111.89 is above the negotiated 100 GbE link. That is the sampling artifact behind the historical '208 Gb/s' reading, not a defect in the counter. The NIC updates port counters in bursts, so a short window can enclose two updates or none.\n\nNote the driver spells these inconsistently -- port-rx_bytes but port-tx-bytes -- which the collector's gsub normalizes to port_rx_bytes / port_tx_bytes. Read rx on the initiator (mkp1) and tx on the target (mkp2): an NVMe-oF read is the target writing into initiator memory.",
       "fieldConfig": {
         "defaults": {
-          "unit": "bps"
+          "unit": "bps",
+          "max": 100000000000,
+          "custom": {
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 100000000000
+              }
+            ]
+          }
         }
       },
       "gridPos": {
@@ -405,15 +432,15 @@
       },
       "targets": [
         {
-          "expr": "rate(rdma_nic_stat{name=\"port_rx_bytes\"}[30s]) * 8",
+          "expr": "rate(rdma_nic_stat{name=\"port_rx_bytes\"}[60s]) * 8",
           "legendFormat": "{{host}}:{{iface}} rx"
         },
         {
-          "expr": "rate(rdma_nic_stat{name=\"port_tx_bytes\"}[30s]) * 8",
+          "expr": "rate(rdma_nic_stat{name=\"port_tx_bytes\"}[60s]) * 8",
           "legendFormat": "{{host}}:{{iface}} tx"
         }
       ],
-      "title": "Fabric NIC wire bytes/s (control plane only)",
+      "title": "Fabric throughput \u2014 ethtool port counters (>=60s window)",
       "type": "timeseries"
     },
     {
@@ -421,7 +448,7 @@
         "type": "prometheus",
         "uid": "PROM"
       },
-      "description": "irdma names xon/xoff events rather than mlx5's *_pause_phy. Nonzero xoff means the link is asserting backpressure.",
+      "description": "irdma names xon/xoff events rather than mlx5's *_pause_phy. Nonzero xoff means the link is asserting backpressure.\n\nWINDOW WIDENED TO 60s 2026-08-12. This metric comes from a node_exporter TEXTFILE collector, so its value is stale between collector writes while Prometheus keeps scraping at 5 s. Measured over a 2-minute idle range query, consecutive scrapes returned delta 0 (a repeated stale read) directly adjacent to ~1.5 GB jumps. A short rate window that happens to span a stale sample followed by a jump reports a spike: under a sustained, verified 96.05 Gb/s load, consecutive 10 s samples read 85.28 / 99.58 / 100.20 / 111.89 / 98.54 Gb/s -- and 111.89 is above the negotiated 100 GbE link. Their mean, 99 Gb/s, is correct. Note node_disk_* metrics are NOT affected: they are read directly by node_exporter, not via a textfile, so shorter windows remain valid there.",
       "gridPos": {
         "x": 12,
         "y": 39,
@@ -430,11 +457,11 @@
       },
       "targets": [
         {
-          "expr": "rate(rdma_nic_stat{name=~\"port_(rx|tx)_(xon|xoff)_events\"}[30s])",
+          "expr": "rate(rdma_nic_stat{name=~\"port_(rx|tx)_(xon|xoff)_events\"}[60s])",
           "legendFormat": "{{host}} {{name}}"
         },
         {
-          "expr": "rate(rdma_nic_stat{name=~\"port_(rx|tx)_dropped.*|.*csum_errors|.*length_errors\"}[30s])",
+          "expr": "rate(rdma_nic_stat{name=~\"port_(rx|tx)_dropped.*|.*csum_errors|.*length_errors\"}[60s])",
           "legendFormat": "{{host}} {{name}}"
         }
       ],
@@ -446,7 +473,7 @@
         "type": "prometheus",
         "uid": "PROM"
       },
-      "description": "irdma hw_counters error family. Retransmits under load indicate fabric trouble, not host trouble.",
+      "description": "irdma hw_counters error family. Retransmits under load indicate fabric trouble, not host trouble.\n\nWINDOW WIDENED TO 60s 2026-08-12. This metric comes from a node_exporter TEXTFILE collector, so its value is stale between collector writes while Prometheus keeps scraping at 5 s. Measured over a 2-minute idle range query, consecutive scrapes returned delta 0 (a repeated stale read) directly adjacent to ~1.5 GB jumps. A short rate window that happens to span a stale sample followed by a jump reports a spike: under a sustained, verified 96.05 Gb/s load, consecutive 10 s samples read 85.28 / 99.58 / 100.20 / 111.89 / 98.54 Gb/s -- and 111.89 is above the negotiated 100 GbE link. Their mean, 99 Gb/s, is correct. Note node_disk_* metrics are NOT affected: they are read directly by node_exporter, not via a textfile, so shorter windows remain valid there.",
       "gridPos": {
         "x": 0,
         "y": 47,
@@ -455,7 +482,7 @@
       },
       "targets": [
         {
-          "expr": "rate(rdma_hw_counter{counter=~\".*[Rr]etrans.*|.*[Ee]rr.*|.*[Dd]rop.*\"}[30s])",
+          "expr": "rate(rdma_hw_counter{counter=~\".*[Rr]etrans.*|.*[Ee]rr.*|.*[Dd]rop.*\"}[60s])",
           "legendFormat": "{{host}} {{counter}}"
         }
       ],
@@ -550,6 +577,312 @@
       ],
       "title": "Memory used (per host)",
       "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 64,
+        "w": 24,
+        "h": 1
+      },
+      "title": "NVMe IOPS / latency / utilization (matched-capacity sweep)",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM"
+      },
+      "description": "Completed I/Os per second on the target's own PM9A3 devices. Pair with the throughput panel above to read back the effective I/O size the target actually sees (Bps / IOPS), which is what tells you whether the initiator's 144/256/512 KiB request survived the fabric intact or was split.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "iops"
+        }
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 65,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "rate(node_disk_reads_completed_total{host=\"mkp2\",device=~\"nvme.+\"}[15s])",
+          "legendFormat": "{{device}} read"
+        },
+        {
+          "expr": "rate(node_disk_writes_completed_total{host=\"mkp2\",device=~\"nvme.+\"}[15s])",
+          "legendFormat": "{{device}} write"
+        }
+      ],
+      "title": "Target SSD IOPS (mkp2 NVMe)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM"
+      },
+      "description": "Fabric-side request rate on the imported NVMe-oF namespaces, plus the md0 RAID0 above them. md0 counts the striped request while the namespaces count the per-leg requests, so md0 is roughly the sum of its legs, not a duplicate.\n\nDEVICE SELECTION FIXED 2026-08-12. This panel previously matched `device=~\"nvme2n1|nvme3n2\"`. On mkp1 the imported namespaces are actually nvme0n1 and nvme3n1: `nvme3n2` has never existed, and `nvme2n1` is a LOCAL idle PM9A3, so the panel plotted an idle local drive and a nonexistent device instead of the fabric. Kernel NVMe names are not stable across reboots, so selection is now by the `nvme_namespace_role` metric emitted by nvme_stats_textfile.sh (role=\"imported\" == has no pcie transport, carries the target's subsystem NQN) rather than by hardcoded name.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "iops"
+        }
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 65,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "(rate(node_disk_reads_completed_total{host=\"mkp1\",device=~\"nvme.+\"}[60s]) * on (device) group_left label_replace(nvme_namespace_role{host=\"mkp1\",role=\"imported\"}, \"device\", \"$1\", \"ns\", \"(.+)\"))",
+          "legendFormat": "{{device}} read (imported)"
+        },
+        {
+          "expr": "(rate(node_disk_writes_completed_total{host=\"mkp1\",device=~\"nvme.+\"}[60s]) * on (device) group_left label_replace(nvme_namespace_role{host=\"mkp1\",role=\"imported\"}, \"device\", \"$1\", \"ns\", \"(.+)\"))",
+          "legendFormat": "{{device}} write (imported)"
+        },
+        {
+          "expr": "rate(node_disk_reads_completed_total{host=\"mkp1\",device=\"md0\"}[60s])",
+          "legendFormat": "md0 read"
+        },
+        {
+          "expr": "rate(node_disk_writes_completed_total{host=\"mkp1\",device=\"md0\"}[60s])",
+          "legendFormat": "md0 write"
+        }
+      ],
+      "title": "Initiator IOPS (mkp1 imported namespaces + md0)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM"
+      },
+      "description": "iostat's r_await / w_await: total per-request wait divided by completions, so it INCLUDES queueing, not just service time. At saturation await rises with offered depth while throughput stays flat \u2014 that is the queue growing, not the device slowing, and it is the signature to look for when comparing QD16 against QD32 cells.\n\nGaps are real: the ratio is undefined when a device completes no I/O in the window, which is exactly what happens between sweep cells.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 73,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "rate(node_disk_read_time_seconds_total{host=\"mkp2\",device=~\"nvme.+\"}[15s]) / rate(node_disk_reads_completed_total{host=\"mkp2\",device=~\"nvme.+\"}[15s])",
+          "legendFormat": "{{device}} r_await"
+        },
+        {
+          "expr": "rate(node_disk_write_time_seconds_total{host=\"mkp2\",device=~\"nvme.+\"}[15s]) / rate(node_disk_writes_completed_total{host=\"mkp2\",device=~\"nvme.+\"}[15s])",
+          "legendFormat": "{{device}} w_await"
+        }
+      ],
+      "title": "Target SSD await (mkp2)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM"
+      },
+      "description": "Initiator-side await on the imported namespaces. The difference between this and the mkp2 await panel is the fabric plus target-stack cost of one request: if initiator await climbs while target await stays flat, the added delay is on the transport or in the target's queues, not in the media.\n\nDEVICE SELECTION FIXED 2026-08-12. This panel previously matched `device=~\"nvme2n1|nvme3n2\"`. On mkp1 the imported namespaces are actually nvme0n1 and nvme3n1: `nvme3n2` has never existed, and `nvme2n1` is a LOCAL idle PM9A3, so the panel plotted an idle local drive and a nonexistent device instead of the fabric. Kernel NVMe names are not stable across reboots, so selection is now by the `nvme_namespace_role` metric emitted by nvme_stats_textfile.sh (role=\"imported\" == has no pcie transport, carries the target's subsystem NQN) rather than by hardcoded name.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 73,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "(rate(node_disk_read_time_seconds_total{host=\"mkp1\",device=~\"nvme.+\"}[60s]) * on (device) group_left label_replace(nvme_namespace_role{host=\"mkp1\",role=\"imported\"}, \"device\", \"$1\", \"ns\", \"(.+)\")) / (rate(node_disk_reads_completed_total{host=\"mkp1\",device=~\"nvme.+\"}[60s]) * on (device) group_left label_replace(nvme_namespace_role{host=\"mkp1\",role=\"imported\"}, \"device\", \"$1\", \"ns\", \"(.+)\"))",
+          "legendFormat": "{{device}} r_await (imported)"
+        },
+        {
+          "expr": "(rate(node_disk_write_time_seconds_total{host=\"mkp1\",device=~\"nvme.+\"}[60s]) * on (device) group_left label_replace(nvme_namespace_role{host=\"mkp1\",role=\"imported\"}, \"device\", \"$1\", \"ns\", \"(.+)\")) / (rate(node_disk_writes_completed_total{host=\"mkp1\",device=~\"nvme.+\"}[60s]) * on (device) group_left label_replace(nvme_namespace_role{host=\"mkp1\",role=\"imported\"}, \"device\", \"$1\", \"ns\", \"(.+)\"))",
+          "legendFormat": "{{device}} w_await (imported)"
+        },
+        {
+          "expr": "rate(node_disk_read_time_seconds_total{host=\"mkp1\",device=\"md0\"}[60s]) / rate(node_disk_reads_completed_total{host=\"mkp1\",device=\"md0\"}[60s])",
+          "legendFormat": "md0 r_await"
+        }
+      ],
+      "title": "Initiator await (mkp1 imported namespaces + md0)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM"
+      },
+      "description": "Fraction of wall time with at least one I/O in flight (iostat %util). On a multi-queue NVMe device this saturates at 1.0 long before the device is out of capacity -- one outstanding request is enough to pin it -- so 100% here does NOT mean the drive is the bottleneck.\n\nDEVICE SELECTION FIXED 2026-08-12. This panel previously matched `device=~\"nvme2n1|nvme3n2\"`. On mkp1 the imported namespaces are actually nvme0n1 and nvme3n1: `nvme3n2` has never existed, and `nvme2n1` is a LOCAL idle PM9A3, so the panel plotted an idle local drive and a nonexistent device instead of the fabric. Kernel NVMe names are not stable across reboots, so selection is now by the `nvme_namespace_role` metric emitted by nvme_stats_textfile.sh (role=\"imported\" == has no pcie transport, carries the target's subsystem NQN) rather than by hardcoded name.",
+      "fieldConfig": {
+        "defaults": {
+          "max": 1.1,
+          "min": 0,
+          "unit": "percentunit"
+        }
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 81,
+        "w": 24,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "rate(node_disk_io_time_seconds_total{host=\"mkp2\",device=~\"nvme.+\"}[60s])",
+          "legendFormat": "mkp2 {{device}} (target media)"
+        },
+        {
+          "expr": "(rate(node_disk_io_time_seconds_total{host=\"mkp1\",device=~\"nvme.+\"}[60s]) * on (device) group_left label_replace(nvme_namespace_role{host=\"mkp1\",role=\"imported\"}, \"device\", \"$1\", \"ns\", \"(.+)\"))",
+          "legendFormat": "mkp1 {{device}} (imported)"
+        }
+      ],
+      "title": "Device utilization (target media vs imported namespaces)",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 89,
+        "w": 24,
+        "h": 1
+      },
+      "title": "Memory / NUMA",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM"
+      },
+      "description": "Intel PCM samples DRAM-controller bandwidth for one second every five seconds. This is host-wide DRAM traffic, not NVMe-oF payload bandwidth. Use it to identify a target-memory or cross-socket pressure limit after storage and fabric counters have been checked.",
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "unit": "MBs"
+        }
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 90,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "pcm_memory_bandwidth_megabytes_per_second{direction=\"read\"}",
+          "legendFormat": "{{host}} socket {{socket}} read"
+        },
+        {
+          "expr": "pcm_memory_bandwidth_megabytes_per_second{direction=\"write\"}",
+          "legendFormat": "{{host}} socket {{socket}} write"
+        }
+      ],
+      "title": "PCM DRAM bandwidth by socket",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM"
+      },
+      "description": "Kernel node-local MemUsed. This is a host-memory pressure indicator, not a measure of the benchmark process's allocation or registered memory alone.",
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "unit": "bytes"
+        }
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 90,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "numa_node_memory_bytes{state=\"used\"}",
+          "legendFormat": "{{host}} node {{node}}"
+        }
+      ],
+      "title": "NUMA node memory used",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM"
+      },
+      "description": "Kernel node-local allocation counters. `local_node` is an allocation satisfied on the requesting node; `other_node` is an allocation satisfied elsewhere. These counters are host-wide, so correlate their change during a timed cell rather than attributing their absolute value to LMCache.",
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "unit": "ops"
+        }
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 98,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "rate(numa_node_stat_total{counter=\"local_node\"}[60s])",
+          "legendFormat": "{{host}} node {{node}} local"
+        },
+        {
+          "expr": "rate(numa_node_stat_total{counter=\"other_node\"}[60s])",
+          "legendFormat": "{{host}} node {{node}} other"
+        }
+      ],
+      "title": "NUMA local vs other-node allocations",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM"
+      },
+      "description": "`numa_miss` means an allocation could not be satisfied on its preferred node. `numa_foreign` is the reciprocal accounting view. Both are kernel-wide counters; a rise during a cell is diagnostic evidence, not proof that the benchmark alone caused it.",
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "unit": "ops"
+        }
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 98,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "rate(numa_node_stat_total{counter=\"numa_miss\"}[60s])",
+          "legendFormat": "{{host}} node {{node}} miss"
+        },
+        {
+          "expr": "rate(numa_node_stat_total{counter=\"numa_foreign\"}[60s])",
+          "legendFormat": "{{host}} node {{node}} foreign"
+        }
+      ],
+      "title": "NUMA misses / foreign allocations",
+      "type": "timeseries"
     }
   ],
   "refresh": "10s",
@@ -588,7 +921,8 @@
     "to": "now"
   },
   "timezone": "",
-  "title": "IPU PoC — mkp1/mkp2",
+  "title": "IPU PoC \u2014 mkp1/mkp2",
   "uid": "ipu-poc-mkp-stub",
+  "version": 14,
   "weekStart": ""
 }

@@ -3,7 +3,7 @@
 Everything needed to reproduce the mkp1/mkp2 monitoring stack on another pair of
 test hosts. Two halves:
 
-- **`host/`** — runs *on each test host*: node_exporter + three textfile
+- **`host/`** — runs *on each test host*: node_exporter + five textfile
   collectors, each driven by its own systemd timer.
 - **root of this dir** — runs *on the laptop/control host*: SSH tunnels plus
   Prometheus and Grafana in Docker.
@@ -28,9 +28,9 @@ scp -r host <newhost>:/tmp/obs-kit
 ssh <newhost> 'RDMA_FABRIC_IFACE=<fabric-iface> bash /tmp/obs-kit/install.sh'
 ```
 
-`install.sh` installs deps (`nvme-cli`, `ethtool`, `jq`), fetches node_exporter
+`install.sh` installs deps (`nvme-cli`, `ethtool`, `jq`, Intel PCM), fetches node_exporter
 1.8.2 if absent, creates the `node_exporter` system user and
-`/var/lib/node_exporter/textfile`, installs the three collectors and seven units,
+`/var/lib/node_exporter/textfile`, installs the five collectors and eleven units,
 enables the timers, and verifies freshness plus series counts. It is idempotent.
 
 `RDMA_FABRIC_IFACE` is **required** — it pins `rdma-nic.service` to the fabric
@@ -43,7 +43,7 @@ without it and prints the candidate interfaces.
 Verify:
 
 ```bash
-ssh <newhost> 'systemctl list-timers --all | grep -E "rdma|nvme"'
+ssh <newhost> 'systemctl list-timers --all | grep -E "rdma|nvme|pcm|numa"'
 ssh <newhost> 'curl -s localhost:9100/metrics | grep -c ^rdma_hw_counter{'
 ```
 
@@ -65,14 +65,16 @@ Grafana provisions the datasource and dashboard automatically.
 | Path | Runs on | Purpose |
 |---|---|---|
 | `host/install.sh` | test host | Idempotent installer + verifier |
-| `host/bin/rdma_hwcounters_textfile.sh` | test host | irdma `hw_counters` — the only exact RDMA instrument here |
-| `host/bin/rdma_nic_textfile.sh` | test host | `ethtool -S` on the fabric NIC — control plane only |
+| `host/bin/rdma_hwcounters_textfile.sh` | test host | irdma `hw_counters` — directional RDMA operation counters |
+| `host/bin/rdma_nic_textfile.sh` | test host | `ethtool -S` fabric-NIC counters — traffic-presence diagnostic only |
 | `host/bin/nvme_stats_textfile.sh` | test host | NVMe SMART per namespace |
+| `host/bin/pcm_memory_textfile.sh` | test host | Intel PCM DRAM read/write bandwidth per socket |
+| `host/bin/numa_stats_textfile.sh` | test host | kernel node memory and NUMA allocation counters |
 | `host/systemd/*.service`, `*.timer` | test host | node_exporter + one timer per collector |
 | `prometheus.yml` | control | 5s scrape of the node tunnels (relabelled to `host=`) plus the `lmcache_bench` initiator ports (relabelled to `initiator=`) |
 | `docker-compose.yml` | control | Prometheus 2.55.1 + Grafana 11.3.0, loopback-bound |
 | `provisioning/` | control | Grafana datasource (uid `PROM`) + dashboard provider |
-| `dashboards/lmcache-mkp.json` | control | 21 panels, uid `ipu-poc-mkp-stub` — provisioned copy; LMCache row first |
+| `dashboards/lmcache-mkp.json` | control | 32 panels, uid `ipu-poc-mkp-stub` — provisioned copy; LMCache row first |
 | `up.sh` | control | Tunnels + stack + health check |
 
 ### The `lmcache_bench` job
@@ -125,9 +127,26 @@ nvme iostat > run.nvme.csv &
 Aligned timestamps plus a single-node view is ~80% of the value. Upgrade to the
 full stack when you want live mid-run visibility or a second viewer.
 
-Collector intervals: `rdma-hwcounters` 2s, `rdma-nic` 5s, `nvme-stats` 15s.
-SMART reads issue an admin command per namespace, hence the slower cadence; NIC
-and RDMA counters are cheap sysfs/ioctl reads wanted at fabric resolution.
+Collector intervals: `rdma-hwcounters` 2s, `rdma-nic` 5s, `pcm-memory` 5s,
+`numa-stats` 5s, `nvme-stats` 15s. PCM takes a one-second measurement inside
+each five-second cycle. SMART reads issue an admin command per namespace, hence
+the slower cadence; NIC, RDMA, and NUMA counters are cheap reads wanted at
+fabric resolution.
+
+### Memory and NUMA telemetry
+
+`pcm-memory` exports socket-level DRAM controller bandwidth in PCM's reported
+MB/s. It measures all host memory traffic, including unrelated processes and
+kernel activity; it is not a substitute for application goodput or wire-byte
+measurement. The collector emits `pcm_memory_collector_success=0` if PCM is
+unavailable or its CSV output cannot be parsed, rather than presenting an old
+successful sample as current.
+
+The NUMA collector exports `MemTotal`, `MemFree`, and `MemUsed` from each
+node's kernel `meminfo`, plus per-node `numa_hit`, `numa_miss`,
+`numa_foreign`, `local_node`, and `other_node` counters. They are host-wide
+kernel counters. A change during a measured cell is useful diagnostic evidence;
+their absolute values do not belong to the benchmark process alone.
 
 ## Load-bearing constraints
 
@@ -149,22 +168,66 @@ reads `ports/<p>/counters/`; irdma exposes only `hw_counters/`. The collector
 hard-fails with `node_scrape_collector_success{collector="infiniband"} 0` and
 emits nothing. `rdma_hwcounters_textfile.sh` exists to replace it.
 
-**`ethtool -S` is blind to RDMA payload on irdma.** Measured 2026-08-03: a 34 GB
-RDMA read moved `port_rx_bytes` by ~3.8 KB. The `rdma_nic_stat` byte panels show
-control traffic only — they look alive while being blind to the workload under
-test. Do not build a throughput gate on NIC bytes.
+**`ethtool -S` port bytes ARE the throughput instrument on Falcon — with a
+≥60s window.** This reverses the earlier guidance in this file. Calibrated
+2026-08-12 on the MKP/Falcon rig against `ib_write_bw` held at a known
+96.05 Gb/s for 70 s: `port-tx-bytes` tracked payload at ratio **1.0347**
+(payload plus 3.5% wire framing), and five consecutive 10 s sample means
+averaged 99 Gb/s. The counter is accurate.
 
-**RDMA counter direction is asymmetric** (NVMe-oF over irdma/RoCEv2, measured):
+The historical "208 Gb/s on a 100 GbE link" was a **sampling artifact, not a bad
+counter**. These metrics arrive via a node_exporter *textfile*, so the value is
+stale between collector writes while Prometheus keeps scraping at 5 s. On an
+idle range query, consecutive scrapes returned delta 0 (repeated stale read)
+directly adjacent to ~1.5 GB jumps. Under the verified 96.05 Gb/s load,
+consecutive 10 s windows read 85.28 / 99.58 / 100.20 / **111.89** / 98.54 Gb/s.
+Use ≥60s and the artifact averages out. `node_disk_*` is unaffected — read
+directly, not via textfile — so shorter windows stay valid there.
 
-| Operation | Wire mechanism | Counter | Bytes per op |
+Driver spelling is inconsistent: `port-rx_bytes` but `port-tx-bytes`. The
+collector's `gsub` normalizes both to `port_rx_bytes` / `port_tx_bytes`.
+
+**Falcon is NOT RoCE: the byte-conversion rules below do not carry over.**
+Neither `rdma stat show link` nor `/sys/class/net/<iface>/statistics/rx_bytes`
+work on Falcon/MEV — measured, mkp1 sent 1.25 GiB of RDMA WRITE and netdev
+`tx_bytes` moved **140 bytes**. `hw_counters` *do* work, but as transaction
+counters only.
+
+**RDMA counter direction is asymmetric** (NVMe-oF over irdma, measured):
+
+| Operation | Wire mechanism | Counter | Interpretation |
 |---|---|---|---|
-| NVMe-oF READ | target RDMA-**writes** into initiator memory | `InRdmaWrites` | `ceil(bytes / 52428)` |
-| NVMe-oF WRITE | target RDMA-**reads** initiator memory | `InRdmaReads` | 4096, block-size invariant |
+| NVMe-oF READ | target RDMA-**writes** into initiator memory | `InRdmaWrites` | transaction count; **no valid fixed byte constant on Falcon** |
+| NVMe-oF WRITE | target RDMA-**reads** initiator memory | `InRdmaReads` | transaction count |
 
 `OutRdmaWrites` stays 0 on the initiator. Payloads ≤4 KiB ride in-capsule
-(`OutRdmaSends` only, zero RDMA r/w ops). Verified from both ends: mkp1
-`InRdmaWrites` == mkp2 `OutRdmaWrites` exactly. The dashboard's byte-rate panels
-are labelled `[TREND ONLY]` because they multiply op counts by these constants.
+(`OutRdmaSends` only, zero RDMA r/w ops).
+
+On Falcon, bytes per `InRdmaWrite` is stable *within* a block size (±0.3% across
+reps) but varies **13× across** block sizes — measured over all 20 cells of the
+2026-08-12 `remote_xfs` read sweep:
+
+| block size | bytes per `InRdmaWrite` |
+|---|---|
+| 4k | 3,523 |
+| 16k | 14,004 |
+| 144k | 38,991 |
+| 256k | 45,073 |
+| 512k | 45,084 |
+
+It saturates near 45 KB, so the 52,428 B RoCE segment cap does **not** hold
+here. Treat `InRdmaWrites` as a traffic-shape gate and never compare its rate
+across block sizes. The per-cell counter/app-byte ratio used by
+`run_fio_capacity_sweep.sh` stays valid because it is computed at fixed block
+size — the only regime where the counter is stable.
+
+**ACC telemetry is the byte-accurate alternative.** `rtcmd` exposes a gRPC
+telemetry service on the ACC (`10.0.0.35:50051` for mkp1, `10.0.0.37:50051` for
+mkp2, reachable via `ssh 10.10.0.2` from the respective host; `secure-channel`
+is false, so no certs). `tele_cli` is absent from our ACC image — use the
+`telemetry_pb2_grpc.TelemetryStub` directly. Calibrated against known
+transfers: `bytes_from_ulp_rc` ratio 1.0068 for writes, `bytes_to_ulp` ratio
+1.0127 for reads. `ULP_NVME` is available alongside `ULP_RDMA`.
 
 **irdma refreshes `hw_counters` asynchronously (~1s).** A delta sampled
 immediately after a workload ends can read 0 — again indistinguishable from no

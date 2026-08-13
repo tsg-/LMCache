@@ -1,0 +1,6 @@
+[Unit]
+Description=Refresh Intel PCM memory-bandwidth textfile for node_exporter
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/pcm_memory_textfile.sh
