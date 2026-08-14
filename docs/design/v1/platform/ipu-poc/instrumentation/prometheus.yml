@@ -1,0 +1,71 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 15s
+  external_labels:
+    project: ipu-poc-nvmeof-alt
+
+scrape_configs:
+  - job_name: node
+    static_configs:
+      # host.docker.internal resolves to the macOS host from inside containers.
+      # These reach node_exporter via the SSH tunnels opened on the host laptop.
+      - targets:
+          - host.docker.internal:19100   # mkp1 via ssh -L 19100:127.0.0.1:9100 mkp1
+          - host.docker.internal:19101   # mkp2 via ssh -L 19101:127.0.0.1:9100 mkp2
+        labels:
+          fabric: mgmt
+    relabel_configs:
+      - source_labels: [__address__]
+        regex: host\.docker\.internal:19100
+        target_label: host
+        replacement: mkp1
+      - source_labels: [__address__]
+        regex: host\.docker\.internal:19101
+        target_label: host
+        replacement: mkp2
+
+  # `bench l2 --serve-metrics` publishes live submit/success/bytes counters for
+  # the lifetime of one CLI process. Four targets because the multi-initiator
+  # drivers assign METRICS_BASE_PORT + id, and a single fixed target would only
+  # ever see initiator 0.
+  #
+  # PLANNED CONFIGURATION, not yet exercisable from this branch:
+  #   - `--serve-metrics` lives on feat/bench-l2-sustained-only (0d88de0a).
+  #   - run_multi_initiator_{load,mixed}.sh, which assign the per-id ports, are
+  #     untracked and absent from that branch too.
+  # Until both land, expect all four to stay down. Ports 19104/19105 have never
+  # been exercised against a real 4-initiator run.
+  #
+  # Expect `up == 0` between sweep cells: the endpoint dies with the process.
+  # That is not a scrape failure. A 120s cell at the 5s interval yields ~24
+  # samples. Rate over the `measured` phase only -- the `phase` label separates
+  # it from `warmup`, and including warmup biases the result.
+  - job_name: lmcache_bench
+    static_configs:
+      # ssh -N -L 1910{2,3,4,5}:127.0.0.1:910{1,2,3,4} mkp1
+      - targets:
+          - host.docker.internal:19102   # initiator 0 -> mkp1 127.0.0.1:9101
+          - host.docker.internal:19103   # initiator 1 -> mkp1 127.0.0.1:9102
+          - host.docker.internal:19104   # initiator 2 -> mkp1 127.0.0.1:9103
+          - host.docker.internal:19105   # initiator 3 -> mkp1 127.0.0.1:9104
+        labels:
+          fabric: mgmt
+          host: mkp1
+          workload: fs_native
+    relabel_configs:
+      - source_labels: [__address__]
+        regex: host\.docker\.internal:19102
+        target_label: initiator
+        replacement: "0"
+      - source_labels: [__address__]
+        regex: host\.docker\.internal:19103
+        target_label: initiator
+        replacement: "1"
+      - source_labels: [__address__]
+        regex: host\.docker\.internal:19104
+        target_label: initiator
+        replacement: "2"
+      - source_labels: [__address__]
+        regex: host\.docker\.internal:19105
+        target_label: initiator
+        replacement: "3"

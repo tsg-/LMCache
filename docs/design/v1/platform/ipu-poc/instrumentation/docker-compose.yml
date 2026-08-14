@@ -1,0 +1,43 @@
+services:
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: lmcache-prom
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prom-data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=30d
+      - --storage.tsdb.retention.size=10GB
+      # Lets `curl -X POST /-/reload` pick up prometheus.yml edits without a
+      # restart, which would otherwise interrupt scraping mid-benchmark.
+      - --web.enable-lifecycle
+    ports:
+      - "127.0.0.1:9090:9090"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    container_name: lmcache-grafana
+    volumes:
+      - grafana-data:/var/lib/grafana
+      # Datasource uid must stay PROM -- the dashboard JSON pins it.
+      - ./provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./dashboards:/var/lib/grafana/dashboards:ro
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      # Required, no default: a committed default password is a known
+      # credential the moment this file is pushed. up.sh generates one
+      # into .env on first run if GRAFANA_PASSWORD is unset.
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:?set GRAFANA_PASSWORD or run ./up.sh}
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  prom-data:
+  grafana-data:
