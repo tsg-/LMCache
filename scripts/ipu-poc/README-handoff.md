@@ -46,7 +46,7 @@ lmcache bench l2 \
 lmcache bench l2 ... --kvcache-shape-spec '(1,1024,256,1,576):uint8:61'
 ```
 
-**Sustained / namespace drivers** use `--key-prefix`, `--duration-sec`, `--warmup-rounds`, and optionally `--read-write-ratio` (mixed). See `run_model_geometry.sh` and `run_payload_sweep.sh`.
+**Sustained / namespace drivers** use `--key-prefix`, `--duration-sec`, `--warmup-rounds`, and optionally `--read-write-ratio` (mixed). See `README-model-geometry.md` and `run_payload_sweep.sh`.
 
 ## Live metrics (`serve-metrics`)
 
@@ -63,8 +63,8 @@ All under `scripts/ipu-poc/` unless noted. Edit **site-specific** `VENV`, corpus
 
 | Script | Purpose |
 |--------|---------|
-| `run_model_geometry.sh` | Model-page prepop + sustained read (144 KiB DeepSeek geometry) |
-| `run_geom_multi.sh` | Multi-profile / multi-process geometry matrix |
+| `run_model_geometry.sh` | Generic profile-shaped store, load, sustained-load, and mixed runs |
+| `run_geom_multi.sh` | Generic local multi-process sustained-load or mixed fan-out |
 | `run_payload_sweep.sh` | Large-object (28 MiB) proxy sweep |
 | `run_sustained_load.sh` | Fixed-corpus sustained read |
 | `run_multi_initiator_load.sh` | Parallel read processes + metrics |
