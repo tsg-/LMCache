@@ -1,0 +1,22 @@
+%%{init: {"themeVariables": {"fontSize": "24px"}}}%%
+flowchart LR
+  mkp["What MkP already shows<br/>100 GbE with several local processes<br/>one shared read-only corpus"]
+  plan["Next: 4x400 hardware<br/>Compare two ways to assign<br/>the same 16 SSDs"]
+  pools["Start here: separate pools<br/>four 4-SSD pools<br/>one per initiator"]
+  wide["Then compare: A-wide<br/>one 16-SSD stripe<br/>four private namespaces"]
+  pools_open["Measure:<br/>per-pool throughput<br/>when one initiator is slower"]
+  wide_open["Measure:<br/>nvmet/filesystem scaling<br/>and unused bandwidth sharing"]
+
+  mkp --> plan
+  plan --> pools
+  plan --> wide
+  pools --> pools_open
+  wide --> wide_open
+
+  classDef proven fill:#eaf2ea,stroke:#222,stroke-width:1px
+  classDef plan fill:#e9eef7,stroke:#222,stroke-width:1px
+  classDef open fill:#f4f4f4,stroke:#222,stroke-width:1px,stroke-dasharray:4 3
+
+  class mkp proven
+  class plan,wide,pools plan
+  class wide_open,pools_open open
