@@ -127,10 +127,25 @@ pytest -xvs $PYTEST_IGNORE tests/cli/commands/bench/l2_adapter_bench/
 | Test file | What it covers |
 |-----------|----------------|
 | `tests/scripts/test_geom_multi_report.py` | Multi-initiator geometry report parsing |
+| `tests/scripts/test_model_geometry_scripts.py` | Profile resolution, SHA-scoped key namespaces, store/load/readback round trip, fan-out worker budgets |
 
 ```bash
-pytest -xvs $PYTEST_IGNORE tests/scripts/test_geom_multi_report.py
+pytest -xvs $PYTEST_IGNORE tests/scripts/test_geom_multi_report.py \
+  tests/scripts/test_model_geometry_scripts.py
 ```
+
+Before trusting a geometry number from a new host, run the corpus-identity check
+on the storage under test. It runs the tests above, then stores a corpus and
+shows that only the storing profile reads it back:
+
+```bash
+BASE_PATH=/mnt/lmcache-kvcache bash scripts/ipu-poc/verify_geometry_corpus.sh
+```
+
+It ends in `== PASS ==` or exits nonzero. Object keys carry no page size and the
+adapter reports a hit once the requested buffer is full, so without the
+profile-scoped namespace a mismatched profile reads another model's corpus and
+reports a plausible bandwidth number.
 
 ### Instrumentation
 
@@ -178,6 +193,7 @@ pytest -xvs $PYTEST_IGNORE \
 pytest -xvs $PYTEST_IGNORE \
   tests/cli/commands/bench/l2_adapter_bench/ \
   tests/scripts/test_geom_multi_report.py \
+  tests/scripts/test_model_geometry_scripts.py \
   tests/scripts/test_acc_telemetry_textfile.py \
   tests/scripts/test_nvmeof_util.py \
   tests/scripts/test_nvmeof_initiator_attach.py \

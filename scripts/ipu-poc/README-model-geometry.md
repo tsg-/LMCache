@@ -37,6 +37,22 @@ Inspect the available profiles:
 PYTHON=.venv/bin/python bash scripts/ipu-poc/run_model_geometry.sh profiles
 ```
 
+## Verify the Setup
+
+On a host you have not benchmarked before, confirm corpus identity holds on the
+target filesystem before recording any number:
+
+```bash
+PYTHON=.venv/bin/python BASE_PATH=/mnt/lmcache-kvcache \
+  bash scripts/ipu-poc/verify_geometry_corpus.sh
+```
+
+It runs `tests/scripts/test_model_geometry_scripts.py`, stores a DeepSeek-V3
+corpus, then shows that the storing profile reads it back while a mismatched
+profile gets zero hits and a readback failure. It ends in `== PASS ==` or exits
+nonzero. Omit `BASE_PATH` to use a temporary directory instead of the storage
+under test.
+
 ## Profiles
 
 | Profile | Model | Objects/submit | Page | Submit payload |
