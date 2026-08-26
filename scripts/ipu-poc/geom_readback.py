@@ -25,6 +25,12 @@ Usage:
     geom_readback.py --base-path DIR --key-prefix PREFIX --profile YAML
                      --submits N [--slots 0,mid,last]
 
+``--key-prefix`` takes the same ``PREFIX`` the store run used, not the derived
+key namespace it printed. This verifies corpora written by
+``run_model_geometry.sh``, whose keys are scoped by profile SHA. A corpus
+written by invoking ``bench l2`` directly is not profile-scoped and is out of
+scope here: nothing ties it to the geometry it was stored with.
+
 Exits nonzero on the first mismatch.
 """
 
@@ -33,6 +39,7 @@ from __future__ import annotations
 
 # Standard
 import argparse
+import hashlib
 import sys
 from pathlib import Path
 
@@ -71,6 +78,27 @@ def _resolve_slots(spec: str, submits: int) -> list[int]:
     return sorted(slots)
 
 
+def _profile_namespace(key_prefix: str, profile: Path) -> str:
+    """Derive the key namespace ``run_model_geometry.sh`` stores under.
+
+    That helper scopes the bench ``--key-prefix`` by the profile's SHA-256, so
+    deriving the same value here keeps ``PREFIX`` the only thing an operator
+    carries between the two tools. There is deliberately no fallback to the
+    unscoped namespace: two profiles with equal page sizes produce identical
+    fill bytes over their shared key range, so an unscoped lookup lets one
+    profile report another's corpus as verified.
+
+    Args:
+        key_prefix: The ``PREFIX`` value used for the store run.
+        profile: Path to the geometry profile YAML.
+
+    Returns:
+        The key namespace, i.e. ``f"{prefix}-{sha12}-bench-model"``.
+    """
+    sha12 = hashlib.sha256(profile.read_bytes()).hexdigest()[:12]
+    return f"{key_prefix}-{sha12}-bench-model"
+
+
 def _object_path(base: Path, namespace: str, idx: int) -> Path:
     """Locate the on-disk object for key index *idx*.
 
@@ -81,7 +109,7 @@ def _object_path(base: Path, namespace: str, idx: int) -> Path:
 
     Args:
         base: Adapter ``base_path``.
-        namespace: Key namespace, i.e. ``f"{key_prefix}-bench-model"``.
+        namespace: Key namespace as returned by ``_resolve_namespace``.
         idx: Key index.
 
     Returns:
@@ -93,7 +121,9 @@ def _object_path(base: Path, namespace: str, idx: int) -> Path:
     suffix = idx.to_bytes(16, "big").hex()
     matches = sorted(base.glob(f"{namespace}@*@{suffix}.data"))
     if not matches:
-        raise FileNotFoundError(f"no object for key index {idx} ({suffix})")
+        raise FileNotFoundError(
+            f"no object for key index {idx} ({suffix}) under {namespace}"
+        )
     if len(matches) > 1:
         raise FileNotFoundError(
             f"key index {idx} matched {len(matches)} objects: {matches}"
@@ -120,7 +150,7 @@ def main() -> int:
         return 2
 
     base = Path(args.base_path)
-    namespace = f"{args.key_prefix}-bench-model"
+    namespace = _profile_namespace(args.key_prefix, Path(args.profile))
     per_submit = geometry.objects_per_submit
     page = geometry.page_size_bytes
 
@@ -131,7 +161,7 @@ def main() -> int:
         return 2
 
     print(
-        f"readback: prefix={args.key_prefix} page={page} B "
+        f"readback: prefix={args.key_prefix} namespace={namespace} page={page} B "
         f"objects/submit={per_submit} slots={slots}"
     )
 

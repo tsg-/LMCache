@@ -14,11 +14,22 @@ synchronized or physical multi-initiator benchmark.
 
 - Run from a checkout that contains the selected profile.
 - Set `PYTHON` to an interpreter with this checkout's LMCache installed.
-- Use a dedicated `BASE_PATH`. Store runs create objects below it.
+- Use a dedicated `BASE_PATH`. Store runs create objects below it. It is not
+  required when `L2_ADAPTER` supplies a complete adapter JSON.
 - Use a fresh `PREFIX` for every independent store run. Load uses the same
   prefix as the store that created the corpus.
+- Object keys are namespaced by `PREFIX` and the profile's SHA-256, printed as
+  `key namespace` on every run. Reading a corpus back therefore requires the
+  same prefix *and* the same profile file; a mismatch misses rather than
+  reporting another model's bytes as a hit. Keep passing the plain `PREFIX` to
+  the helpers and to `geom_readback.py`, which derives the same namespace from
+  its `--profile`. Readback therefore covers corpora these helpers created; a
+  corpus written by calling `bench l2` directly carries no profile scope and is
+  not verifiable here.
 - The default adapter is `fs_native` with `use_odirect: true`; override it
-  with `L2_ADAPTER` when benchmarking another adapter.
+  with `L2_ADAPTER` when benchmarking another adapter. Worker counts
+  (`NUM_WORKERS`, `WORKERS_TOTAL`, `WORKERS_PER`) only reach the default JSON;
+  set workers inside the adapter JSON when supplying your own.
 
 Inspect the available profiles:
 
@@ -60,8 +71,9 @@ BASE_PATH=$BASE_PATH PYTHON=$PYTHON \
   scripts/ipu-poc/models/deepseek_v3_fp8.yaml
 ```
 
-For a load, set `PREFIX` to the corpus prefix printed or recorded during the
-store run:
+For a load, set `PREFIX` to the same value the store run used. Every run prints
+both `prefix` and the derived `key namespace`; reuse the former. Passing the
+namespace as `PREFIX` appends the SHA twice and misses the corpus:
 
 ```bash
 PREFIX=deepseek-1723651200 \
@@ -106,6 +118,8 @@ DURATION_SEC=60 READ_WRITE_RATIO=5:1 IN_FLIGHT=8 NUM_WORKERS=16 \
 This starts local sustained-load processes that share the same read corpus. It
 splits `WORKERS_TOTAL` evenly across them and writes one JSON result and log per
 process. It does not synchronize the launch or establish separate machines.
+With a supplied `L2_ADAPTER` it refuses `WORKERS_TOTAL` and `WORKERS_PER`
+rather than report a split it cannot apply.
 
 ```bash
 PREFIX=llama70b-read-corpus \

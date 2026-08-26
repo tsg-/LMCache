@@ -25,7 +25,7 @@ Usage:
   run_model_geometry.sh mixed PROFILE
 
 Run modes require these environment variables:
-  BASE_PATH       fs_native storage directory
+  BASE_PATH       fs_native storage directory; not required when L2_ADAPTER is set
   PREFIX          read corpus namespace; use a fresh value for store
 
 Optional environment variables:
@@ -42,7 +42,21 @@ Optional environment variables:
   OUTPUT          JSON result path (optional)
 
 The helper prints the resolved profile before submitting work.
+
+Object keys are namespaced by PREFIX and the profile's SHA-256, so a corpus
+stored under one profile cannot be read back under another. Reuse the same
+PREFIX and the same profile file to read a corpus back; the derived namespace
+is printed for the record and is not itself a PREFIX value.
 EOF
+}
+
+profile_sha() {
+  local profile=$1
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$profile" | cut -d' ' -f1
+  else
+    shasum -a 256 "$profile" | cut -d' ' -f1
+  fi
 }
 
 require_value() {
@@ -72,6 +86,7 @@ print(f"objects/submit: {geometry.objects_per_submit}")
 print(f"page: {geometry.page_size_bytes} B ({geometry.data_size_kb} KiB)")
 print(f"submit: {geometry.task_size_bytes} B")
 PYEOF
+  echo "sha256: $(profile_sha "$profile")"
 }
 
 list_profiles() {
@@ -84,17 +99,28 @@ list_profiles() {
 
 run_bench() {
   local mode=$1 profile=$2
-  local adapter
-  require_value BASE_PATH
+  local adapter sha12 namespace
+  if [ -z "${L2_ADAPTER:-}" ]; then
+    require_value BASE_PATH
+  fi
   require_value PREFIX
   profile_info "$profile"
 
-  adapter=${L2_ADAPTER:-"{\"type\":\"fs_native\",\"base_path\":\"$BASE_PATH\",\"use_odirect\":true,\"num_workers\":${NUM_WORKERS:-16}}"}
+  # Object keys carry no page size, and a short read of a larger stored
+  # object still counts as a hit, so scope the namespace by profile SHA to
+  # turn a profile/corpus mismatch into a miss instead of a wrong number.
+  sha12=$(profile_sha "$profile")
+  sha12=${sha12:0:12}
+  namespace="${PREFIX}-${sha12}"
+  echo "prefix: $PREFIX (reuse this as PREFIX; do not pass the namespace below)"
+  echo "key namespace: $namespace"
+
+  adapter=${L2_ADAPTER:-"{\"type\":\"fs_native\",\"base_path\":\"${BASE_PATH:-}\",\"use_odirect\":true,\"num_workers\":${NUM_WORKERS:-16}}"}
   local -a common=(
     -m lmcache.cli.main bench l2
     --l2-adapter "$adapter"
     --kvcache-shape-profile "$profile"
-    --key-prefix "$PREFIX"
+    --key-prefix "$namespace"
     --in-flight "${IN_FLIGHT:-1}"
     --l1-align-bytes 4096
   )
@@ -120,7 +146,7 @@ run_bench() {
       "$PYTHON" "${common[@]}" \
         --duration-sec "${DURATION_SEC:-60}" \
         --read-write-ratio "${READ_WRITE_RATIO:-5:1}" \
-        --write-key-prefix "$WRITE_PREFIX"
+        --write-key-prefix "${WRITE_PREFIX}-${sha12}"
       ;;
   esac
 }
