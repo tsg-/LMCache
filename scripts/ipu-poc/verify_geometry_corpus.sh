@@ -23,15 +23,22 @@ set -euo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd)
 TEST_FILE=tests/scripts/test_model_geometry_scripts.py
-STORED=$SCRIPT_DIR/models/deepseek_v3_fp8.yaml
-# Same 256 KiB page as llama3_405b, so page size alone cannot separate them.
+# These two profiles both use a 262144 B page, and the smaller one's key range
+# is a subset of the larger one's, so without SHA scoping a Mixtral load of a
+# Llama-405B corpus reports 56 of 56 hits over another model's bytes. A pair
+# with differing page sizes would miss on length alone and prove nothing.
+STORED=$SCRIPT_DIR/models/llama3_405b_fp8.yaml
 MISMATCHED=$SCRIPT_DIR/models/mixtral_8x22b_fp8.yaml
 
 if [ -z "${PYTHON:-}" ]; then
-  for candidate in \
-    "${LMCACHE_VENV:-}/bin/python" \
-    "$ROOT/.venv-bench-l2/bin/python" \
-    "$ROOT/.venv/bin/python"; do
+  declare -a candidates=()
+  # Only when set: an empty LMCACHE_VENV would offer /bin/python, which exists
+  # on some hosts without LMCache and would win over the checkout's own venv.
+  if [ -n "${LMCACHE_VENV:-}" ]; then
+    candidates+=("$LMCACHE_VENV/bin/python")
+  fi
+  candidates+=("$ROOT/.venv-bench-l2/bin/python" "$ROOT/.venv/bin/python")
+  for candidate in "${candidates[@]}"; do
     if [ -x "$candidate" ]; then
       PYTHON=$candidate
       break

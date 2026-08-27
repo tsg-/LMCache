@@ -261,6 +261,26 @@ def test_readback_rejects_an_unscoped_corpus(tmp_path: Path) -> None:
         assert "readback OK" not in result.stdout
 
 
+def test_a_profile_sharing_a_page_size_loads_no_objects(tmp_path: Path) -> None:
+    """A same-page-size profile reads nothing from another profile's corpus.
+
+    Llama-405B and Mixtral both use a 262144 B page and Mixtral's key range is a
+    subset of Llama-405B's, so an unscoped prefix reports 56 of 56 hits here.
+    Profiles with differing page sizes miss on length alone, which is why this
+    pair is the one that detects a regression in the namespace scoping.
+    """
+    stored = SCRIPTS / "models" / "llama3_405b_fp8.yaml"
+    same_page = SCRIPTS / "models" / "mixtral_8x22b_fp8.yaml"
+    shared = {"BASE_PATH": str(tmp_path), "PREFIX": "equal-pages"}
+
+    store = _run_script(RUNNER, "store", str(stored), **shared)
+    assert store.returncode == 0, store.stderr
+    assert _total_success(store.stdout) == 126
+
+    load = _run_script(RUNNER, "load", str(same_page), **shared)
+    assert _total_success(load.stdout) == 0
+
+
 def test_readback_does_not_verify_a_corpus_from_another_profile(
     tmp_path: Path,
 ) -> None:

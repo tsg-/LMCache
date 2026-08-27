@@ -47,11 +47,16 @@ PYTHON=.venv/bin/python BASE_PATH=/mnt/lmcache-kvcache \
   bash scripts/ipu-poc/verify_geometry_corpus.sh
 ```
 
-It runs `tests/scripts/test_model_geometry_scripts.py`, stores a DeepSeek-V3
+It runs `tests/scripts/test_model_geometry_scripts.py`, stores a Llama-405B
 corpus, then shows that the storing profile reads it back while a mismatched
 profile gets zero hits and a readback failure. It ends in `== PASS ==` or exits
 nonzero. Omit `BASE_PATH` to use a temporary directory instead of the storage
 under test.
+
+The mismatch uses Mixtral deliberately: it shares Llama-405B's 256 KiB page and
+its key range is a subset, so an unscoped prefix reports 56 of 56 hits over
+another model's bytes. A pair with differing page sizes misses on length alone
+and would pass even if the scoping regressed.
 
 ## Profiles
 
