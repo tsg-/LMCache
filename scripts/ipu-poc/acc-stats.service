@@ -1,0 +1,13 @@
+[Unit]
+Description=Refresh ACC core-usage + Falcon tele_cli textfile for node_exporter
+
+[Service]
+Type=oneshot
+# Carries the host-specific bits -- IMC_PASSWORD=<imc-root-password> and, on the
+# initiators, ACC_TARGETS=:acc1:<acc-fabric-ip> (empty netns = direct ssh to the
+# IMC; mmgt needs no override and uses the two-card netns default). Keeping them
+# here leaves this unit and the collector byte-identical fleet-wide. Leading `-`
+# so a missing file is a clear runtime error from the script rather than a unit
+# that refuses to start.
+EnvironmentFile=-/etc/default/acc-stats
+ExecStart=/usr/local/bin/acc_ssh_stats.py --textfile /var/lib/node_exporter/textfile/acc_stats.prom
