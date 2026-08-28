@@ -40,6 +40,13 @@ idempotent. It also requires Python's `grpc` module and the generated
 `telemetry_pb2.py` and `telemetry_pb2_grpc.py` files in
 `ACC_TELEMETRY_PROTO_DIR`.
 
+**All three variables are required and any one missing aborts the script.**
+`SKIP_ACC_TELEMETRY=1` stands in for the two `ACC_TELEMETRY_` ones on a host with
+no accelerator to point them at, and installs five collectors and eleven units
+instead. Skipping it gives up the authoritative payload-byte source — see
+[Load-bearing constraints](#load-bearing-constraints) on why the NIC counters are
+not a substitute.
+
 Four collectors are **not** wired by `install.sh` because they are rig-specific:
 `pcm_pcie_textfile.sh` and `mmgt_nic_textfile.sh` (with their units and the
 `pcm-memory` drop-in) are the MMG-400 target's set — `mmgt` runs no `rdma-nic` or
@@ -62,16 +69,23 @@ ssh <newhost> 'curl -s localhost:9100/metrics | grep -c ^rdma_hw_counter{'
 
 ### 2. Control host
 
-Edit `prometheus.yml` so the `targets` and the two `relabel_configs` regexes
-match your local tunnel ports and host names, then:
+Edit `prometheus.yml` so the `targets` and the `relabel_configs` regexes match
+your local tunnel ports and host names. There are eleven relabel rules across the
+three jobs — five in `node`, four in `lmcache_bench`, two in
+`lmcache_bench_mmg` — and `lmcache_bench` also carries `host` and `workload` as
+static labels that have to change with them. Then:
 
 ```bash
-HOSTS="<newhost1>:19100 <newhost2>:19101" ./up.sh
+export HOSTS="<newhost1>:19100 <newhost2>:19101"
+./up.sh
 ```
 
-The built-in default is `mkp1:19100 mkp2:19101 mmgt:19106` — the older NVMe-oF
-pair plus the MMG-400 target. Drop `mmgt` from `HOSTS` on a rig that does not
-have it, or its tunnel is a permanently-down target.
+The built-in default is `mkp1:19100 mkp2:19101 mmgt:19106 mmgi0:19107
+mmgi1:19108` — the older NVMe-oF pair plus the three MMG-400 hosts. **Set
+`HOSTS` on every invocation** on any other rig. `ensure_tunnel` uses
+`ExitOnForwardFailure` under `set -e`, so a host you do not have aborts `up.sh`
+at that tunnel rather than leaving a down target behind — exporting `HOSTS` once,
+as above, is what keeps the re-runs working.
 
 `up.sh` opens the SSH tunnels (idempotent), starts Docker Desktop if needed,
 brings up the compose stack, reloads Prometheus, and prints target health.
@@ -95,7 +109,7 @@ Grafana provisions the datasource and dashboard automatically.
 | `prometheus.yml` | control | 5s scrape of the node tunnels (relabelled to `host=`) plus the `lmcache_bench` and `lmcache_bench_mmg` initiator ports (relabelled to `initiator=`) |
 | `docker-compose.yml` | control | Prometheus 2.55.1 + Grafana 11.3.0, loopback-bound |
 | `provisioning/` | control | Grafana datasource (uid `PROM`) + dashboard provider |
-| `dashboards/lmcache-mkp.json` | control | 32 panels, uid `ipu-poc-mkp-stub` — provisioned copy; LMCache row first |
+| `dashboards/lmcache-mkp.json` | control | 26 panels, uid `ipu-poc-mkp-stub` — provisioned copy; LMCache row first |
 | `up.sh` | control | Tunnels + stack + health check |
 
 ### The `lmcache_bench` job
@@ -380,9 +394,13 @@ a local secret into `.env` (mode 600, gitignored) on first run; export
   scrape job are in place and a single `bench l2 --serve-metrics` run populates
   them; the multi-initiator drivers that would fill all four ports are not here.
   See the `lmcache_bench` job above.
-- **Block I/O panels are split by role, and the split is hardcoded.**
-  `mkp1` is filtered to `md.+` (initiator RAID0) and `mkp2` to `nvme.+` (target
-  SSDs). Swapping the roles or renaming a host means editing four panels.
+- **The dashboard is hardcoded to `mkp1` and `mkp2`.** 23 of its 43 queries pin
+  one of those two host labels, and the Block I/O row additionally pins the role
+  split by device — `mkp1` to `md.+` (initiator RAID0), `mkp2` to `nvme.+`
+  (target SSDs). On a differently-named rig roughly half the panels render empty,
+  which reads as a broken stack rather than a naming mismatch. Relabelling the
+  two hosts to `mkp1`/`mkp2` in `prometheus.yml` is cheaper than editing the
+  queries and is what the panel titles assume.
 - **No NVMe IOPS or latency panels** — only throughput, queue depth, and SMART
   temperature.
 - **No SMART temperature panel anymore.** The role-split Block I/O row replaced

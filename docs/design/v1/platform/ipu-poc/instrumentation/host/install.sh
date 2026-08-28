@@ -2,7 +2,12 @@
 # install.sh -- stand up node_exporter + textfile collectors on one test host.
 #
 # Run AS ROOT ON THE TARGET HOST, from an unpacked copy of the host/ directory:
-#     scp -r host newhost:/tmp/obs && ssh newhost 'RDMA_FABRIC_IFACE=ens2f0 bash /tmp/obs/install.sh'
+#     scp -r host newhost:/tmp/obs && ssh newhost 'RDMA_FABRIC_IFACE=ens2f0 \
+#       ACC_TELEMETRY_ENDPOINT=<acc-ip>:50051 \
+#       ACC_TELEMETRY_PROTO_DIR=<dir-with-telemetry_pb2.py> bash /tmp/obs/install.sh'
+#
+# On a host with no accelerator, SKIP_ACC_TELEMETRY=1 replaces the two
+# ACC_TELEMETRY_ variables and installs the other five collectors.
 #
 # Idempotent: safe to re-run. Overwrites scripts and units, restarts services.
 #
@@ -23,6 +28,10 @@ NE_VERSION="${NODE_EXPORTER_VERSION:-1.8.2}"
 TEXTFILE_DIR=/var/lib/node_exporter/textfile
 ACC_TELEMETRY_ENDPOINT="${ACC_TELEMETRY_ENDPOINT:-}"
 ACC_TELEMETRY_PROTO_DIR="${ACC_TELEMETRY_PROTO_DIR:-}"
+# SKIP_ACC_TELEMETRY=1 drops the ACC collector and installs the other five. For a
+# host with no accelerator to point the endpoint at; the alternative was telling
+# people to delete unit names out of this script by hand.
+SKIP_ACC_TELEMETRY="${SKIP_ACC_TELEMETRY:-}"
 
 [ "$(id -u)" -eq 0 ] || { echo "must run as root" >&2; exit 1; }
 
@@ -37,18 +46,25 @@ if [ -z "$IFACE" ]; then
 fi
 ip link show "$IFACE" >/dev/null 2>&1 || { echo "no such interface: $IFACE" >&2; exit 1; }
 
-if [ -z "$ACC_TELEMETRY_ENDPOINT" ] || [ -z "$ACC_TELEMETRY_PROTO_DIR" ]; then
+if [ -n "$SKIP_ACC_TELEMETRY" ]; then
+    echo "SKIP_ACC_TELEMETRY set: installing five collectors, no ACC telemetry."
+    echo "  the authoritative payload-byte source is the ACC; without it the"
+    echo "  NIC counters are a traffic-presence diagnostic only."
+elif [ -z "$ACC_TELEMETRY_ENDPOINT" ] || [ -z "$ACC_TELEMETRY_PROTO_DIR" ]; then
     echo "ERROR: set ACC_TELEMETRY_ENDPOINT and ACC_TELEMETRY_PROTO_DIR." >&2
     echo "       Example: ACC_TELEMETRY_ENDPOINT=10.0.0.35:50051" >&2
     echo "       The protobuf directory must contain telemetry_pb2.py and" >&2
     echo "       telemetry_pb2_grpc.py from the installed feature pack." >&2
+    echo "       On a host with no accelerator, SKIP_ACC_TELEMETRY=1 installs" >&2
+    echo "       the other five collectors instead." >&2
     exit 1
+else
+    [ -f "$ACC_TELEMETRY_PROTO_DIR/telemetry_pb2.py" ] &&
+        [ -f "$ACC_TELEMETRY_PROTO_DIR/telemetry_pb2_grpc.py" ] || {
+        echo "ERROR: invalid ACC_TELEMETRY_PROTO_DIR: $ACC_TELEMETRY_PROTO_DIR" >&2
+        exit 1
+    }
 fi
-[ -f "$ACC_TELEMETRY_PROTO_DIR/telemetry_pb2.py" ] &&
-    [ -f "$ACC_TELEMETRY_PROTO_DIR/telemetry_pb2_grpc.py" ] || {
-    echo "ERROR: invalid ACC_TELEMETRY_PROTO_DIR: $ACC_TELEMETRY_PROTO_DIR" >&2
-    exit 1
-}
 
 echo "== dependencies =="
 missing=()
@@ -67,10 +83,12 @@ if [ ${#missing[@]} -gt 0 ]; then
 else
     echo "  nvme, ethtool, jq, pcm-memory, python3 present"
 fi
-python3 -c 'import grpc' >/dev/null 2>&1 || {
-    echo "ERROR: Python grpc module is required for ACC telemetry." >&2
-    exit 1
-}
+if [ -z "$SKIP_ACC_TELEMETRY" ]; then
+    python3 -c 'import grpc' >/dev/null 2>&1 || {
+        echo "ERROR: Python grpc module is required for ACC telemetry." >&2
+        exit 1
+    }
+fi
 
 echo "== node_exporter binary =="
 if [ -x /usr/local/bin/node_exporter ]; then
@@ -88,22 +106,22 @@ echo "== user + textfile dir =="
 id node_exporter >/dev/null 2>&1 || useradd --system --no-create-home --shell /sbin/nologin node_exporter
 install -d -o node_exporter -g node_exporter -m 0755 "$TEXTFILE_DIR"
 
+collectors=(nvme_stats_textfile.sh rdma_hwcounters_textfile.sh rdma_nic_textfile.sh
+            pcm_memory_textfile.sh numa_stats_textfile.sh)
+timers=(rdma-hwcounters nvme-stats rdma-nic pcm-memory numa-stats)
+if [ -z "$SKIP_ACC_TELEMETRY" ]; then
+    collectors+=(acc_telemetry_textfile.py)
+    timers+=(acc-telemetry)
+fi
+
 echo "== collector scripts =="
-for f in nvme_stats_textfile.sh rdma_hwcounters_textfile.sh rdma_nic_textfile.sh \
-         pcm_memory_textfile.sh numa_stats_textfile.sh \
-         acc_telemetry_textfile.py; do
+for f in "${collectors[@]}"; do
     install -m 0755 "$SRC/bin/$f" "/usr/local/bin/$f"
     echo "  /usr/local/bin/$f"
 done
 
 echo "== systemd units =="
-for u in node_exporter.service \
-         rdma-hwcounters.service rdma-hwcounters.timer \
-         nvme-stats.service     nvme-stats.timer \
-         rdma-nic.service       rdma-nic.timer \
-         pcm-memory.service     pcm-memory.timer \
-         numa-stats.service     numa-stats.timer \
-         acc-telemetry.service  acc-telemetry.timer; do
+for u in node_exporter.service "${timers[@]/%/.service}" "${timers[@]/%/.timer}"; do
     install -m 0644 "$SRC/systemd/$u" "/etc/systemd/system/$u"
     echo "  /etc/systemd/system/$u"
 done
@@ -118,13 +136,15 @@ Environment=RDMA_FABRIC_IFACE=${IFACE}
 EOF
 echo "  rdma-nic.service.d/iface.conf -> RDMA_FABRIC_IFACE=${IFACE}"
 
-mkdir -p /etc/systemd/system/acc-telemetry.service.d
-cat > /etc/systemd/system/acc-telemetry.service.d/endpoint.conf <<EOF
+if [ -z "$SKIP_ACC_TELEMETRY" ]; then
+    mkdir -p /etc/systemd/system/acc-telemetry.service.d
+    cat > /etc/systemd/system/acc-telemetry.service.d/endpoint.conf <<EOF
 [Service]
 Environment=ACC_TELEMETRY_ENDPOINT=${ACC_TELEMETRY_ENDPOINT}
 Environment=ACC_TELEMETRY_PROTO_DIR=${ACC_TELEMETRY_PROTO_DIR}
 EOF
-echo "  acc-telemetry.service.d/endpoint.conf -> ${ACC_TELEMETRY_ENDPOINT}"
+    echo "  acc-telemetry.service.d/endpoint.conf -> ${ACC_TELEMETRY_ENDPOINT}"
+fi
 
 if [ "$LISTEN" != "127.0.0.1:9100" ]; then
     mkdir -p /etc/systemd/system/node_exporter.service.d
@@ -146,11 +166,9 @@ fi
 
 systemctl daemon-reload
 systemctl enable --now node_exporter.service
-systemctl enable --now rdma-hwcounters.timer nvme-stats.timer rdma-nic.timer \
-    pcm-memory.timer numa-stats.timer acc-telemetry.timer
+systemctl enable --now "${timers[@]/%/.timer}"
 # Prime the .prom files so the first scrape is not empty.
-systemctl start rdma-hwcounters.service nvme-stats.service rdma-nic.service \
-    pcm-memory.service numa-stats.service acc-telemetry.service
+systemctl start "${timers[@]/%/.service}"
 
 echo
 echo "== verify: $(hostname) =="
