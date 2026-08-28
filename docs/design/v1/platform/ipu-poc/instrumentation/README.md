@@ -40,6 +40,12 @@ idempotent. It also requires Python's `grpc` module and the generated
 `telemetry_pb2.py` and `telemetry_pb2_grpc.py` files in
 `ACC_TELEMETRY_PROTO_DIR`.
 
+Four collectors are **not** wired by `install.sh` because they are rig-specific:
+`pcm_pcie_textfile.sh` and `mmgt_nic_textfile.sh` (with their units and the
+`pcm-memory` drop-in) are the MMG-400 target's set — `mmgt` runs no `rdma-nic` or
+`rdma-hwcounters` at all — and the ACC-over-SSH collector is separate again. See
+[ACC telemetry on the MMG-400 rig](#acc-telemetry-on-the-mmg-400-rig).
+
 `RDMA_FABRIC_IFACE` is **required** — it pins `rdma-nic.service` to the fabric
 NIC via a drop-in, leaving the collector script byte-identical fleet-wide (`md5sum`
 is then a useful drift check). Point it at the **RDMA fabric** interface, never
@@ -63,6 +69,10 @@ match your local tunnel ports and host names, then:
 HOSTS="<newhost1>:19100 <newhost2>:19101" ./up.sh
 ```
 
+The built-in default is `mkp1:19100 mkp2:19101 mmgt:19106` — the older NVMe-oF
+pair plus the MMG-400 target. Drop `mmgt` from `HOSTS` on a rig that does not
+have it, or its tunnel is a permanently-down target.
+
 `up.sh` opens the SSH tunnels (idempotent), starts Docker Desktop if needed,
 brings up the compose stack, reloads Prometheus, and prints target health.
 Grafana provisions the datasource and dashboard automatically.
@@ -78,8 +88,11 @@ Grafana provisions the datasource and dashboard automatically.
 | `host/bin/nvme_stats_textfile.sh` | test host | NVMe SMART per namespace |
 | `host/bin/pcm_memory_textfile.sh` | test host | Intel PCM DRAM read/write bandwidth per socket |
 | `host/bin/numa_stats_textfile.sh` | test host | kernel node memory and NUMA allocation counters |
+| `host/bin/pcm_pcie_textfile.sh` | mmgt only | Intel PCM PCIe/DDIO bandwidth per socket — feeds the LLC hit% and DDIO absorption panels |
+| `host/bin/mmgt_nic_textfile.sh` | mmgt only | `ethtool -S` on both fabric ports; replaces `rdma_nic` on the MMG-400 target |
 | `host/systemd/*.service`, `*.timer` | test host | node_exporter + one timer per collector |
-| `prometheus.yml` | control | 5s scrape of the node tunnels (relabelled to `host=`) plus the `lmcache_bench` initiator ports (relabelled to `initiator=`) |
+| `host/systemd/pcm-memory.service.d/pcm.conf` | mmgt only | Pins `PCM_MEMORY_BIN` to the dated PCM build |
+| `prometheus.yml` | control | 5s scrape of the node tunnels (relabelled to `host=`) plus the `lmcache_bench` and `lmcache_bench_mmg` initiator ports (relabelled to `initiator=`) |
 | `docker-compose.yml` | control | Prometheus 2.55.1 + Grafana 11.3.0, loopback-bound |
 | `provisioning/` | control | Grafana datasource (uid `PROM`) + dashboard provider |
 | `dashboards/lmcache-mkp.json` | control | 32 panels, uid `ipu-poc-mkp-stub` — provisioned copy; LMCache row first |
@@ -102,11 +115,12 @@ Off by default — with no benchmark running these are four permanently-down
 targets. Override `BENCH_HOST`, `BENCH_REMOTE_BASE`, `BENCH_LOCAL_BASE` to match
 a different rig, keeping them aligned with `prometheus.yml`.
 
-**Not exercisable from this branch yet.** `--serve-metrics` lives on
-`feat/bench-l2-sustained-only` (`0d88de0a`), and the `run_multi_initiator_*.sh`
-drivers that assign the per-id ports are untracked and absent from that branch
-too. The scrape config and the dashboard row are ready; the source that feeds
-them is not here. Ports 19104/19105 have never seen a real 4-initiator run.
+`--serve-metrics` is present on the geometry handoff branch, so a single-process
+run does light up the LMCache row. What is still absent are the
+`run_multi_initiator_*.sh` drivers that assign the per-id ports, so ports
+19104/19105 have never seen a real 4-initiator run. `run_model_geometry.sh` does
+not pass the metrics flags through either — a run that publishes counters is a
+direct `lmcache bench l2` call.
 
 Two properties matter when reading the series:
 
@@ -116,6 +130,32 @@ Two properties matter when reading the series:
 - **`phase` separates `warmup` from `measured`**, which is what lets a
   Prometheus-side rate be compared against the run's JSON independently. Rate
   over the measured phase only; including warmup biases it.
+
+### The `lmcache_bench_mmg` job
+
+Same endpoint and the same metric names on the MMG-400 rig, where the load runs
+on two initiator hosts (`mmgi0`, `mmgi1`) against target `mmgt`. It gets its own
+job rather than sharing `lmcache_bench`: the mkp dashboard's LMCache panels filter
+on `job` alone, so a shared name would fold mmg series into the mkp aggregate.
+
+The local port encodes both host and initiator id — `1911x` is `mmgi0`, `1912x`
+is `mmgi1`, and the **last digit is the id**, which is what the relabel rules key
+on. The remote side stays `METRICS_BASE_PORT + id`:
+
+```bash
+MMG_BENCH_TUNNELS=1 ./up.sh                          # mmgi0+mmgi1, ids 0..3
+MMG_BENCH_TUNNELS=1 MMG_BENCH_INITIATORS=2 ./up.sh   # just ids 0..1 on each
+```
+
+`MMG_BENCH_HOSTS="mmgi0:19110 mmgi1:19120"` sets the host-to-local-base map; keep
+it aligned with `prometheus.yml`.
+
+The id is **per host, not global**, which is why a legend shows both `mmgi0 init 0`
+and `mmgi1 init 0` — two separate benchmark processes, each id 0 on its own host.
+Only id 0 on each host has ever carried data; the `run_multi_initiator_*.sh`
+drivers that would populate ids 1–3 are untracked and absent, so a run that
+publishes counters here is a direct `lmcache bench l2` call. Install the bench
+with `scripts/ipu-poc/install_bench_l2_handoff.sh` on each initiator first.
 
 `--web.enable-lifecycle` is set on the Prometheus container so `curl -X POST
 http://127.0.0.1:9090/-/reload` picks up config edits. Reload (or recreate)
@@ -155,6 +195,74 @@ node's kernel `meminfo`, plus per-node `numa_hit`, `numa_miss`,
 `numa_foreign`, `local_node`, and `other_node` counters. They are host-wide
 kernel counters. A change during a measured cell is useful diagnostic evidence;
 their absolute values do not belong to the benchmark process alone.
+
+## ACC telemetry on the MMG-400 rig
+
+The MMG-400 hosts (`mmgt`, `mmgi0`, `mmgi1`) use a **different ACC collector** from
+the `acc_telemetry_textfile.py` in `host/bin/`. That one speaks gRPC to an ACC
+endpoint and is what mkp1/mkp2 run. On the MMG-400 rig the ACC is only reachable by
+hopping through the IMC, so the recipe lives in `scripts/ipu-poc/`:
+
+| Path | Purpose |
+|---|---|
+| `scripts/ipu-poc/install_acc_stats.sh` | Installs the collector (and node_exporter if absent) on one host. Idempotent. |
+| `scripts/ipu-poc/acc_ssh_stats.py` | Samples ACC core usage and `tele_cli -t global`, writes `acc_stats.prom` |
+| `scripts/ipu-poc/acc-stats.service`, `.timer` | Oneshot + 30 s timer |
+| `scripts/ipu-poc/falcon_host_setup.sh` | Reloads `idpf`/`irdma` and configures the fabric interfaces after a host reboot |
+| `scripts/ipu-poc/acc_capture_runbook.sh` | Serial-console capture plus periodic `tele_cli` injection, for crash forensics |
+| `scripts/ipu-poc/sync_capture_bundle.sh` | Pulls capture dirs back to the laptop |
+
+Install it per host, staging node_exporter from a host that already has the
+matching build:
+
+```bash
+scp mmgt:/usr/local/bin/node_exporter /tmp/node_exporter
+cd scripts/ipu-poc
+IMC_PASSWORD=<imc-root-pw> NODE_EXPORTER_BIN=/tmp/node_exporter \
+  ./install_acc_stats.sh mmgi0 ':acc1:200.0.4.3'
+IMC_PASSWORD=<imc-root-pw> NODE_EXPORTER_BIN=/tmp/node_exporter \
+  ./install_acc_stats.sh mmgi1 ':acc1:200.0.3.3'
+IMC_PASSWORD=<imc-root-pw> ./install_acc_stats.sh mmgt      # two-card default
+```
+
+Then add the node targets and tunnels — `mmgt:19106`, `mmgi0:19107`,
+`mmgi1:19108` are already in `up.sh`'s `HOSTS` default and `prometheus.yml`'s
+`node` job, so `./up.sh` picks them up.
+
+**The IMC hop is namespaced on the target but not on the initiators.** On `mmgt`
+each card's IMC management vport lives in its own netns (`IPU1`, `IPU2`), so the
+path is `ip netns exec <netns> ssh root@100.0.0.100`. On `mmgi0`/`mmgi1` the IMC
+link is a plain host interface holding `100.0.0.1/24` and there is no netns at
+all — an **empty netns field** in `ACC_TARGETS` selects the direct path. Getting
+this wrong is the difference between working telemetry and a silent timeout.
+
+The ACC fabric IP is the host fabric address with the last octet set to `.3`:
+`mmgi0` is `200.0.4.2` → ACC `200.0.4.3`, `mmgi1` is `200.0.3.2` → ACC
+`200.0.3.3`, and `mmgt`'s two cards are `200.0.6.3` and `200.0.5.3`. Those do not
+answer ping from the host — the ACC is reached through the IMC, and the fabric IP
+is only `tele_cli`'s `-s` argument. **A failed ping proves nothing here.**
+
+**No credential is baked into the collector or the unit.** `IMC_PASSWORD` — and
+`ACC_TARGETS` on the initiators — are read from `/etc/default/acc-stats`, written
+mode 600 by the installer, which keeps the script and the unit byte-identical
+fleet-wide. The collector exits non-zero with a usage message if `IMC_PASSWORD` is
+unset rather than hanging on an unanswered prompt.
+
+Two traps when reading the resulting series:
+
+- **The counters update every 30 s but Prometheus scrapes at 5 s**, so
+  `acc_tele_field` is a staircase — six identical samples, then a step. A 5 min
+  window holds only ~10 independent points. `deriv[5m]` is the measured-best rate
+  estimator; `rate()` is markedly noisier. Visible sawtooth on those panels is
+  real workload jitter, not a window artifact.
+- **The expected poll-mode floor is ~2.0 busy cores per reporting IPU.** An
+  initiator reading 2.0 is idle, not broken; `mmgt` reads ~4.0 because it has two
+  cards.
+
+Verify with `curl -s --noproxy '*' localhost:9100/metrics | grep -c
+'^acc_cpu_busy_percent'`. **`--noproxy` is required, not cosmetic** — `mmgi0`
+carries a curl proxy config that intercepts even `localhost` and answers
+`/metrics` with a `403`, which looks exactly like a broken exporter.
 
 ## Load-bearing constraints
 
@@ -268,9 +376,10 @@ a local secret into `.env` (mode 600, gitignored) on first run; export
 - **Store and mixed ACC direction mappings remain unvalidated.** The primary
   panel is deliberately scoped to NVMe-oF reads; do not relabel the remaining
   counters from their names alone.
-- **The LMCache row renders nothing until its source branch lands.** The four
-  panels and the scrape job are in place; `--serve-metrics` is not on this
-  branch. See the `lmcache_bench` job above.
+- **The LMCache row is fed by one process at a time.** The four panels and the
+  scrape job are in place and a single `bench l2 --serve-metrics` run populates
+  them; the multi-initiator drivers that would fill all four ports are not here.
+  See the `lmcache_bench` job above.
 - **Block I/O panels are split by role, and the split is hardcoded.**
   `mkp1` is filtered to `md.+` (initiator RAID0) and `mkp2` to `nvme.+` (target
   SSDs). Swapping the roles or renaming a host means editing four panels.
