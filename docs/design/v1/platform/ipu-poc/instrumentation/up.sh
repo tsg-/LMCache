@@ -50,7 +50,7 @@ ensure_tunnel() {
 # Override for a different pair of hosts:
 #   HOSTS="newhost1:19100 newhost2:19101" ./up.sh
 # Keep the local ports aligned with the targets in prometheus.yml.
-HOSTS="${HOSTS:-mkp1:19100 mkp2:19101}"
+HOSTS="${HOSTS:-mkp1:19100 mkp2:19101 mmgt:19106 mmgi0:19107 mmgi1:19108}"
 
 # Benchmark tunnels for the lmcache_bench job. Off by default: the endpoint
 # exists only while a `bench l2` process runs, so opening these when no
@@ -63,6 +63,15 @@ BENCH_HOST="${BENCH_HOST:-mkp1}"
 BENCH_INITIATORS="${BENCH_INITIATORS:-4}"
 BENCH_REMOTE_BASE="${BENCH_REMOTE_BASE:-9101}"
 BENCH_LOCAL_BASE="${BENCH_LOCAL_BASE:-19102}"
+
+# Same for the lmcache_bench_mmg job, where the load runs on two initiator
+# hosts. Local base per host is 19110 / 19120, so the last digit of the local
+# port is the initiator id -- prometheus.yml relabels on exactly that.
+#   MMG_BENCH_TUNNELS=1 ./up.sh                       # mmgi0+mmgi1 i0..3
+#   MMG_BENCH_TUNNELS=1 MMG_BENCH_INITIATORS=2 ./up.sh
+MMG_BENCH_HOSTS="${MMG_BENCH_HOSTS:-mmgi0:19110 mmgi1:19120}"
+MMG_BENCH_INITIATORS="${MMG_BENCH_INITIATORS:-4}"
+MMG_BENCH_REMOTE_BASE="${MMG_BENCH_REMOTE_BASE:-9101}"
 
 echo "== credentials =="
 ensure_password
@@ -80,6 +89,19 @@ if [ -n "${BENCH_TUNNELS:-}" ]; then
 else
     echo "  bench tunnels skipped (BENCH_TUNNELS=1 to open" \
         "$BENCH_LOCAL_BASE-$((BENCH_LOCAL_BASE + BENCH_INITIATORS - 1)))"
+fi
+
+if [ -n "${MMG_BENCH_TUNNELS:-}" ]; then
+    for entry in $MMG_BENCH_HOSTS; do
+        for ((i = 0; i < MMG_BENCH_INITIATORS; i++)); do
+            ensure_tunnel "${entry%%:*}" \
+                "$((${entry##*:} + i))" "$((MMG_BENCH_REMOTE_BASE + i))"
+        done
+    done
+else
+    echo "  mmg bench tunnels skipped (MMG_BENCH_TUNNELS=1 to open" \
+        "19110-$((19110 + MMG_BENCH_INITIATORS - 1)) and" \
+        "19120-$((19120 + MMG_BENCH_INITIATORS - 1)))"
 fi
 
 echo "== docker stack =="
@@ -144,7 +166,7 @@ for t in sorted(d['data']['activeTargets'], key=lambda t: t['labels'].get('job',
     if lb.get('initiator') is not None:
         who += f\" initiator={lb['initiator']}\"
     note = ''
-    if lb.get('job') == 'lmcache_bench' and t['health'] != 'up':
+    if lb.get('job', '').startswith('lmcache_bench') and t['health'] != 'up':
         note = '  (expected unless a bench is running)'
     print(f\"  {lb.get('job','?'):14} {who:22} health={t['health']}{note}\")
 "

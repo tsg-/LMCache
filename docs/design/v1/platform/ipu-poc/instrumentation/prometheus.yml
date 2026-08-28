@@ -12,6 +12,9 @@ scrape_configs:
       - targets:
           - host.docker.internal:19100   # mkp1 via ssh -L 19100:127.0.0.1:9100 mkp1
           - host.docker.internal:19101   # mkp2 via ssh -L 19101:127.0.0.1:9100 mkp2
+          - host.docker.internal:19106   # mmgt  via ssh -L 19106:127.0.0.1:9100 mmgt
+          - host.docker.internal:19107   # mmgi0 via ssh -L 19107:127.0.0.1:9100 mmgi0
+          - host.docker.internal:19108   # mmgi1 via ssh -L 19108:127.0.0.1:9100 mmgi1
         labels:
           fabric: mgmt
     relabel_configs:
@@ -23,6 +26,21 @@ scrape_configs:
         regex: host\.docker\.internal:19101
         target_label: host
         replacement: mkp2
+      - source_labels: [__address__]
+        regex: host\.docker\.internal:19106
+        target_label: host
+        replacement: mmgt
+      # The initiators export ACC core usage and Falcon tele_cli counters from
+      # their own MMG-400 (one card each, ACC at 200.0.4.3 / 200.0.3.3) via the
+      # acc-stats textfile collector, same as mmgt's two cards.
+      - source_labels: [__address__]
+        regex: host\.docker\.internal:19107
+        target_label: host
+        replacement: mmgi0
+      - source_labels: [__address__]
+        regex: host\.docker\.internal:19108
+        target_label: host
+        replacement: mmgi1
 
   # `bench l2 --serve-metrics` publishes live submit/success/bytes counters for
   # the lifetime of one CLI process. Four targets because the multi-initiator
@@ -69,3 +87,46 @@ scrape_configs:
         regex: host\.docker\.internal:19105
         target_label: initiator
         replacement: "3"
+
+  # Same `bench l2 --serve-metrics` endpoints on the MMG-400 rig, where the load
+  # is driven from two initiator hosts instead of one. A separate job keeps the
+  # mkp1 panels from summing mmg series into their aggregate: the mkp dashboard
+  # filters on job alone.
+  #
+  # Local port encodes both host and initiator id: 1911x -> mmgi0, 1912x -> mmgi1,
+  # last digit is the id. Remote side is METRICS_BASE_PORT + id on each host.
+  #
+  # NOT YET EXERCISED. `bench l2` is not installed on mmgi0/mmgi1 as of
+  # 2026-08-27 (the geometry sweep there drives fio), so expect all eight to
+  # stay down. Same short-lived-endpoint semantics as the mkp job above: `up ==
+  # 0` between cells is expected, and rates are valid over `phase="measured"`
+  # only.
+  - job_name: lmcache_bench_mmg
+    static_configs:
+      # ssh -N -L 1911{0,1,2,3}:127.0.0.1:910{1,2,3,4} mmgi0
+      - targets:
+          - host.docker.internal:19110   # initiator 0 -> mmgi0 127.0.0.1:9101
+          - host.docker.internal:19111   # initiator 1 -> mmgi0 127.0.0.1:9102
+          - host.docker.internal:19112   # initiator 2 -> mmgi0 127.0.0.1:9103
+          - host.docker.internal:19113   # initiator 3 -> mmgi0 127.0.0.1:9104
+        labels:
+          fabric: mgmt
+          host: mmgi0
+      # ssh -N -L 1912{0,1,2,3}:127.0.0.1:910{1,2,3,4} mmgi1
+      - targets:
+          - host.docker.internal:19120   # initiator 0 -> mmgi1 127.0.0.1:9101
+          - host.docker.internal:19121   # initiator 1 -> mmgi1 127.0.0.1:9102
+          - host.docker.internal:19122   # initiator 2 -> mmgi1 127.0.0.1:9103
+          - host.docker.internal:19123   # initiator 3 -> mmgi1 127.0.0.1:9104
+        labels:
+          fabric: mgmt
+          host: mmgi1
+    relabel_configs:
+      - source_labels: [__address__]
+        regex: host\.docker\.internal:1911(\d)
+        target_label: initiator
+        replacement: "$1"
+      - source_labels: [__address__]
+        regex: host\.docker\.internal:1912(\d)
+        target_label: initiator
+        replacement: "$1"
