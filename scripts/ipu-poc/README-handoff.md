@@ -22,9 +22,16 @@ bash scripts/ipu-poc/install_bench_l2_handoff.sh
 source .venv-bench-l2/bin/activate   # or your LMCACHE_VENV
 ```
 
-The script creates a venv, installs `pyyaml` / `grpcio`, runs `pip install -e .` (or `NO_GPU_EXT=1` when torch is missing), and smoke-checks that `lmcache bench l2` exposes geometry and metrics flags.
+The script creates a venv, installs `pyyaml` / `grpcio`, installs torch if the venv has none, runs `pip install -e . --no-build-isolation`, and smoke-checks that `lmcache bench l2` exposes geometry and metrics flags.
 
-**Python 3.12+** required. Install **torch** first on GPU paths. Host observability and fio are separate prerequisites (below).
+Note it does **not** skip the native extensions when torch is absent — `fs_native` is backed by `lmcache_fs`, so they have to build, which is why torch is installed first rather than worked around.
+
+**Python 3.12+** required. Install **torch** first on GPU paths, since the extensions compile against whichever torch is found; left to itself pip pulls a multi-GB CUDA wheel even on a GPU-less host. Host observability and fio are separate prerequisites (below).
+
+On a host that has never run this, two things block the install before it starts:
+
+- **Toolchain.** The extensions need a C++ compiler and the Python headers: `dnf install -y python3.12 python3.12-devel gcc gcc-c++ cmake make git`. Omitting `-devel` fails late, with a missing-header error.
+- **Proxy.** A proxy set in `/etc/dnf/dnf.conf` does not apply to pip. Export `http_proxy` / `https_proxy` into the installing shell, or pip retries pypi.org and gives up while dnf appears fine.
 
 ## KV geometry CLI
 
