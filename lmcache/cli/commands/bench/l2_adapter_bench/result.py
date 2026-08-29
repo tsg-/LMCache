@@ -81,13 +81,24 @@ class BenchResult:
     operation: str
     in_flight: int
     num_keys: int
+    # Size of every object in the submit. Zero when the submit is
+    # heterogeneous (object-group geometry) or carries no payload at all
+    # (lookup), so read :attr:`payload_bytes_per_submit` for the total.
     data_size_bytes: int
     mode: BenchMode = BenchMode.ROUNDS
+    # Bytes one logical submit requests, summed across its objects.
+    # Defaults to ``num_keys * data_size_bytes``, which is exact for a
+    # uniform submit, so a uniform caller never has to supply it.
+    payload_bytes_per_submit: int = 0
     round_durations: list[float] = field(default_factory=list)
     round_starts: list[float] = field(default_factory=list)
     success_counts: list[int] = field(default_factory=list)
     # Rounds that hit the wait timeout and therefore have no duration.
     timed_out_rounds: int = 0
+    # Per-entry payload bytes belonging to the successes in
+    # ``success_counts``, so a partial hit on a heterogeneous submit bills
+    # the objects it actually moved rather than an average.
+    success_byte_counts: list[int] = field(default_factory=list)
     # Per-submit observed latencies in seconds (both modes).
     submit_latencies: list[float] = field(default_factory=list)
     # Running aggregates over the two lists above, so a live observer
@@ -97,6 +108,7 @@ class BenchResult:
     # not constructor arguments, so slicing a result into a new one (see
     # the summary's warmup strip) recomputes them correctly and for free.
     success_total: int = field(init=False, default=0)
+    success_bytes_total: int = field(init=False, default=0)
     submit_latency_total_sec: float = field(init=False, default=0.0)
     # ROUNDS mode: how many entries each round contributed to
     # ``submit_latencies``. Normally ``in_flight``, but fewer for a round
@@ -144,11 +156,22 @@ class BenchResult:
         agreeing with them. This is the one place a full scan is
         acceptable: it happens once per result, not once per scrape.
         """
+        if self.payload_bytes_per_submit == 0:
+            self.payload_bytes_per_submit = self.num_keys * self.data_size_bytes
         self.success_total = sum(self.success_counts)
+        # A caller that supplied ``success_counts`` without byte counts is
+        # necessarily uniform -- the byte counts only exist because a
+        # heterogeneous submit cannot be billed from a key count.
+        self.success_bytes_total = (
+            sum(self.success_byte_counts)
+            if self.success_byte_counts
+            else self.success_total * self.data_size_bytes
+        )
         self.submit_latency_total_sec = math.fsum(self.submit_latencies)
         self.latency_observation_count = len(self.submit_latencies)
         if self.mode is BenchMode.SUSTAINED:
             self.success_counts.clear()
+            self.success_byte_counts.clear()
             if len(self.submit_latencies) > _MAX_SUSTAINED_LATENCY_SAMPLES:
                 self.submit_latencies[:] = self.submit_latencies[
                     -_MAX_SUSTAINED_LATENCY_SAMPLES:
@@ -159,8 +182,8 @@ class BenchResult:
     # Hot-path recording
     # ------------------------------------------------------------------
 
-    def record_success(self, keys: int) -> None:
-        """Append a success count and fold it into the running total.
+    def record_success(self, keys: int, bytes_transferred: int | None = None) -> None:
+        """Append a success count and fold it into the running totals.
 
         Use this rather than appending to :attr:`success_counts`
         directly, or :attr:`success_total` silently goes stale.
@@ -168,10 +191,18 @@ class BenchResult:
         Args:
             keys: Keys the adapter reported successful for one submit
                 (rounds mode: for one whole round).
+            bytes_transferred: Payload bytes belonging to those keys. Omit
+                only for a uniform result, where it is billed as
+                ``keys * data_size_bytes``; a heterogeneous submit must
+                pass the summed sizes of the objects that succeeded.
         """
+        if bytes_transferred is None:
+            bytes_transferred = keys * self.data_size_bytes
         if self.mode is BenchMode.ROUNDS:
             self.success_counts.append(keys)
+            self.success_byte_counts.append(bytes_transferred)
         self.success_total += keys
+        self.success_bytes_total += bytes_transferred
 
     def record_latency(self, seconds: float) -> None:
         """Append an observed submit latency and fold it into the total.
@@ -219,17 +250,22 @@ class BenchResult:
 
     @property
     def total_data_bytes_per_round(self) -> int:
-        return self.keys_per_round * self.data_size_bytes
+        return self.in_flight * self.payload_bytes_per_submit
 
     @property
     def total_data_bytes(self) -> int:
         """Bytes the run *requested*, successful or not.
 
-        Counts every key submitted. A load that missed, or a store the
+        Counts every submit issued. A load that missed, or a store the
         backend short-circuited, still contributes here -- compare with
         :attr:`total_success_bytes` before quoting a throughput figure.
+
+        Derived from whole submits rather than from a key count times a
+        page size, so a heterogeneous submit is billed by its own payload.
         """
-        return self.total_keys * self.data_size_bytes
+        if self.mode is BenchMode.SUSTAINED:
+            return self.completed_submits * self.payload_bytes_per_submit
+        return len(self.round_durations) * self.total_data_bytes_per_round
 
     @property
     def total_success(self) -> int:
@@ -243,8 +279,13 @@ class BenchResult:
 
     @property
     def total_success_bytes(self) -> int:
-        """Bytes belonging to keys the adapter reported successful."""
-        return self.total_success * self.data_size_bytes
+        """Bytes belonging to keys the adapter reported successful.
+
+        Reads the running :attr:`success_bytes_total` for the same reason
+        :attr:`total_success` reads its running counterpart: a live scrape
+        must not walk the history.
+        """
+        return self.success_bytes_total
 
     # ------------------------------------------------------------------
     # Duration stats (seconds)
@@ -282,7 +323,7 @@ class BenchResult:
 
     @property
     def per_round_throughput_mbps(self) -> list[float]:
-        if self.data_size_bytes <= 0:
+        if self.payload_bytes_per_submit <= 0:
             return []
         bytes_per_round = self.total_data_bytes_per_round
         out: list[float] = []
@@ -386,7 +427,7 @@ class BenchResult:
         transfer from a load miss or a store the backend short-circuited.
         Quote :attr:`success_throughput_mbps` against a fio comparator.
         """
-        if self.data_size_bytes <= 0:
+        if self.payload_bytes_per_submit <= 0:
             return 0.0
         window = self.measured_window_sec
         if window <= 0:
@@ -402,7 +443,7 @@ class BenchResult:
         prepopulation (all-miss loads) or a backend that no-ops repeat
         stores shows up as low throughput rather than as a fast run.
         """
-        if self.data_size_bytes <= 0:
+        if self.payload_bytes_per_submit <= 0:
             return 0.0
         window = self.measured_window_sec
         if window <= 0:
@@ -417,7 +458,7 @@ class BenchResult:
         :attr:`BenchMode.ROUNDS`: it charges the run for the round-edge
         gaps. Returns 0.0 when the span is unavailable.
         """
-        if self.data_size_bytes <= 0:
+        if self.payload_bytes_per_submit <= 0:
             return 0.0
         span = self.wall_clock_span_sec
         if span <= 0:

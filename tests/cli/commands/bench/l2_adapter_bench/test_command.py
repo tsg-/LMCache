@@ -84,6 +84,87 @@ def _write_gqa_profile(tmp_path: Path) -> Path:
     return profile
 
 
+def _write_hybrid_object_group_profile(
+    tmp_path: Path, head_size: int = 8
+) -> tuple[Path, int, int]:
+    """Write a two-group profile whose objects are deliberately unequal.
+
+    Sizes are kept small so a full store/lookup/load run stays cheap, but
+    both groups still resolve from the real GQA formula, so a size typo in
+    the fixture is rejected by the resolver rather than benchmarked:
+
+    * ``full_attention``: 4 layers * (2 * 2 * HS) elems * 2 B * 256 slots
+    * ``sliding_window``: 2 layers * (2 * 2 * HS) elems * 2 B * 128 slots
+
+    Args:
+        tmp_path: Directory the profile is written into.
+        head_size: Per-head size, which scales both groups. The default
+            keeps every object 4096-aligned; an odd value makes the
+            sliding-window object unaligned.
+
+    Returns:
+        The profile path and the two resolved object sizes in bytes.
+    """
+    elems_per_token = 2 * 2 * head_size
+    main_bytes = 4 * elems_per_token * 2 * 256
+    sw_bytes = 2 * elems_per_token * 2 * 128
+    burst_bytes = 2 * 2 * (main_bytes + sw_bytes)
+    profile = tmp_path / "hybrid_object_groups.yaml"
+    profile.write_text(
+        "\n".join(
+            [
+                "model: {name: example/hybrid}",
+                "runtime:",
+                "  lmcache_tokens_per_chunk: 256",
+                "  task_archetype: lookup_load",
+                "  chunks_per_submit: 2",
+                "  kv_ranks_per_chunk: 2",
+                "  separate_object_groups: true",
+                "  full_sw_kv: false",
+                "object_groups:",
+                "  - object_group_id: 0",
+                "    name: full_attention",
+                "    sw_size_chunks: -1",
+                "    components:",
+                "      - name: main_kv",
+                "        role: key_value",
+                "        cache_owning_layers: 4",
+                (
+                    "        architecture: {attention: gqa, kv_size: 2, "
+                    f"num_kv_heads: 2, head_size: {head_size}}}"
+                ),
+                "        quantization: {dtype: bfloat16, dtype_bytes: 2}",
+                (
+                    "        block_geometry: {tokens_per_block: 128, "
+                    "slots_per_block: 128, transfer_tokens_per_chunk: 256}"
+                ),
+                f"        component_size_bytes: {main_bytes}",
+                f"    object_size_bytes: {main_bytes}",
+                "  - object_group_id: 1",
+                "    name: sliding_window",
+                "    sw_size_chunks: 1",
+                "    components:",
+                "      - name: sw_kv",
+                "        role: key_value",
+                "        cache_owning_layers: 2",
+                (
+                    "        architecture: {attention: gqa, kv_size: 2, "
+                    f"num_kv_heads: 2, head_size: {head_size}}}"
+                ),
+                "        quantization: {dtype: bfloat16, dtype_bytes: 2}",
+                (
+                    "        block_geometry: {tokens_per_block: 128, "
+                    "slots_per_block: 128, transfer_tokens_per_chunk: 128}"
+                ),
+                f"        component_size_bytes: {sw_bytes}",
+                f"    object_size_bytes: {sw_bytes}",
+                f"burst: {{objects_per_submit: 8, burst_bytes: {burst_bytes}}}",
+            ]
+        )
+    )
+    return profile, main_bytes, sw_bytes
+
+
 class _MetricsCommand:
     """Minimal command surface that retains the emitted metrics."""
 
@@ -153,6 +234,7 @@ def test_kvcache_shape_profile_resolves_deepseek_page_burst(
         "profile_path": str(profile.resolve()),
         "profile_sha256": sha256(profile.read_bytes()).hexdigest(),
         "model_name": "deepseek-ai/DeepSeek-V3",
+        "profile_mode": "legacy_page_burst",
         "tokens_per_chunk": 256,
         "objects_per_submit": 61,
         "page_size_bytes": 147456,
@@ -319,6 +401,7 @@ def test_inline_shape_spec_records_the_spec_as_its_provenance(
     assert geometry == {
         "shape_spec": "(1,1024,256,1,576):uint8:61",
         "model_name": "inline-shape-spec",
+        "profile_mode": "legacy_page_burst",
         "tokens_per_chunk": 256,
         "objects_per_submit": 61,
         "page_size_bytes": 147456,
@@ -443,6 +526,153 @@ def test_kvcache_shape_profile_rejects_non_kib_page_before_adapter(
         run_l2_adapter_bench(MagicMock(), args)
 
     assert exc.value.code == 2
+
+
+# ---------------------------------------------------------------------------
+# Object-group geometry end to end
+# ---------------------------------------------------------------------------
+
+
+def test_object_group_profile_drives_a_heterogeneous_round_trip(
+    tmp_path: Path,
+) -> None:
+    """A full run must store, look up, and load unequal objects correctly.
+
+    The run's own store -> load verification compares every object's bytes
+    against what was written, so a mismatch in per-object sizing, buffer
+    offsets, or key ordering between the two phases exits non-zero. Passing
+    is the end-to-end statement that the object-group path agrees with
+    itself.
+    """
+    profile, main_bytes, sw_bytes = _write_hybrid_object_group_profile(tmp_path)
+    command = _MetricsCommand()
+    args = _parse(
+        "--key-prefix",
+        "hybrid-groups",
+        "--kvcache-shape-profile",
+        str(profile),
+        "--in-flight",
+        "1",
+        "--rounds",
+        "1",
+        "--warmup-rounds",
+        "0",
+        adapter_json=_fs_adapter_json(tmp_path),
+    )
+
+    run_l2_adapter_bench(command, args)
+
+    # 2 chunks x 2 object groups x 2 KV ranks.
+    assert args.num_keys == 8
+    # A heterogeneous submit has no single page size, so the uniform CLI
+    # field stays at zero rather than reporting one of the two sizes.
+    assert args.data_size_kb == 0
+    assert command.metrics is not None
+    metrics = command.metrics.to_dict()["metrics"]
+    assert metrics["geometry"] == {
+        "profile_path": str(profile.resolve()),
+        "profile_sha256": sha256(profile.read_bytes()).hexdigest(),
+        "profile_mode": "object_group",
+        "model_name": "example/hybrid",
+        "task_archetype": "lookup_load",
+        "tokens_per_chunk": 256,
+        "objects_per_submit": 8,
+        "chunks_per_submit": 2,
+        "kv_ranks_per_chunk": 2,
+        "separate_object_groups": True,
+        "full_sw_kv": False,
+        "task_size_bytes": 2 * 2 * (main_bytes + sw_bytes),
+    }
+    assert "page_size_bytes" not in metrics["geometry"]
+
+    groups = metrics["geometry_object_groups"]
+    assert groups["group_0_name"] == "full_attention"
+    assert groups["group_0_sw_size_chunks"] == -1
+    assert groups["group_0_object_size_bytes"] == main_bytes
+    assert groups["group_1_name"] == "sliding_window"
+    assert groups["group_1_sw_size_chunks"] == 1
+    assert groups["group_1_object_size_bytes"] == sw_bytes
+
+    components = metrics["geometry_components"]
+    assert components["group_0_main_kv_attention"] == "gqa"
+    assert components["group_0_main_kv_cache_owning_layers"] == 4
+    assert components["group_0_main_kv_slots_per_object"] == 256
+    assert components["group_0_main_kv_size_bytes"] == main_bytes
+    assert components["group_1_sw_kv_slots_per_object"] == 128
+    assert components["group_1_sw_kv_size_bytes"] == sw_bytes
+
+    # Every phase addresses all 8 objects, and store and load move all of
+    # them. The default hit rate is zero, so lookup is expected to miss.
+    operations = {
+        section["operation"]: section
+        for key, section in metrics.items()
+        if key.startswith("op_")
+    }
+    assert operations["Store"]["total_keys"] == 8
+    assert operations["Store"]["total_success"] == 8
+    assert operations["Load"]["total_keys"] == 8
+    assert operations["Load"]["total_success"] == 8
+
+
+def test_object_group_alignment_names_the_offending_object_size(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Alignment applies per object, and the rejection must say which one.
+
+    Objects are laid out at the prefix sum of their predecessors, so one
+    unaligned size misaligns every object after it. The operator did not
+    choose these sizes -- the profile did -- so the size has to appear in
+    the error for the failure to be actionable.
+    """
+    profile, main_bytes, sw_bytes = _write_hybrid_object_group_profile(
+        tmp_path, head_size=1
+    )
+    assert main_bytes % 4096 == 0
+    assert sw_bytes % 4096 != 0
+    args = _parse(
+        "--key-prefix",
+        "hybrid-unaligned",
+        "--kvcache-shape-profile",
+        str(profile),
+        "--l1-align-bytes",
+        "4096",
+        adapter_json=_fs_adapter_json(tmp_path),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        run_l2_adapter_bench(MagicMock(), args)
+
+    assert exc.value.code == 2
+    stderr = capsys.readouterr().err
+    assert "--l1-align-bytes (4096)" in stderr
+    assert str(sw_bytes) in stderr
+    assert str(main_bytes) not in stderr
+
+
+def test_uniform_profile_emits_no_object_group_sections(tmp_path: Path) -> None:
+    """A page burst declares no components, so the tables stay out."""
+    command = _MetricsCommand()
+    args = _parse(
+        "--only",
+        "store",
+        "--key-prefix",
+        "uniform-no-groups",
+        "--kvcache-shape-profile",
+        str(_write_gqa_profile(tmp_path)),
+        "--rounds",
+        "1",
+        "--warmup-rounds",
+        "0",
+        adapter_json=_fs_adapter_json(tmp_path),
+    )
+
+    run_l2_adapter_bench(command, args)
+
+    assert command.metrics is not None
+    metrics = command.metrics.to_dict()["metrics"]
+    assert "geometry_object_groups" not in metrics
+    assert "geometry_components" not in metrics
 
 
 @pytest.mark.parametrize(

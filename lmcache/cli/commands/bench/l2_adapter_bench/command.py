@@ -19,9 +19,10 @@ if TYPE_CHECKING:
     # First Party
     from lmcache.cli.commands.base import BaseCommand
     from lmcache.cli.commands.bench.l2_adapter_bench.geometry import (
-        L2GeometryProfile,
+        L2SubmitGeometry,
     )
     from lmcache.cli.commands.bench.l2_adapter_bench.result import BenchResult
+    from lmcache.cli.metrics import Metrics
 
 
 def _noop_shutdown() -> None:
@@ -138,11 +139,19 @@ def add_l2_arguments(parser: argparse.ArgumentParser) -> None:
         type=str,
         metavar="YAML",
         help=(
-            "Resolve a uniform KV cache page shape from a hand-authored YAML "
-            "model profile. Sets --num-keys from burst.layers_per_burst and "
-            "--data-size-kb from page.page_size_bytes, then records the "
-            "source and SHA-256 in structured output. Cannot be combined "
-            "with explicit --num-keys or --data-size-kb. Distinct from "
+            "Resolve L2 submit geometry from a hand-authored YAML model "
+            "profile, in either of two forms. A page-burst profile "
+            "(architecture/quantization/chunking/page sections) describes one "
+            "uniform page per layer and sets --num-keys from "
+            "burst.layers_per_burst and --data-size-kb from "
+            "page.page_size_bytes. An object-group profile "
+            "(runtime/object_groups sections) describes one object per "
+            "(chunk, object group, kv rank), each packing components whose "
+            "sizes need not agree; it sets --num-keys from the resulting "
+            "object count and leaves --data-size-kb unset, since a "
+            "heterogeneous submit has no single per-object size. Either form "
+            "records the source and SHA-256 in structured output. Cannot be "
+            "combined with explicit --num-keys or --data-size-kb. Distinct from "
             "'lmcache bench server --kvcache-shape-spec', which takes an "
             "inline tensor-group grammar rather than a file path; the two "
             "forms are not interchangeable. This models L2 object count and "
@@ -374,17 +383,20 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
             ``command.create_metrics``.
         args: Parsed CLI arguments from the ``bench l2`` subparser.
     """
-    geometry_profile: L2GeometryProfile | None = None
+    # First Party
+    from lmcache.cli.commands.bench.l2_adapter_bench.geometry import (
+        PROFILE_MODE_LEGACY,
+        GeometryProfileError,
+        raw_submit_geometry,
+        resolve_inline_shape_spec,
+        resolve_submit_geometry,
+        submit_geometry_from_uniform,
+    )
+
+    geometry: L2SubmitGeometry
     geometry_profile_path = getattr(args, "kvcache_shape_profile", None)
     inline_shape_spec = getattr(args, "kvcache_shape_spec", None)
     if geometry_profile_path or inline_shape_spec:
-        # First Party
-        from lmcache.cli.commands.bench.l2_adapter_bench.geometry import (
-            GeometryProfileError,
-            resolve_geometry_profile,
-            resolve_inline_shape_spec,
-        )
-
         source_flag = (
             "--kvcache-shape-profile"
             if geometry_profile_path
@@ -404,21 +416,28 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
             sys.exit(2)
         try:
             if geometry_profile_path:
-                geometry_profile = resolve_geometry_profile(geometry_profile_path)
+                geometry = resolve_submit_geometry(geometry_profile_path)
             else:
-                geometry_profile = resolve_inline_shape_spec(inline_shape_spec)
+                geometry = submit_geometry_from_uniform(
+                    resolve_inline_shape_spec(inline_shape_spec)
+                )
         except GeometryProfileError as e:
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(2)
-        args.num_keys = geometry_profile.objects_per_submit
-        args.data_size_kb = geometry_profile.data_size_kb
+        args.num_keys = geometry.objects_per_submit
+        args.data_size_kb = geometry.data_size_kb
+    else:
+        geometry = raw_submit_geometry(
+            num_keys=args.num_keys, page_size_bytes=args.data_size_kb * 1024
+        )
 
     # Lazy imports: keep CLI loadable without torch / native deps.
     # First Party
     from lmcache.cli.commands.bench.l2_adapter_bench.data import (
         create_l1_memory_desc,
         make_aligned_tensor,
-        make_memory_objects,
+        make_memory_objects_from_sizes,
+        make_object_group_keys,
         make_object_keys,
         verify_round_trip,
     )
@@ -454,22 +473,31 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
         parse_args_to_l2_adapters_config,
     )
 
-    kb = 1024
     mb = 1024 * 1024
-    data_size = args.data_size_kb * kb
+    object_sizes = geometry.object_sizes_bytes
+    task_size_bytes = geometry.task_size_bytes
+    # A heterogeneous submit has no single object size. Zero is the honest
+    # value for the uniform field, and the object vector carries the shape.
+    data_size = object_sizes[0] if geometry.is_uniform and object_sizes else 0
     l1_align_bytes = int(args.l1_align_bytes)
     if l1_align_bytes <= 0:
         print("Error: --l1-align-bytes must be positive", file=sys.stderr)
         sys.exit(2)
-    if data_size % l1_align_bytes != 0:
+    # Every object is placed at the prefix sum of its predecessors, so all
+    # of them have to be a multiple of the alignment for any of them to
+    # land aligned. Reporting the offending size is what makes an
+    # object-group profile diagnosable -- the operator did not pick it.
+    misaligned = sorted({s for s in object_sizes if s % l1_align_bytes != 0})
+    if misaligned:
         print(
-            "Error: --data-size-kb must produce a payload size that is "
-            "a multiple of --l1-align-bytes",
+            f"Error: every L2 object size must be a multiple of "
+            f"--l1-align-bytes ({l1_align_bytes}); offending sizes: "
+            f"{', '.join(str(size) for size in misaligned)}",
             file=sys.stderr,
         )
         sys.exit(2)
     in_flight = args.in_flight
-    num_keys = args.num_keys
+    num_keys = geometry.objects_per_submit
     rounds = args.rounds
     warmup = args.warmup_rounds
     total_rounds = warmup + rounds
@@ -595,12 +623,21 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
         )
         sys.exit(2)
 
-    # Keys per round (one in-flight wave) and total keys available to a
+    # Keys per round (one in-flight wave) and total units available to a
     # wrapping sustained load. Mixed mode has no round warmup: its
     # --warmup-rounds value is ignored so the parser default cannot make a
     # corpus prepopulated with --warmup-rounds 0 miss after its first pass.
+    #
+    # A *unit* is the smallest indivisible piece of the key universe: one
+    # key for a uniform page burst, one chunk for an object-group geometry.
+    # Every provider below indexes in units, which is what keeps an
+    # object-group hit or miss chunk-atomic -- a chunk's objects are only
+    # ever addressed together.
+    units_per_submit = geometry.chunks_per_submit
+    objects_per_unit = num_keys // units_per_submit
+    units_per_round = in_flight * units_per_submit
     keys_per_round = in_flight * num_keys
-    total_run_keys = (rounds if mixed else total_rounds) * keys_per_round
+    total_run_units = (rounds if mixed else total_rounds) * units_per_round
     # ``--key-prefix`` becomes part of the ObjectKey model_name, so it
     # partitions the key universe. Empty prefix keeps the historical
     # "bench-model" name, so existing rounds-mode corpora stay addressable.
@@ -613,13 +650,18 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
         if not quiet:
             print(msg)
 
-    if geometry_profile is not None:
+    if geometry.source_path or geometry.shape_spec:
+        shape = (
+            f"{geometry.page_size_bytes} B"
+            if geometry.page_size_bytes
+            else f"{len(geometry.object_groups)} groups, {task_size_bytes} B"
+        )
         log(
             "[KV Cache Shape] "
-            f"{geometry_profile.model_name}: "
-            f"{geometry_profile.objects_per_submit} objects x "
-            f"{geometry_profile.page_size_bytes} B "
-            f"({geometry_profile.tokens_per_chunk} tokens/chunk)"
+            f"{geometry.model_name}: "
+            f"{geometry.objects_per_submit} objects x {shape} "
+            f"({geometry.tokens_per_chunk} tokens/chunk, "
+            f"{units_per_submit} chunks/submit)"
         )
 
     # Resolve L2 adapter JSON: CLI arg takes priority, then env var
@@ -654,7 +696,7 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
 
     # Backing L1 memory buffer for adapters that need an L1 desc.
     # Sized for one in-flight wave of store + load buffers.
-    l1_buffer = make_aligned_tensor(2 * keys_per_round * data_size, l1_align_bytes)
+    l1_buffer = make_aligned_tensor(2 * in_flight * task_size_bytes, l1_align_bytes)
     l1_memory_desc = create_l1_memory_desc(l1_buffer, align_bytes=l1_align_bytes)
 
     # Resolve and validate the flame-graph toolchain up front, before any
@@ -746,30 +788,52 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
             sys.exit(2)
 
     # ------------------------------------------------------------------
-    # Idx layout
+    # Unit layout
     # ------------------------------------------------------------------
-    # All ops live in the same idx universe so that ``--only store``
+    # All ops live in the same unit universe so that ``--only store``
     # followed by ``--only load`` (or lookup) with the same flags hits
     # the exact same keys.
     #
-    # Round r (0-indexed, warmup rounds first) consumes the idx slice
-    #   [r * keys_per_round, (r+1) * keys_per_round)
-    # split into ``in_flight`` contiguous batches of ``num_keys`` each.
+    # Round r (0-indexed, warmup rounds first) consumes the unit slice
+    #   [r * units_per_round, (r+1) * units_per_round)
+    # split into ``in_flight`` contiguous batches of ``units_per_submit``
+    # units, which is ``num_keys`` keys either way.
     #
     # Lookup additionally splits each round into a hit-portion (drawn
-    # from the same idx range as store/load) and a miss-portion drawn
+    # from the same unit range as store/load) and a miss-portion drawn
     # from a guaranteed-non-existent range starting at
-    # ``total_run_keys``.
+    # ``total_run_units``.
     # ------------------------------------------------------------------
+    object_group_ids = tuple(group.object_group_id for group in geometry.object_groups)
+
+    def _keys_for_units(unit_base: int, unit_count: int, namespace: str) -> list:
+        """Build the keys addressing *unit_count* units from *unit_base*.
+
+        A uniform page burst keeps its historical one-key-per-unit
+        addressing, so a corpus written before object groups existed stays
+        readable. An object-group geometry maps each unit to a chunk and
+        fans it out over its groups and KV ranks.
+        """
+        if geometry.profile_mode == PROFILE_MODE_LEGACY:
+            return make_object_keys(
+                unit_count,
+                model_name=namespace,
+                key_offset=unit_base,
+            )
+        return make_object_group_keys(
+            first_chunk_index=unit_base,
+            chunks_per_submit=unit_count,
+            object_group_ids=object_group_ids,
+            kv_ranks_per_chunk=geometry.kv_ranks_per_chunk,
+            model_name=namespace,
+        )
 
     def _build_round_keys(r: int) -> list[list]:
         """Build per-submit key batches for round *r* (store/load)."""
-        base = r * keys_per_round
+        base = r * units_per_round
         return [
-            make_object_keys(
-                num_keys,
-                model_name=key_namespace,
-                key_offset=base + i * num_keys,
+            _keys_for_units(
+                base + i * units_per_submit, units_per_submit, key_namespace
             )
             for i in range(in_flight)
         ]
@@ -787,48 +851,42 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
         loads that nevertheless report success.
         """
         return [
-            make_memory_objects(
+            make_memory_objects_from_sizes(
                 l1_buffer,
-                num_keys,
-                data_size,
-                base_offset + i * num_keys * data_size,
+                object_sizes,
+                base_offset + i * task_size_bytes,
                 fill_offset=fill_offset,
             )
             for i in range(in_flight)
         ]
 
-    # Lookup hit/miss split per round.
-    per_round_hit = int(keys_per_round * max_hit_rate)
-    per_round_miss = keys_per_round - per_round_hit
-    # Total expected hit count over measured rounds only.
-    expected_hit_count = per_round_hit * rounds
-    # Origin of the guaranteed-miss idx range.
-    miss_origin = total_run_keys
+    # Lookup hit/miss split per round, taken in units so an object-group
+    # chunk is either wholly expected to hit or wholly expected to miss.
+    per_round_hit_units = int(units_per_round * max_hit_rate)
+    per_round_miss_units = units_per_round - per_round_hit_units
+    # Total expected hit count over measured rounds only, in keys.
+    expected_hit_count = per_round_hit_units * objects_per_unit * rounds
+    # Origin of the guaranteed-miss unit range.
+    miss_origin_units = total_run_units
 
     def _build_lookup_round_keys(r: int) -> list[list]:
         """Build per-submit lookup key batches for round *r*.
 
         Hit slice for round r:
-          [r * per_round_hit, (r+1) * per_round_hit)
-        Miss slice for round r (disjoint from any store/load idx):
-          [miss_origin + r * per_round_miss,
-           miss_origin + (r+1) * per_round_miss)
+          [r * per_round_hit_units, (r+1) * per_round_hit_units)
+        Miss slice for round r (disjoint from any store/load unit):
+          [miss_origin_units + r * per_round_miss_units,
+           miss_origin_units + (r+1) * per_round_miss_units)
 
         The combined ``keys_per_round`` keys are concatenated then
         split into ``in_flight`` chunks of ``num_keys`` each.
         """
-        hit_base = r * per_round_hit
-        miss_base = miss_origin + r * per_round_miss
+        hit_base = r * per_round_hit_units
+        miss_base = miss_origin_units + r * per_round_miss_units
         keys_round: list = []
+        keys_round.extend(_keys_for_units(hit_base, per_round_hit_units, key_namespace))
         keys_round.extend(
-            make_object_keys(
-                per_round_hit, model_name=key_namespace, key_offset=hit_base
-            )
-        )
-        keys_round.extend(
-            make_object_keys(
-                per_round_miss, model_name=key_namespace, key_offset=miss_base
-            )
+            _keys_for_units(miss_base, per_round_miss_units, key_namespace)
         )
         # Split into in_flight equal-sized batches of num_keys.
         return [keys_round[i * num_keys : (i + 1) * num_keys] for i in range(in_flight)]
@@ -858,7 +916,7 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
         nonlocal load_obj_batches
         if load_obj_batches is None:
             load_obj_batches = _build_round_objs(
-                keys_per_round * data_size,
+                in_flight * task_size_bytes,
                 fill_offset=1,
             )
         return load_obj_batches
@@ -867,8 +925,8 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
     # Sustained-mode providers
     # ------------------------------------------------------------------
     # A sustained window issues an unbounded number of submits, so the
-    # submit index -> key idx mapping has to be defined past the end of
-    # the rounds-mode key universe (``total_run_keys`` keys). The two
+    # submit index -> unit mapping has to be defined past the end of
+    # the rounds-mode unit universe (``total_run_units`` units). The two
     # directions need opposite treatment:
     #
     # Store MUST NOT wrap. ``fs_native`` short-circuits a store whose key
@@ -878,11 +936,11 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
     # not the write path, and still count full payload bytes. Store keys
     # advance monotonically so every submit is a physical write. The cost
     # is unbounded capacity growth: a sustained store consumes
-    # ``in_flight * num_keys * data_size`` bytes per completed wave for
+    # ``in_flight * task_size_bytes`` bytes per completed wave for
     # the whole window, so size the backing store for the duration.
     #
     # Load MUST wrap: it can only hit keys that were actually stored, so
-    # it stays inside ``total_run_keys``. A window long enough to wrap
+    # it stays inside ``total_run_units``. A window long enough to wrap
     # re-reads keys, which the page cache may serve -- size the key space
     # past DRAM or drop caches between phases.
     #
@@ -890,7 +948,7 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
     # allocates: slot i owns batch i. A slot is only reissued after its
     # previous submit completed, so no two outstanding submits share
     # buffers.
-    total_submit_slots = max(1, total_run_keys // num_keys)
+    total_submit_slots = max(1, (rounds if mixed else total_rounds) * in_flight)
 
     def _sustained_store_keys(submit_index: int) -> list:
         """Keys for sustained store submit *submit_index*.
@@ -901,25 +959,23 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
         offset restarts at zero, which is what ``--key-prefix``
         guards.
         """
-        return make_object_keys(
-            num_keys,
-            model_name=write_key_namespace,
-            key_offset=submit_index * num_keys,
+        return _keys_for_units(
+            submit_index * units_per_submit,
+            units_per_submit,
+            write_key_namespace,
         )
 
     def _sustained_load_keys(submit_index: int) -> list:
         """Keys for sustained load submit *submit_index* (wraps).
 
-        Wraps within ``total_run_keys`` -- the idx range a prepopulating
+        Wraps within ``total_run_units`` -- the unit range a prepopulating
         store pass at matching geometry actually covered -- so reads hit
         rather than measuring the miss path. Mixed mode intentionally uses
         measured rounds only because it has no rounds warmup.
         """
         slot_idx = submit_index % total_submit_slots
-        return make_object_keys(
-            num_keys,
-            model_name=key_namespace,
-            key_offset=slot_idx * num_keys,
+        return _keys_for_units(
+            slot_idx * units_per_submit, units_per_submit, key_namespace
         )
 
     def _first_store_wave_keys() -> list:
@@ -1008,6 +1064,7 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
                 log=log,
                 on_result=_publish_measured,
                 verify_write_samples=not args.skip_verify,
+                object_sizes=object_sizes,
             )
             results.extend([load_result, store_result])
             failed = not accepted
@@ -1039,6 +1096,7 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
                         log=log,
                         on_result=_publish_measured,
                         on_warmup_result=_publish_warmup,
+                        object_sizes=object_sizes,
                     )
                 )
             else:
@@ -1053,6 +1111,7 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
                     objs_for_round=_store_objs,
                     log=log,
                     on_result=_publish_rounds,
+                    object_sizes=object_sizes,
                 )
                 results.append(_strip_warmup(all_store, warmup))
                 # Last measured store round is total_rounds - 1.
@@ -1096,6 +1155,7 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
                         log=log,
                         on_result=_publish_measured,
                         on_warmup_result=_publish_warmup,
+                        object_sizes=object_sizes,
                     )
                 )
             else:
@@ -1110,6 +1170,7 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
                     objs_for_round=_load_objs,
                     log=log,
                     on_result=_publish_rounds,
+                    object_sizes=object_sizes,
                 )
                 results.append(_strip_warmup(all_load, warmup))
                 last_load_round_keys = _build_round_keys(total_rounds - 1)
@@ -1151,8 +1212,8 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
             args=args,
             l2_adapter_json=l2_adapter_specs[0],
             keys_per_round=keys_per_round,
-            data_per_round_mb=(keys_per_round * data_size) / mb,
-            geometry_profile=geometry_profile,
+            data_per_round_mb=(in_flight * task_size_bytes) / mb,
+            geometry=geometry,
             results=results,
         )
     except (StoreNamespaceNotEmptyError, StoreFreshnessUnknownError) as e:
@@ -1214,10 +1275,12 @@ def _strip_warmup(result: "BenchResult", warmup: int) -> "BenchResult":
         in_flight=result.in_flight,
         num_keys=result.num_keys,
         data_size_bytes=result.data_size_bytes,
+        payload_bytes_per_submit=result.payload_bytes_per_submit,
         mode=result.mode,
         round_durations=result.round_durations[warmup:],
         round_starts=result.round_starts[warmup:],
         success_counts=result.success_counts[warmup:],
+        success_byte_counts=result.success_byte_counts[warmup:],
         submit_latencies=result.submit_latencies[dropped_submits:],
         round_latency_counts=result.round_latency_counts[warmup:],
         # Kept consistent with the surviving rounds; dropped_submits is
@@ -1229,13 +1292,79 @@ def _strip_warmup(result: "BenchResult", warmup: int) -> "BenchResult":
     )
 
 
+def _add_object_group_sections(
+    metrics: "Metrics", geometry: "L2SubmitGeometry"
+) -> None:
+    """Emit the per-group and per-component breakdown of one submit.
+
+    Nothing is emitted for a uniform page burst: its single synthetic group
+    declares no components, and the geometry section already carries
+    everything a page-burst profile states.
+
+    Args:
+        metrics: The summary the sections are added to.
+        geometry: Resolved geometry for the run.
+    """
+    if geometry.page_size_bytes:
+        return
+
+    group_section = metrics.add_section("geometry_object_groups", "Object Groups")
+    for group in geometry.object_groups:
+        tag = group.object_group_id
+        group_section.add(f"group_{tag}_name", f"[{tag}] Name", group.name)
+        group_section.add(
+            f"group_{tag}_sw_size_chunks",
+            f"[{tag}] Window (chunks)",
+            group.sw_size_chunks,
+        )
+        group_section.add(
+            f"group_{tag}_object_size_bytes",
+            f"[{tag}] Object size (bytes)",
+            group.object_size_bytes,
+        )
+
+    components = [
+        (group, component)
+        for group in geometry.object_groups
+        for component in group.components
+    ]
+    if not components:
+        return
+    component_section = metrics.add_section(
+        "geometry_components", "Object Group Components"
+    )
+    for group, component in components:
+        key = f"group_{group.object_group_id}_{component.name}"
+        label = f"[{group.object_group_id}] {component.name}"
+        component_section.add(f"{key}_role", f"{label} role", component.role)
+        component_section.add(
+            f"{key}_attention", f"{label} attention", component.attention
+        )
+        component_section.add(
+            f"{key}_cache_owning_layers",
+            f"{label} layers",
+            component.cache_owning_layers,
+        )
+        component_section.add(f"{key}_dtype", f"{label} dtype", component.dtype)
+        component_section.add(
+            f"{key}_slots_per_object",
+            f"{label} slots / object",
+            component.slots_per_object,
+        )
+        component_section.add(
+            f"{key}_size_bytes",
+            f"{label} size (bytes)",
+            component.component_size_bytes,
+        )
+
+
 def _emit_l2_adapter_metrics(
     command: "BaseCommand",
     args: argparse.Namespace,
     l2_adapter_json: str,
     keys_per_round: int,
     data_per_round_mb: float,
-    geometry_profile: "L2GeometryProfile | None",
+    geometry: "L2SubmitGeometry",
     results: list,
 ) -> None:
     """Emit L2 adapter benchmark summary using the CLI metrics system."""
@@ -1247,48 +1376,71 @@ def _emit_l2_adapter_metrics(
     cfg_section.add("num_keys", "Keys / submit", args.num_keys)
     cfg_section.add("in_flight", "In-flight / round", args.in_flight)
     cfg_section.add("keys_per_round", "Keys / round", keys_per_round)
-    cfg_section.add(
-        "data_size_kb",
-        "Data size / key (KB)",
-        args.data_size_kb,
-    )
+    # A heterogeneous submit has no single per-key size, so the field is
+    # omitted rather than reported as one of the sizes or as zero.
+    if geometry.page_size_bytes:
+        cfg_section.add(
+            "data_size_kb",
+            "Data size / key (KB)",
+            args.data_size_kb,
+        )
     cfg_section.add(
         "data_per_round_mb",
         "Data / round (MB)",
         round(data_per_round_mb, 2),
     )
-    if geometry_profile is not None:
+    if geometry.source_path or geometry.shape_spec:
         geometry_section = metrics.add_section("geometry", "KV Cache Shape")
         # Record whichever provenance form the source actually has: a spec is
         # self-contained, while a path plus SHA-256 identifies the profile and
         # verifies a candidate copy without carrying its bytes. Emitting the
         # unused form as an empty string would read as a missing file or spec.
-        if geometry_profile.source_path:
+        if geometry.source_path:
+            geometry_section.add("profile_path", "Profile path", geometry.source_path)
+            geometry_section.add("profile_sha256", "Profile SHA-256", geometry.sha256)
+        if geometry.shape_spec:
+            geometry_section.add("shape_spec", "Shape spec", geometry.shape_spec)
+        geometry_section.add("profile_mode", "Profile mode", geometry.profile_mode)
+        geometry_section.add("model_name", "Model", geometry.model_name)
+        # A page-burst profile declares no archetype, so an empty value means
+        # "not declared" rather than "unknown archetype".
+        if geometry.task_archetype:
             geometry_section.add(
-                "profile_path", "Profile path", geometry_profile.source_path
+                "task_archetype", "Task archetype", geometry.task_archetype
             )
-            geometry_section.add(
-                "profile_sha256", "Profile SHA-256", geometry_profile.sha256
-            )
-        if geometry_profile.shape_spec:
-            geometry_section.add(
-                "shape_spec", "Shape spec", geometry_profile.shape_spec
-            )
-        geometry_section.add("model_name", "Model", geometry_profile.model_name)
         geometry_section.add(
-            "tokens_per_chunk", "Tokens / chunk", geometry_profile.tokens_per_chunk
+            "tokens_per_chunk", "Tokens / chunk", geometry.tokens_per_chunk
         )
         geometry_section.add(
             "objects_per_submit",
             "Objects / submit",
-            geometry_profile.objects_per_submit,
+            geometry.objects_per_submit,
         )
+        if geometry.page_size_bytes:
+            geometry_section.add(
+                "page_size_bytes", "Page size (bytes)", geometry.page_size_bytes
+            )
+        else:
+            geometry_section.add(
+                "chunks_per_submit", "Chunks / submit", geometry.chunks_per_submit
+            )
+            geometry_section.add(
+                "kv_ranks_per_chunk",
+                "KV ranks / chunk",
+                geometry.kv_ranks_per_chunk,
+            )
+            geometry_section.add(
+                "separate_object_groups",
+                "Separate object groups",
+                geometry.separate_object_groups,
+            )
+            geometry_section.add(
+                "full_sw_kv", "Full sliding-window KV", geometry.full_sw_kv
+            )
         geometry_section.add(
-            "page_size_bytes", "Page size (bytes)", geometry_profile.page_size_bytes
+            "task_size_bytes", "Task payload (bytes)", geometry.task_size_bytes
         )
-        geometry_section.add(
-            "task_size_bytes", "Task payload (bytes)", geometry_profile.task_size_bytes
-        )
+        _add_object_group_sections(metrics, geometry)
     duration_sec = float(getattr(args, "duration_sec", 0.0))
     if duration_sec > 0:
         cfg_section.add("mode", "Measurement mode", "sustained")
@@ -1437,7 +1589,7 @@ def _emit_l2_adapter_metrics(
         # Successful-bytes throughput. Emitted whenever it diverges from
         # the requested figure, which means keys were missed or a store
         # was short-circuited -- the fio comparator wants this one.
-        if r.data_size_bytes > 0 and r.total_success != r.total_keys:
+        if r.payload_bytes_per_submit > 0 and r.total_success != r.total_keys:
             section.add(
                 "throughput_success_mbps",
                 "Throughput successful (MB/s)",

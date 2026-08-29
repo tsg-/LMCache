@@ -29,6 +29,8 @@ does not mean.
 from __future__ import annotations
 
 # Standard
+from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any, Callable
 import time
 
@@ -61,8 +63,8 @@ SlotObjProvider = Callable[[int], list[MemoryObj]]
 SubmitFn = Callable[[int, int], int]
 # Drains whatever has completed out of the pending task-id set.
 HarvestFn = Callable[[set[int]], dict[int, Any]]
-# Maps one harvested completion payload to a success key count.
-SuccessFn = Callable[[Any], int]
+# Maps one harvested completion payload to what it actually moved.
+SuccessFn = Callable[[Any], "SubmitSuccess"]
 
 # Receives a result as soon as it exists, BEFORE the runner starts
 # mutating it. Lets a caller observe progress live -- the metrics
@@ -86,6 +88,21 @@ _LOAD_TIMEOUT_SEC = 120.0
 _MIXED_WRITE_VERIFY_SAMPLES = 3
 
 
+@dataclass(frozen=True)
+class SubmitSuccess:
+    """What one completed submit actually moved.
+
+    Objects and bytes are reported together because a heterogeneous submit
+    cannot derive one from the other: three of six objects succeeding says
+    nothing about the byte share when the six differ in size. Returning a
+    single value and multiplying by an average page size is exactly the
+    error this type exists to prevent.
+    """
+
+    objects: int
+    payload_bytes: int
+
+
 def _bitmap_count(bitmap: Bitmap | None) -> int:
     """Count how many bits are set in *bitmap*. Returns 0 when None."""
     if bitmap is None:
@@ -93,9 +110,52 @@ def _bitmap_count(bitmap: Bitmap | None) -> int:
     return bitmap.popcount()
 
 
-def _store_success_keys(res: L2StoreResult, num_keys: int) -> int:
-    """Number of keys a store submit landed: all of them, or none."""
-    return num_keys if res.is_successful() else 0
+def _bitmap_success(
+    bitmap: Bitmap | None, object_sizes: Sequence[int]
+) -> SubmitSuccess:
+    """Map a load or lookup bitmap to the objects and bytes it covers.
+
+    The set bits index *object_sizes* positionally, matching the order the
+    keys were submitted in, so a partial hit is billed at the sizes of the
+    objects that actually landed.
+    """
+    if bitmap is None:
+        return SubmitSuccess(objects=0, payload_bytes=0)
+    indices = bitmap.get_indices_list()
+    return SubmitSuccess(
+        objects=len(indices),
+        payload_bytes=sum(object_sizes[index] for index in indices),
+    )
+
+
+def _store_success(res: L2StoreResult, object_sizes: Sequence[int]) -> SubmitSuccess:
+    """Map a store completion to its objects and bytes: all, or none."""
+    if not res.is_successful():
+        return SubmitSuccess(objects=0, payload_bytes=0)
+    return SubmitSuccess(objects=len(object_sizes), payload_bytes=sum(object_sizes))
+
+
+def _resolve_object_sizes(
+    object_sizes: Sequence[int], num_keys: int, data_size: int
+) -> tuple[int, ...]:
+    """Return the submit's per-object sizes, filling in a uniform default.
+
+    Every runner accepts an explicit size vector and falls back to the
+    uniform one implied by ``num_keys`` and ``data_size``. Resolving it once
+    at entry is what lets the harvest paths be size-agnostic instead of
+    branching on whether the run is heterogeneous.
+
+    Raises:
+        ValueError: If a supplied vector does not have ``num_keys`` entries.
+    """
+    if not object_sizes:
+        return (data_size,) * num_keys
+    if len(object_sizes) != num_keys:
+        raise ValueError(
+            f"object_sizes has {len(object_sizes)} entries but the submit "
+            f"carries {num_keys} keys"
+        )
+    return tuple(object_sizes)
 
 
 def _record_round_latencies(
@@ -398,7 +458,8 @@ def run_sustained_window(
             positive.
         timeout: Per-wait timeout in seconds. A wait that expires ends
             the run and sets ``result.timed_out``.
-        success_for: Maps a harvested payload to a success key count.
+        success_for: Maps a harvested payload to the objects and bytes it
+            moved.
         log: Progress logger.
         first_submit_index: Starting submit index, so a warmup pass can
             hand its end state to the measured pass.
@@ -466,7 +527,8 @@ def run_sustained_window(
         for task_id, payload in completed.items():
             submitted_at, slot = pending.pop(task_id)
             result.record_latency(now - submitted_at)
-            result.record_success(success_for(payload))
+            success = success_for(payload)
+            result.record_success(success.objects, success.payload_bytes)
             result.completed_submits += 1
             free_slots.append(slot)
 
@@ -500,6 +562,7 @@ def run_sustained_mixed_window(
     timeout: float,
     log: LogFn,
     verify_write_samples: bool = True,
+    object_sizes: Sequence[int] = (),
 ) -> bool:
     """Run a sustained read/write window under one global in-flight limit.
 
@@ -522,6 +585,9 @@ def run_sustained_mixed_window(
         log: Progress logger.
         verify_write_samples: Whether to read back a bounded sample of
             mixed-window stores before accepting the result.
+        object_sizes: Per-object payload sizes in submit order, shared by
+            both directions because a mixed run reads and writes the same
+            geometry. Defaults to the uniform sizes implied by the results.
 
     Returns:
         ``True`` when every completion was successful and the final successful
@@ -545,6 +611,9 @@ def run_sustained_mixed_window(
         raise ValueError("store_result requires BenchMode.SUSTAINED")
     if read_count <= 0 or write_count <= 0:
         raise ValueError("read_write_ratio values must be positive")
+    object_sizes = _resolve_object_sizes(
+        object_sizes, load_result.num_keys, load_result.data_size_bytes
+    )
 
     # Start every cycle with a store. This makes the bootstrap explicit and
     # still produces exactly READ:WRITE operations over every full cycle.
@@ -638,23 +707,17 @@ def run_sustained_mixed_window(
             free_slots.append(slot)
 
             if operation == "Load":
-                loaded = _bitmap_count(payload)
-                result.record_success(loaded)
-                if loaded != result.num_keys:
-                    log(
-                        f"  [Load] FAILED: loaded {loaded}/{result.num_keys} "
-                        "keys in a mixed window"
-                    )
-                    rejected = True
+                success = _bitmap_success(payload, object_sizes)
             else:
-                stored = _store_success_keys(payload, result.num_keys)
-                result.record_success(stored)
-                if stored != result.num_keys:
-                    log(
-                        f"  [Store] FAILED: stored {stored}/{result.num_keys} "
-                        "keys in a mixed window"
-                    )
-                    rejected = True
+                success = _store_success(payload, object_sizes)
+            result.record_success(success.objects, success.payload_bytes)
+            if success.objects != result.num_keys:
+                log(
+                    f"  [{operation}] FAILED: "
+                    f"{success.objects}/{result.num_keys} keys in a mixed "
+                    "window"
+                )
+                rejected = True
 
         if not rejected and now < deadline:
             while free_slots and time.perf_counter() < deadline:
@@ -758,6 +821,7 @@ def bench_mixed_sustained(
     log: LogFn,
     on_result: ResultHook = _discard_result_hook,
     verify_write_samples: bool = True,
+    object_sizes: Sequence[int] = (),
 ) -> tuple[BenchResult, BenchResult, bool]:
     """Benchmark a sustained read/write payload mix.
 
@@ -781,16 +845,21 @@ def bench_mixed_sustained(
         on_result: Receives each measured direction before submissions begin.
         verify_write_samples: Whether to read back a bounded sample of
             successful stores before accepting the result.
+        object_sizes: Per-object payload sizes in submit order. Empty means
+            the uniform ``num_keys`` x ``data_size`` geometry.
 
     Returns:
         ``(load_result, store_result, accepted)``. ``accepted`` is false on
         a failed store, missed load key, timeout, or achieved-ratio mismatch.
     """
+    sizes = _resolve_object_sizes(object_sizes, num_keys, data_size)
+    payload_bytes = sum(sizes)
     load_result = BenchResult(
         operation="Load",
         in_flight=in_flight,
         num_keys=num_keys,
         data_size_bytes=data_size,
+        payload_bytes_per_submit=payload_bytes,
         mode=BenchMode.SUSTAINED,
     )
     store_result = BenchResult(
@@ -798,6 +867,7 @@ def bench_mixed_sustained(
         in_flight=in_flight,
         num_keys=num_keys,
         data_size_bytes=data_size,
+        payload_bytes_per_submit=payload_bytes,
         mode=BenchMode.SUSTAINED,
     )
     on_result(load_result)
@@ -822,6 +892,7 @@ def bench_mixed_sustained(
         timeout=max(_LOAD_TIMEOUT_SEC, _STORE_TIMEOUT_SEC),
         log=log,
         verify_write_samples=verify_write_samples,
+        object_sizes=sizes,
     )
     _log_sustained_summary(load_result, log)
     _log_sustained_summary(store_result, log)
@@ -855,6 +926,7 @@ def bench_store(
     objs_for_round: ObjProvider,
     log: LogFn,
     on_result: ResultHook = _discard_result_hook,
+    object_sizes: Sequence[int] = (),
 ) -> BenchResult:
     """Benchmark ``submit_store_task`` in rounds mode.
 
@@ -863,13 +935,17 @@ def bench_store(
     every submit of that round has completed.
 
     ``on_result`` receives the result before the first round runs, so a
-    caller can observe it filling in.
+    caller can observe it filling in. ``object_sizes`` gives the per-object
+    payload sizes in submit order; empty means the uniform ``num_keys`` x
+    ``data_size`` geometry.
     """
+    sizes = _resolve_object_sizes(object_sizes, num_keys, data_size)
     result = BenchResult(
         operation="Store",
         in_flight=in_flight,
         num_keys=num_keys,
         data_size_bytes=data_size,
+        payload_bytes_per_submit=sum(sizes),
     )
     on_result(result)
 
@@ -902,11 +978,12 @@ def bench_store(
         result.round_latency_counts.append(appended)
         result.completed_submits += appended
 
-        success_keys = sum(
-            len(keys_batches[i])
-            for i, tid in enumerate(task_ids)
-            if completed.get(tid, L2StoreResult(False, 0)).is_successful()
-        )
+        successes = [
+            _store_success(completed.get(tid, L2StoreResult(False, 0)), sizes)
+            for tid in task_ids
+        ]
+        success_keys = sum(success.objects for success in successes)
+        success_bytes = sum(success.payload_bytes for success in successes)
 
         if timed_out:
             log(
@@ -915,12 +992,12 @@ def bench_store(
                 f"success_keys={success_keys}/{in_flight * num_keys})"
             )
             result.timed_out_rounds += 1
-            result.record_success(success_keys)
+            result.record_success(success_keys, success_bytes)
             continue
 
         result.round_starts.append(t0)
         result.round_durations.append(elapsed)
-        result.record_success(success_keys)
+        result.record_success(success_keys, success_bytes)
         log(
             f"  [Store] Round {r + 1}: {elapsed * 1000:.2f} ms, "
             f"success_keys={success_keys}/{in_flight * num_keys}"
@@ -941,6 +1018,7 @@ def bench_store_sustained(
     log: LogFn,
     on_result: ResultHook = _discard_result_hook,
     on_warmup_result: ResultHook = _discard_result_hook,
+    object_sizes: Sequence[int] = (),
 ) -> BenchResult:
     """Benchmark ``submit_store_task`` in sustained-window mode.
 
@@ -961,10 +1039,14 @@ def bench_store_sustained(
             before its window opens. Separate from ``on_result`` so an
             observer can keep the two apart -- the warmup does real I/O
             that external counters will show.
+        object_sizes: Per-object payload sizes in submit order. Empty means
+            the uniform ``num_keys`` x ``data_size`` geometry.
 
     Returns:
         A :class:`BenchResult` in :attr:`BenchMode.SUSTAINED`.
     """
+    sizes = _resolve_object_sizes(object_sizes, num_keys, data_size)
+    payload_bytes = sum(sizes)
 
     def _submit(submit_index: int, slot: int) -> int:
         return adapter.submit_store_task(
@@ -974,8 +1056,8 @@ def bench_store_sustained(
     def _harvest(_pending: set[int]) -> dict[int, L2StoreResult]:
         return adapter.pop_completed_store_tasks()
 
-    def _success(payload: L2StoreResult) -> int:
-        return _store_success_keys(payload, num_keys)
+    def _success(payload: L2StoreResult) -> SubmitSuccess:
+        return _store_success(payload, sizes)
 
     next_index = 0
     if warmup_sec > 0:
@@ -985,6 +1067,7 @@ def bench_store_sustained(
             in_flight=in_flight,
             num_keys=num_keys,
             data_size_bytes=data_size,
+            payload_bytes_per_submit=payload_bytes,
             mode=BenchMode.SUSTAINED,
         )
         on_warmup_result(warmup)
@@ -1005,6 +1088,7 @@ def bench_store_sustained(
         in_flight=in_flight,
         num_keys=num_keys,
         data_size_bytes=data_size,
+        payload_bytes_per_submit=payload_bytes,
         mode=BenchMode.SUSTAINED,
     )
     # A distinct result from the warmup, published under its own phase
@@ -1127,17 +1211,22 @@ def bench_load(
     objs_for_round: ObjProvider,
     log: LogFn,
     on_result: ResultHook = _discard_result_hook,
+    object_sizes: Sequence[int] = (),
 ) -> BenchResult:
     """Benchmark ``submit_load_task`` in rounds mode.
 
     ``on_result`` receives the result before the first round runs, so a
-    caller can observe it filling in.
+    caller can observe it filling in. ``object_sizes`` gives the per-object
+    payload sizes in submit order; empty means the uniform ``num_keys`` x
+    ``data_size`` geometry.
     """
+    sizes = _resolve_object_sizes(object_sizes, num_keys, data_size)
     result = BenchResult(
         operation="Load",
         in_flight=in_flight,
         num_keys=num_keys,
         data_size_bytes=data_size,
+        payload_bytes_per_submit=sum(sizes),
     )
     on_result(result)
 
@@ -1170,7 +1259,9 @@ def bench_load(
         result.round_latency_counts.append(appended)
         result.completed_submits += appended
 
-        total_loaded = sum(_bitmap_count(results.get(tid)) for tid in task_ids)
+        successes = [_bitmap_success(results.get(tid), sizes) for tid in task_ids]
+        total_loaded = sum(success.objects for success in successes)
+        loaded_bytes = sum(success.payload_bytes for success in successes)
 
         if timed_out:
             log(
@@ -1179,12 +1270,12 @@ def bench_load(
                 f"loaded={total_loaded}/{in_flight * num_keys})"
             )
             result.timed_out_rounds += 1
-            result.record_success(total_loaded)
+            result.record_success(total_loaded, loaded_bytes)
             continue
 
         result.round_starts.append(t0)
         result.round_durations.append(elapsed)
-        result.record_success(total_loaded)
+        result.record_success(total_loaded, loaded_bytes)
         log(
             f"  [Load] Round {r + 1}: {elapsed * 1000:.2f} ms, "
             f"loaded={total_loaded}/{in_flight * num_keys}"
@@ -1205,6 +1296,7 @@ def bench_load_sustained(
     log: LogFn,
     on_result: ResultHook = _discard_result_hook,
     on_warmup_result: ResultHook = _discard_result_hook,
+    object_sizes: Sequence[int] = (),
 ) -> BenchResult:
     """Benchmark ``submit_load_task`` in sustained-window mode.
 
@@ -1231,10 +1323,14 @@ def bench_load_sustained(
             before its window opens. Separate from ``on_result`` so an
             observer can keep the two apart -- the warmup does real I/O
             that external counters will show.
+        object_sizes: Per-object payload sizes in submit order. Empty means
+            the uniform ``num_keys`` x ``data_size`` geometry.
 
     Returns:
         A :class:`BenchResult` in :attr:`BenchMode.SUSTAINED`.
     """
+    sizes = _resolve_object_sizes(object_sizes, num_keys, data_size)
+    payload_bytes = sum(sizes)
 
     def _submit(submit_index: int, slot: int) -> int:
         return adapter.submit_load_task(
@@ -1249,6 +1345,9 @@ def bench_load_sustained(
                 out[task_id] = bitmap
         return out
 
+    def _success(payload: Bitmap | None) -> SubmitSuccess:
+        return _bitmap_success(payload, sizes)
+
     next_index = 0
     if warmup_sec > 0:
         log(f"[Load] Sustained warmup for {warmup_sec:.1f}s (discarded)...")
@@ -1257,6 +1356,7 @@ def bench_load_sustained(
             in_flight=in_flight,
             num_keys=num_keys,
             data_size_bytes=data_size,
+            payload_bytes_per_submit=payload_bytes,
             mode=BenchMode.SUSTAINED,
         )
         on_warmup_result(warmup)
@@ -1267,7 +1367,7 @@ def bench_load_sustained(
             event_fd=adapter.get_load_event_fd(),
             duration_sec=warmup_sec,
             timeout=_LOAD_TIMEOUT_SEC,
-            success_for=_bitmap_count,
+            success_for=_success,
             log=log,
         )
         _require_drained_warmup("Load", outstanding)
@@ -1277,6 +1377,7 @@ def bench_load_sustained(
         in_flight=in_flight,
         num_keys=num_keys,
         data_size_bytes=data_size,
+        payload_bytes_per_submit=payload_bytes,
         mode=BenchMode.SUSTAINED,
     )
     # A distinct result from the warmup, published under its own phase
@@ -1291,7 +1392,7 @@ def bench_load_sustained(
         event_fd=adapter.get_load_event_fd(),
         duration_sec=duration_sec,
         timeout=_LOAD_TIMEOUT_SEC,
-        success_for=_bitmap_count,
+        success_for=_success,
         log=log,
         first_submit_index=next_index,
     )

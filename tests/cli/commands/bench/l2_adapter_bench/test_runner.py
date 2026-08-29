@@ -24,6 +24,7 @@ from lmcache.cli.commands.bench.l2_adapter_bench.result import (
 from lmcache.cli.commands.bench.l2_adapter_bench.data import make_object_keys
 from lmcache.cli.commands.bench.l2_adapter_bench.runner import (
     StoreFreshnessUnknownError,
+    SubmitSuccess,
     WarmupNotDrainedError,
     _record_round_latencies,
     bench_mixed_sustained,
@@ -122,6 +123,15 @@ def _sustained(
     )
 
 
+_NO_SUCCESS = SubmitSuccess(objects=0, payload_bytes=0)
+
+
+def _int_success(payload: Any) -> SubmitSuccess:
+    """Read an int payload as a key count at the fake 1 MiB object size."""
+    keys = int(payload)
+    return SubmitSuccess(objects=keys, payload_bytes=keys * _MB)
+
+
 def _run(
     adapter: _FakeAdapter,
     result: BenchResult,
@@ -140,7 +150,7 @@ def _run(
         event_fd=adapter.event_fd,
         duration_sec=duration_sec,
         timeout=10.0,
-        success_for=lambda payload: int(payload),
+        success_for=_int_success,
         log=lambda _msg: None,
     )
 
@@ -195,7 +205,7 @@ def test_rejects_non_positive_duration() -> None:
             event_fd=0,
             duration_sec=0.0,
             timeout=1.0,
-            success_for=lambda _p: 0,
+            success_for=lambda _p: _NO_SUCCESS,
             log=lambda _m: None,
         )
 
@@ -211,7 +221,7 @@ def test_rejects_rounds_mode_result() -> None:
             event_fd=0,
             duration_sec=1.0,
             timeout=1.0,
-            success_for=lambda _p: 0,
+            success_for=lambda _p: _NO_SUCCESS,
             log=lambda _m: None,
         )
 
@@ -227,7 +237,7 @@ def test_rejects_non_positive_in_flight() -> None:
             event_fd=0,
             duration_sec=1.0,
             timeout=1.0,
-            success_for=lambda _p: 0,
+            success_for=lambda _p: _NO_SUCCESS,
             log=lambda _m: None,
         )
 
@@ -316,7 +326,7 @@ def test_submit_index_advances_and_is_returned() -> None:
         event_fd=adapter.event_fd,
         duration_sec=0.15,
         timeout=10.0,
-        success_for=lambda payload: int(payload),
+        success_for=_int_success,
         log=lambda _msg: None,
         first_submit_index=100,
     )
@@ -363,7 +373,7 @@ def test_drain_tail_starts_at_the_refill_deadline(
         event_fd=0,
         duration_sec=1.0,
         timeout=1.0,
-        success_for=int,
+        success_for=_int_success,
         log=lambda _message: None,
     )
 
@@ -464,7 +474,7 @@ def test_timeout_sets_the_flag_and_stops() -> None:
         event_fd=adapter.event_fd,
         duration_sec=1.0,
         timeout=0.05,
-        success_for=lambda _p: 0,
+        success_for=lambda _p: _NO_SUCCESS,
         log=lambda _m: None,
     )
     adapter.close()
@@ -511,7 +521,7 @@ def test_foreign_completions_are_ignored() -> None:
         event_fd=adapter.event_fd,
         duration_sec=0.2,
         timeout=10.0,
-        success_for=lambda payload: int(payload),
+        success_for=_int_success,
         log=lambda _msg: None,
     )
     adapter.join()
@@ -544,6 +554,9 @@ class _FakeBitmap:
 
     def popcount(self) -> int:
         return self._success_keys
+
+    def get_indices_list(self) -> list[int]:
+        return list(range(self._success_keys))
 
 
 class _MixedFakeAdapter:

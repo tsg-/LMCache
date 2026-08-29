@@ -386,3 +386,132 @@ def test_sustained_has_no_round_derived_stats() -> None:
     assert result.avg_throughput_mbps == 0.0
     assert result.avg_latency_per_key_ms == 0.0
     assert result.p50_duration == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Heterogeneous payload accounting
+# ---------------------------------------------------------------------------
+
+
+def test_uniform_payload_per_submit_is_derived() -> None:
+    """A uniform result needs no explicit payload size."""
+    result = _rounds_result([1.0, 1.0])
+
+    assert result.payload_bytes_per_submit == 4 * _MB
+    assert result.total_data_bytes_per_round == 8 * _MB
+    assert result.total_data_bytes == 16 * _MB
+    assert result.total_success_bytes == 16 * _MB
+
+
+def test_heterogeneous_requested_bytes_use_the_declared_payload() -> None:
+    """Requested bytes come from the submit payload, not keys x page."""
+    result = BenchResult(
+        operation="Store",
+        in_flight=2,
+        num_keys=3,
+        # A heterogeneous submit has no single object size, so the
+        # uniform field is zero and the payload carries the geometry.
+        data_size_bytes=0,
+        payload_bytes_per_submit=7 * _MB,
+        round_durations=[1.0, 1.0],
+        round_starts=[0.0, 1.0],
+    )
+
+    assert result.total_data_bytes_per_round == 14 * _MB
+    assert result.total_data_bytes == 28 * _MB
+    assert result.aggregate_throughput_mbps == pytest.approx(14.0)
+
+
+def test_partial_load_success_counts_only_the_hit_objects() -> None:
+    """A load that hits two of three heterogeneous objects bills two."""
+    result = BenchResult(
+        operation="Load",
+        in_flight=1,
+        num_keys=3,
+        data_size_bytes=0,
+        payload_bytes_per_submit=7 * _MB,
+        round_durations=[2.0],
+        round_starts=[0.0],
+    )
+    result.record_success(2, 5 * _MB)
+
+    assert result.total_success == 2
+    assert result.total_success_bytes == 5 * _MB
+    assert result.success_byte_counts == [5 * _MB]
+    assert result.success_throughput_mbps == pytest.approx(2.5)
+    # The requested figure is unchanged by the miss, which is what makes
+    # the gap between the two visible.
+    assert result.aggregate_throughput_mbps == pytest.approx(3.5)
+
+
+def test_record_success_without_bytes_stays_uniform_compatible() -> None:
+    """Omitting the byte count bills keys x page, as before object groups."""
+    result = BenchResult(
+        operation="Store",
+        in_flight=1,
+        num_keys=4,
+        data_size_bytes=_MB,
+        round_durations=[1.0],
+        round_starts=[0.0],
+    )
+    result.record_success(4)
+
+    assert result.total_success_bytes == 4 * _MB
+    assert result.success_byte_counts == [4 * _MB]
+
+
+def test_sustained_success_bytes_stay_exact_without_history() -> None:
+    """The running byte total survives the sustained list clear."""
+    result = BenchResult(
+        operation="Load",
+        in_flight=4,
+        num_keys=2,
+        data_size_bytes=0,
+        payload_bytes_per_submit=3 * _MB,
+        mode=BenchMode.SUSTAINED,
+        sustained_window_sec=2.0,
+    )
+    for _ in range(1000):
+        result.record_success(2, 3 * _MB)
+        result.completed_submits += 1
+
+    assert result.success_byte_counts == []
+    assert result.total_success_bytes == 3000 * _MB
+    assert result.total_data_bytes == 3000 * _MB
+
+
+def test_seeded_success_bytes_agree_with_a_sliced_history() -> None:
+    """Stripping warmup by slicing both lists keeps the totals honest."""
+    result = BenchResult(
+        operation="Load",
+        in_flight=1,
+        num_keys=2,
+        data_size_bytes=0,
+        payload_bytes_per_submit=4 * _MB,
+        round_durations=[1.0, 1.0],
+        round_starts=[1.0, 2.0],
+        success_counts=[2, 1],
+        success_byte_counts=[4 * _MB, 1 * _MB],
+    )
+
+    assert result.total_success == 3
+    assert result.total_success_bytes == 5 * _MB
+
+
+def test_lookup_reports_no_throughput() -> None:
+    """A lookup moves no payload, so every byte rate stays zero."""
+    result = BenchResult(
+        operation="Lookup",
+        in_flight=2,
+        num_keys=4,
+        data_size_bytes=0,
+        round_durations=[1.0],
+        round_starts=[0.0],
+    )
+    result.record_success(4)
+
+    assert result.payload_bytes_per_submit == 0
+    assert result.per_round_throughput_mbps == []
+    assert result.aggregate_throughput_mbps == 0.0
+    assert result.success_throughput_mbps == 0.0
+    assert result.wall_clock_throughput_mbps == 0.0
