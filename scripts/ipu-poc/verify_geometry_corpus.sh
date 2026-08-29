@@ -23,12 +23,13 @@ set -euo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd)
 TEST_FILE=tests/scripts/test_model_geometry_scripts.py
-# These two profiles both use a 262144 B page, and the smaller one's key range
-# is a subset of the larger one's, so without SHA scoping a Mixtral load of a
-# Llama-405B corpus reports 56 of 56 hits over another model's bytes. A pair
-# with differing page sizes would miss on length alone and prove nothing.
-STORED=$SCRIPT_DIR/models/llama3_405b_fp8.yaml
-MISMATCHED=$SCRIPT_DIR/models/mixtral_8x22b_fp8.yaml
+# The mismatched profile is a byte-different copy of the stored one, so both
+# resolve to the same 56 objects at a 262144 B page and cover the same key
+# range. Without SHA scoping the second load reports 56 of 56 hits over the
+# first profile's bytes. A pair with differing page sizes or burst depths would
+# miss on length alone and prove nothing.
+STORED=$SCRIPT_DIR/models/mixtral_8x22b_fp8.yaml
+MISMATCHED=$SCRIPT_DIR/models/fixtures/mixtral_8x22b_pagetest_256k.yaml
 
 if [ -z "${PYTHON:-}" ]; then
   declare -a candidates=()

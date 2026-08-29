@@ -85,6 +85,7 @@ gbps = (load.get("throughput_aggregate_mbps") or 0.0) * MIB_S_TO_GBPS
 succ_gbps = (load.get("throughput_success_mbps") or 0.0) * MIB_S_TO_GBPS
 run_mode = (m.get("config") or {}).get("mode")
 cfg_keys = (m.get("config") or {}).get("num_keys")
+cfg_page_kb = (m.get("config") or {}).get("data_size_kb")
 
 app_bytes = succ * int(kb) * 1024
 expect_ops = app_bytes / seg
@@ -171,6 +172,16 @@ if cfg_keys is None:
     fail.append("config.num_keys absent; cannot confirm the profile drove this run")
 elif int(cfg_keys) != ops_per_submit:
     fail.append(f"num_keys {cfg_keys} != profile objects/submit {ops_per_submit}")
+# app_bytes above is succ x one page size, which is only meaningful when every
+# object has that size. An object-group run emits no data_size_kb, so the page
+# this gate was handed describes nothing the run submitted.
+if cfg_page_kb is None:
+    fail.append(
+        "config.data_size_kb absent; this gate derives application bytes from "
+        "one page size and cannot describe an object-group run"
+    )
+elif int(cfg_page_kb) != int(kb):
+    fail.append(f"data_size_kb {cfg_page_kb} != page {kb} KiB passed to this gate")
 
 print()
 if fail:

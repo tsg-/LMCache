@@ -9,9 +9,10 @@ would still yield completion bitmaps and RDMA counter agreement -- an ACCEPTED
 cell over bad data. This tool re-derives what the store pass wrote and compares
 it byte-for-byte.
 
-The fill is deterministic and documented in ``data.py``: ``make_memory_objects``
-fills object *i* of a submit batch with the single byte ``(i + fill_offset) &
-0xFF``, and the store path uses ``fill_offset=0``. Key indices within a submit
+The fill is deterministic and documented in ``data.py``:
+``make_memory_objects_from_sizes`` fills object *i* of a submit batch with the
+single byte ``(i + fill_offset) & 0xFF``, and the store path uses
+``fill_offset=0``. Key indices within a submit
 are contiguous starting at a multiple of ``objects_per_submit``, so the object
 with key index ``idx`` holds ``idx % objects_per_submit`` repeated for its whole
 page.
@@ -45,8 +46,9 @@ from pathlib import Path
 
 # First Party
 from lmcache.cli.commands.bench.l2_adapter_bench.geometry import (
+    PROFILE_MODE_OBJECT_GROUP,
     GeometryProfileError,
-    resolve_geometry_profile,
+    resolve_submit_geometry,
 )
 
 
@@ -141,9 +143,23 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        geometry = resolve_geometry_profile(args.profile)
+        geometry = resolve_submit_geometry(args.profile)
     except GeometryProfileError as e:
         print(f"ABORT: {e}")
+        return 2
+    # An object-group corpus stores several objects per chunk hash, so
+    # _object_path's one-file-per-key-index lookup does not address it, and
+    # the objects need not share a size. Refusing is the honest answer:
+    # checking the wrong file, or the right file against the wrong length,
+    # would report a verification that never happened.
+    if geometry.profile_mode == PROFILE_MODE_OBJECT_GROUP:
+        print(
+            f"ABORT: {args.profile} is an object-group profile. This tool "
+            f"verifies uniform page-burst corpora only -- it addresses one "
+            f"object per key index, while an object-group store writes one "
+            f"per (chunk, object group, kv rank). Use a combined store+load "
+            f"run with --no-skip-verify to byte-check that geometry."
+        )
         return 2
     if args.submits <= 0:
         print(f"ABORT: --submits must be positive, got {args.submits}")

@@ -80,6 +80,24 @@ def main() -> int:
         print(f"ABORT: calibration requires rounds mode, got {mode!r}")
         return 2
 
+    # An object-group run reports no single per-key size. Deriving bytes per
+    # op from the caller's page_kb anyway would scope the constant to a
+    # geometry the run never had, so refuse instead of trusting the argument.
+    cfg_page_kb = config.get("data_size_kb")
+    if cfg_page_kb is None:
+        print(
+            f"ABORT: {js} reports no data_size_kb, so its objects are not a "
+            f"uniform page. Calibration derives application bytes from one "
+            f"page size and cannot describe an object-group run."
+        )
+        return 2
+    if int(cfg_page_kb) != page_kb:
+        print(
+            f"ABORT: run's data_size_kb {cfg_page_kb} != declared page_kb "
+            f"{page_kb}; the constant would be scoped to the wrong geometry"
+        )
+        return 2
+
     cfg_keys = config.get("num_keys")
     if cfg_keys is not None and int(cfg_keys) != ops_per_submit:
         print(

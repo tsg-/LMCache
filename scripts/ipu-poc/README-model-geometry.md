@@ -47,25 +47,69 @@ PYTHON=.venv/bin/python BASE_PATH=/mnt/lmcache-kvcache \
   bash scripts/ipu-poc/verify_geometry_corpus.sh
 ```
 
-It runs `tests/scripts/test_model_geometry_scripts.py`, stores a Llama-405B
+It runs `tests/scripts/test_model_geometry_scripts.py`, stores a Mixtral 8x22B
 corpus, then shows that the storing profile reads it back while a mismatched
 profile gets zero hits and a readback failure. It ends in `== PASS ==` or exits
 nonzero. Omit `BASE_PATH` to use a temporary directory instead of the storage
 under test.
 
-The mismatch uses Mixtral deliberately: it shares Llama-405B's 256 KiB page and
-its key range is a subset, so an unscoped prefix reports 56 of 56 hits over
-another model's bytes. A pair with differing page sizes misses on length alone
-and would pass even if the scoping regressed.
+The mismatched profile is `models/fixtures/mixtral_8x22b_pagetest_256k.yaml`, a
+byte-different copy of the storing profile. Both resolve to 56 objects at a
+256 KiB page and cover the same key range, so an unscoped prefix reports 56 of
+56 hits over the first corpus's bytes and only the SHA scoping can produce the
+zero. A pair differing in page size or burst depth misses on length alone and
+would pass even if the scoping regressed. The fixture sits outside `models/` so
+it is never offered as a model to benchmark.
 
 ## Profiles
 
-| Profile | Model | Objects/submit | Page | Submit payload |
-|---|---|---:|---:|---:|
-| `deepseek_v3_fp8.yaml` | DeepSeek-V3 FP8 | 61 | 144 KiB | 8.58 MiB |
-| `mixtral_8x22b_fp8.yaml` | Mixtral 8x22B FP8 | 56 | 256 KiB | 14 MiB |
-| `llama3_70b_fp8.yaml` | Llama-3.1 70B FP8 | 80 | 512 KiB | 40 MiB |
-| `llama3_405b_fp8.yaml` | Llama-3.1 405B FP8 | 126 | 256 KiB | 31.5 MiB |
+Profiles come in two forms. A **page burst** describes one uniform page
+repeated once per layer. An **object group** profile describes what a
+production submit actually carries: one object per `(chunk, object group, kv
+rank)`, each packing one or more components whose sizes need not agree.
+`show` prints which form a file uses on its `geometry:` line.
+
+| Profile | Model | Form | Objects/submit | Object | Submit payload |
+|---|---|---|---:|---:|---:|
+| `mixtral_8x22b_fp8_64k.yaml` | Mixtral 8x22B FP8, 32-token chunk | page burst | 56 | 64 KiB | 3.5 MiB |
+| `deepseek_v3_fp8.yaml` | DeepSeek-V3 FP8 | page burst | 61 | 144 KiB | 8.58 MiB |
+| `mixtral_8x22b_fp8.yaml` | Mixtral 8x22B FP8 | page burst | 56 | 256 KiB | 14 MiB |
+| `minimax_m3_bf16_tp8.yaml` | MiniMax-M3 bf16, TP=8 | object group | 8 | 9.34 MiB | 74.7 MiB |
+
+The two Mixtral profiles are the same model at different chunk sizes, which is
+the only way to reach a 64 KiB page: page size is fixed by
+`elems_per_token * dtype_bytes * tokens_per_chunk`, and DeepSeek's MLA caches
+576 B/token, which has no integer chunk size at 64 KiB. They occupy separate key
+namespaces, so one prefix holds both corpora.
+
+MiniMax-M3 is the reason the object-group form exists. Its 60-layer main K/V
+and its 57-layer key-only DSA indexer are both full attention, so LMCache
+packs them into ONE object per `(chunk, kv rank)` -- a shape no uniform page
+size can express. Two consequences for an operator:
+
+- The indexer dtype is **unconfirmed**. The profile sizes it at the repo's fp8
+  DSA layout (132 B/token). If M3 registers it as bf16 the packed object is
+  11,599,872 B instead. Confirm against a captured vLLM registration dump
+  before quoting an M3 number externally. The profile header carries the
+  citations.
+- Under that fp8 assumption the packed object is 9,790,464 B, which is **not**
+  4096-aligned, because the 132 B/token indexer breaks the alignment the main
+  K/V would have had alone. `bench l2` validates alignment per object, so an
+  O_DIRECT run is rejected; use a buffered adapter and `L1_ALIGN_BYTES=1`. The
+  rejection follows from the dtype above rather than from M3 itself — the bf16
+  alternative is 4096-aligned (11,599,872 = 4096 x 2832), so confirming bf16
+  would put O_DIRECT back on the table.
+
+The byte-accounting consumers -- `geom_readback.py`, `geom_calib.py`,
+`geom_report.py`, and `geom_multi_report.py` -- derive application bytes from a
+single page size, so they refuse an object-group run rather than picking one of
+its object sizes. Byte-verify that geometry with a combined store+load run and
+`--no-skip-verify` instead.
+
+`models/legacy/` holds Llama-3.1 70B and 405B profiles, kept for reference and
+excluded from the sweep. `models/fixtures/` holds the corpus-identity gate
+fixture. Neither directory is picked up by `profiles` or by a `models/*.yaml`
+glob.
 
 Confirm a profile's resolved geometry before any run:
 
@@ -128,8 +172,13 @@ diverge. Its presence means the run missed keys and
 ## Full Model Sweep
 
 One `PREFIX` covers every profile: the namespace is scoped by profile SHA, so
-four models under one prefix occupy four distinct key spaces and cannot read
-each other's corpora. Store each model, then read it back over a fixed window.
+the profiles under one prefix occupy distinct key spaces and cannot read each
+other's corpora. Store each, then read it back over a fixed window.
+
+The loop below uses the default O_DIRECT `fs_native` adapter, which
+`minimax_m3_bf16_tp8.yaml` cannot satisfy -- its object size is not
+4096-aligned. Skip it here and run it separately against a buffered adapter,
+shown under "One Model at a Time".
 
 ```bash
 export BASE_PATH=/mnt/lmcache-kvcache
@@ -139,6 +188,7 @@ export IN_FLIGHT=8 NUM_WORKERS=16
 mkdir -p results
 
 for profile in scripts/ipu-poc/models/*.yaml; do
+  case $profile in *minimax_m3*) continue ;; esac
   model=$(basename "$profile" .yaml)
   echo "===== $model ====="
   ROUNDS=2 bash scripts/ipu-poc/run_model_geometry.sh store "$profile"
@@ -147,15 +197,15 @@ for profile in scripts/ipu-poc/models/*.yaml; do
 done
 ```
 
-At `ROUNDS=2 IN_FLIGHT=8` the four corpora need about 1.5 GiB in total, and
-that scales linearly with both. Per model:
+At `ROUNDS=2 IN_FLIGHT=8` the three swept corpora need about 420 MiB in total,
+and that scales linearly with both. Per profile:
 
 | Profile | Keys stored | Corpus |
 |---|---:|---:|
+| `mixtral_8x22b_fp8_64k.yaml` | 896 | 56 MiB |
 | `deepseek_v3_fp8.yaml` | 976 | 137 MiB |
 | `mixtral_8x22b_fp8.yaml` | 896 | 224 MiB |
-| `llama3_70b_fp8.yaml` | 1280 | 640 MiB |
-| `llama3_405b_fp8.yaml` | 2016 | 504 MiB |
+| `minimax_m3_bf16_tp8.yaml` | 128 | 1195 MiB |
 
 Size the corpus past host DRAM or drop caches between models, or the load
 measures the page cache. Check the hit rate before reading any rate:
@@ -167,7 +217,7 @@ import json, sys
 for path in sys.argv[1:]:
     m = json.load(open(path))["metrics"]
     op = m["op_0"]
-    print(f"{m['geometry']['model_name']:42s} "
+    print(f"{m['geometry']['model_name']:52s} "
           f"{op['total_success']}/{op['total_keys']} keys  "
           f"{op['throughput_aggregate_mbps']:.0f} MB/s")
 EOF
@@ -175,7 +225,7 @@ EOF
 
 ### One Model at a Time
 
-To run a single model, or to re-run one after a change, keep the sweep's
+To run a single profile, or to re-run one after a change, keep the sweep's
 `PREFIX` and name the profile. Each pair is a store followed by a read of the
 same corpus:
 
@@ -185,6 +235,10 @@ export PREFIX=sweep-1723651200 IN_FLIGHT=8 NUM_WORKERS=16
 R=scripts/ipu-poc/run_model_geometry.sh
 M=scripts/ipu-poc/models
 
+# Mixtral 8x22B FP8, 32-token chunk — 56 x 64 KiB
+ROUNDS=2 bash $R store $M/mixtral_8x22b_fp8_64k.yaml
+DURATION_SEC=60 bash $R sustained-load $M/mixtral_8x22b_fp8_64k.yaml
+
 # DeepSeek-V3 FP8 — 61 x 144 KiB
 ROUNDS=2 bash $R store $M/deepseek_v3_fp8.yaml
 DURATION_SEC=60 bash $R sustained-load $M/deepseek_v3_fp8.yaml
@@ -192,17 +246,26 @@ DURATION_SEC=60 bash $R sustained-load $M/deepseek_v3_fp8.yaml
 # Mixtral 8x22B FP8 — 56 x 256 KiB
 ROUNDS=2 bash $R store $M/mixtral_8x22b_fp8.yaml
 DURATION_SEC=60 bash $R sustained-load $M/mixtral_8x22b_fp8.yaml
-
-# Llama-3.1 70B FP8 — 80 x 512 KiB
-ROUNDS=2 bash $R store $M/llama3_70b_fp8.yaml
-DURATION_SEC=60 bash $R sustained-load $M/llama3_70b_fp8.yaml
-
-# Llama-3.1 405B FP8 — 126 x 256 KiB
-ROUNDS=2 bash $R store $M/llama3_405b_fp8.yaml
-DURATION_SEC=60 bash $R sustained-load $M/llama3_405b_fp8.yaml
 ```
 
-Re-running one model's `store` under a prefix that already holds its corpus
+MiniMax-M3 needs its own adapter, because its 9,790,464 B object is not
+4096-aligned and O_DIRECT is therefore not available. `NUM_WORKERS` does not
+reach a supplied adapter, so set the worker count inside the JSON:
+
+```bash
+export L2_ADAPTER='{"type":"fs_native","base_path":"/mnt/lmcache-kvcache","use_odirect":false,"num_workers":16}'
+export L1_ALIGN_BYTES=1
+
+# MiniMax-M3 bf16 TP=8 — 8 x 9.34 MiB, one object group, two components
+ROUNDS=2 bash $R store $M/minimax_m3_bf16_tp8.yaml
+DURATION_SEC=60 bash $R sustained-load $M/minimax_m3_bf16_tp8.yaml
+```
+
+This measures the page cache unless the corpus exceeds host DRAM: the store
+above writes 1195 MiB and the reads are buffered. Raise `ROUNDS` past DRAM or
+drop caches between the store and the read.
+
+Re-running one profile's `store` under a prefix that already holds its corpus
 measures `fs_native`'s existence check rather than the write path, because a
 store whose key exists reports success without writing. Use a fresh `PREFIX`
 for a new store measurement; reuse it only to read.
@@ -231,11 +294,11 @@ With a supplied `L2_ADAPTER` it refuses `WORKERS_TOTAL` and `WORKERS_PER`
 rather than report a split it cannot apply.
 
 ```bash
-PREFIX=llama70b-read-corpus \
+PREFIX=deepseek-read-corpus \
 BASE_PATH=/mnt/lmcache-kvcache PYTHON=.venv/bin/python \
 INITIATORS=2 WORKERS_TOTAL=16 IN_FLIGHT=8 DURATION_SEC=60 \
   bash scripts/ipu-poc/run_geom_multi.sh load \
-  scripts/ipu-poc/models/llama3_70b_fp8.yaml
+  scripts/ipu-poc/models/deepseek_v3_fp8.yaml
 ```
 
 For a real benchmark result, retain the command line, resolved profile SHA,

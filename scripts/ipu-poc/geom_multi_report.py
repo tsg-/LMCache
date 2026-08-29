@@ -360,7 +360,17 @@ def build_report(
                 f"{rec['geometry_profile_sha256']} != expected "
                 f"{expected_profile_sha256}"
             )
-        if rec["geometry_page_size_bytes"] != expected_page_size_bytes:
+        # An object-group run emits no page size, since a submit's objects
+        # need not share one. Say that instead of reporting it as a page
+        # mismatch: the operator's problem is that this report derives
+        # application bytes from a single page, not that the number is wrong.
+        if rec["geometry_page_size_bytes"] is None:
+            failures.append(
+                f"initiator {wid}: run reports no geometry page size. This "
+                f"report derives application bytes from one page size and "
+                f"cannot describe an object-group run."
+            )
+        elif rec["geometry_page_size_bytes"] != expected_page_size_bytes:
             failures.append(
                 f"initiator {wid}: geometry page {rec['geometry_page_size_bytes']} "
                 f"!= expected {expected_page_size_bytes} bytes"

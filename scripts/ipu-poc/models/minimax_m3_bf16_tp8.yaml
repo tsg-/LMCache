@@ -1,0 +1,114 @@
+# Model: MiniMax-M3 — bf16 main KV plus a key-only DSA indexer, TP=8
+#
+# Why this model: on the 2026-08-18 PoC review Nima Badizadegan named
+# DeepSeek and MiniMax as the architectures closest to Claude and said to
+# stay away from the Llamas -- "you want something with a funky attention."
+# DeepSeek-V3 is covered by deepseek_v3_fp8.yaml as a uniform page burst.
+# M3 is not expressible that way, which is why this file uses the
+# object-group form: one L2 object per (chunk, object group, kv rank)
+# packing MORE THAN ONE component.
+#
+# Why one object group and not two: LMCache buckets kernel groups into
+# object groups by cross-chunk sliding-window size
+# (`_detect_object_groups` in lmcache/v1/kv_layer_groups.py). Both M3
+# components are full attention, so they land in the SAME group and are
+# packed into one object per (chunk, kv rank) -- `separate_object_groups`
+# does not change that. This file therefore declares one group with two
+# components, which is exactly the shape the harness could not express
+# before object-group profiles existed.
+#
+# Geometry source: the MiniMax-M3 HuggingFace config.json.
+#   60 layers (3 dense + 57 sparse), 4 KV heads, head_dim 128, bf16
+#   sparse_index_dim 128, sparse_num_index_heads 4, sparse_block_size 128
+#
+# TP=8: 4 KV heads across 8 ranks means the heads are REPLICATED, so each
+# rank owns 1 KV head, not a fraction of one. That is why num_kv_heads
+# below is 1 and kv_ranks_per_chunk is 8 -- the submit carries 8 objects
+# of identical size, one per rank, and the per-rank size does not shrink
+# with TP.
+#
+# UNCONFIRMED -- the indexer dtype. This file sizes the indexer at the
+# fp8 DSA layout in the repo: NL_X_NB_BSV_BSS is NL x [NB, BS, 132]
+# uint8, i.e. 128 B of fp8 values plus a 4 B fp32 scale per token. vLLM
+# only maps a cache to that layout when dtype == torch.uint8 and
+# shape[-1] == 132 (lmcache/v1/gpu_connector/kv_format/detectors/vllm.py:69,
+# and lmcache/v1/multiprocess/http_apis/cache_api.py:154). If M3 instead
+# registers its indexer as bf16 (128 dims x 2 B = 256 B/token), the
+# indexer component is 3,735,552 B and the packed object is 11,599,872 B
+# rather than the 9,790,464 B below. Confirm against a captured vLLM
+# registration dump before quoting an M3 number externally.
+#
+# Note on --l1-align-bytes: 9,790,464 is NOT a multiple of 4096 -- the
+# 132 B/token indexer breaks the alignment the main KV would have had on
+# its own. `bench l2` validates alignment per object, so an O_DIRECT run
+# with --l1-align-bytes 4096 against this profile is REJECTED rather than
+# silently misaligned. Benchmark M3 on a buffered backend, or pad the
+# indexer in a separate variant of this file.
+#
+# That rejection is a consequence of the fp8 assumption above, not a
+# property of M3: the bf16 alternative is 11,599,872 = 4096 x 2832, so
+# confirming a bf16 indexer would put O_DIRECT back on the table.
+
+model:
+  name: "MiniMaxAI/MiniMax-M3"
+  family: minimax
+
+runtime:
+  lmcache_tokens_per_chunk: 256
+  task_archetype: lookup_load
+  # One chunk is the smallest honest submit: a 256-token prefill chunk
+  # fanned out over all 8 ranks. Raise this to model a multi-chunk
+  # retrieval; it scales objects and bytes linearly.
+  chunks_per_submit: 1
+  kv_ranks_per_chunk: 8
+  # Both components are full attention, so grouping is decided by window
+  # size and this flag does not change the resolved geometry.
+  separate_object_groups: false
+  full_sw_kv: false
+
+object_groups:
+  - object_group_id: 0
+    name: full_attention
+    sw_size_chunks: -1          # full attention: no cross-chunk window
+    components:
+      # 60 layers x kv_size(2) x num_kv_heads(1) x head_size(128)
+      #   x dtype_bytes(2) x slots_per_object(256) = 7,864,320 B
+      - name: main_kv
+        role: key_value
+        cache_owning_layers: 60
+        architecture:
+          attention: gqa
+          kv_size: 2
+          num_kv_heads: 1       # 4 heads REPLICATED across TP=8
+          head_size: 128
+        quantization:
+          dtype: bfloat16
+          dtype_bytes: 2
+        block_geometry:
+          tokens_per_block: 128
+          slots_per_block: 128
+          transfer_tokens_per_chunk: 256
+        component_size_bytes: 7864320
+
+      # Key-only DSA indexer, present on the 57 sparse layers only.
+      # Declared opaque because NL_X_NB_BSV_BSS is neither GQA nor MLA:
+      # it is a flat 132 B/token record (128 B fp8 + 4 B fp32 scale), so
+      # there is no kv_size / num_kv_heads / head_size to derive from.
+      #   57 layers x 132 B/token x 256 tokens = 1,926,144 B
+      - name: dsa_indexer
+        role: key_only
+        cache_owning_layers: 57
+        architecture:
+          attention: opaque
+        quantization:
+          dtype: float8_e4m3fn
+          dtype_bytes: 1
+        component_size_bytes: 1926144
+
+    # 7,864,320 + 1,926,144
+    object_size_bytes: 9790464
+
+# Redundant cross-check: 1 chunk x 1 group x 8 ranks = 8 objects.
+burst:
+  objects_per_submit: 8
+  burst_bytes: 78323712         # 8 x 9,790,464 ≈ 74.7 MiB per submit
