@@ -152,7 +152,7 @@ if [ "$LISTEN" != "127.0.0.1:9100" ]; then
 [Service]
 Environment=NE_LISTEN=${LISTEN}
 EOF
-    echo "  NOTE: unit hardcodes --web.listen-address; edit it for ${LISTEN}"
+    echo "  node_exporter.service.d/listen.conf -> ${LISTEN}"
 fi
 
 echo "== enable =="
