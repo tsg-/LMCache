@@ -1,0 +1,89 @@
+# Model: DeepSeek-V3 — FP8 MLA, PACKED L2 objects (LMCache default config)
+#
+# WHAT THIS PROFILE IS FOR: the direct object-rate experiment. Paired with
+# deepseek_v3_fp8.yaml it is the one clean single-variable comparison we
+# have -- same model, same bytes per submit, same rank count, only object
+# granularity moves.
+#
+#   deepseek_v3_fp8.yaml (legacy_page_burst)   61 objects x   147,456 B
+#   this file            (object_group)          1 object  x 8,994,816 B
+#                                              --------------------------
+#                                                both = 8,994,816 B/submit
+#
+# SCOPE: rig profile, not an upstream example. Portable example semantics
+# are unsettled, so this stays under scripts/ipu-poc/models/.
+#
+# WHY PACKED IS THE DEFAULT. lmcache/v1/config.py sets use_layerwise to
+# False. With it off, all layers of a chunk pack into ONE storage key per
+# (chunk, kv_rank); only with it ON does each layer become its own key
+# (storage_manager.py divides by keys_per_chunk = num_layers). Every L2
+# number measured on the rig so far used the per-layer geometry, i.e. the
+# NON-default mode. This file is what a stock deployment actually submits.
+#
+# WHY ONE OBJECT AND NOT EIGHT. Verified by tracing the key path rather
+# than inferred from byte totals:
+#
+#   token_database.py:119   save_only_first_rank defaults to metadata.use_mla
+#   cache_engine.py:117     same default, AND-ed with use_mla again
+#   cache_engine.py:424     store() returns early when _is_passive()
+#   cache_engine.py:1922    _is_passive() = save_only_first_rank and not first rank
+#   token_database.py:243   CacheEngineKey.world_size collapses to 1
+#
+# DeepSeek-V3 is MLA, so use_mla is True, so save_only_first_rank defaults
+# True, so ranks 1..N-1 return from store() without writing anything. An
+# 8-rank trace produced exactly ONE key per chunk, printed as
+# "model@1@0@<hash>@dtype" -- world_size 1, worker_id 0. The MLA latent is
+# replicated across ranks, so storing it once is correct, not a shortcut.
+#
+# That makes this profile TP-INVARIANT: kv_ranks_per_chunk is 1 at TP=1,
+# TP=8, or TP=16. Contrast mixtral_8x22b_fp8_tp8_packed.yaml, which is GQA
+# and therefore stores on all 8 ranks.
+#
+# _is_passive() does not consult use_layerwise, so the rank collapse holds
+# in both modes. The layerwise/packed pair above is a clean single-variable
+# experiment: identical bytes, identical rank count, 61x the object rate.
+#
+# O_DIRECT: 8,994,816 = 4096 x 2196, so --l1-align-bytes 4096 is accepted.
+
+model:
+  name: "deepseek-ai/DeepSeek-V3"
+  family: deepseek
+
+runtime:
+  lmcache_tokens_per_chunk: 256
+  task_archetype: lookup_load
+  chunks_per_submit: 1
+  # 1, not the TP width -- see "WHY ONE OBJECT AND NOT EIGHT" above.
+  kv_ranks_per_chunk: 1
+  separate_object_groups: false
+  full_sw_kv: false
+
+object_groups:
+  - object_group_id: 0
+    name: mla_latent
+    sw_size_chunks: -1          # full attention: no cross-chunk window
+    components:
+      # 61 layers x cached_elems_per_token(576) x dtype_bytes(1)
+      #   x tokens_per_chunk(256) = 8,994,816 B
+      #
+      # 576 = kv_lora_rank(512) + qk_rope_head_dim(64). num_attention_heads
+      # (128) does NOT multiply in -- that is what MLA compression buys.
+      - name: mla_latent_all_layers
+        role: key_value
+        cache_owning_layers: 61
+        architecture:
+          attention: mla
+          kv_lora_rank: 512
+          qk_rope_head_dim: 64
+          cached_elems_per_token: 576
+        quantization:
+          dtype: float8_e4m3fn
+          dtype_bytes: 1
+        component_size_bytes: 8994816
+
+    object_size_bytes: 8994816
+
+# Redundant cross-check: 1 chunk x 1 group x 1 rank = 1 object.
+burst:
+  objects_per_submit: 1
+  burst_bytes: 8994816          # 8.58 MiB per submit

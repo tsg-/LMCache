@@ -1,0 +1,86 @@
+# Model: Mixtral 8x22B — FP8 GQA, PACKED L2 objects at TP=8
+#
+# WHAT THIS PROFILE IS FOR: TP-aware packed-shape validation. It checks
+# that the object-group form describes a sharded GQA deployment correctly
+# -- 8 storing ranks, per-rank size divided by the TP width, byte total
+# reconciling against the legacy family. It is NOT evidence for the
+# object-rate hypothesis; deepseek_v3_fp8_packed.yaml is the direct
+# object-rate experiment. See "SHAPE VALIDATION, NOT AN A/B" below.
+#
+# Bytes per submit reconcile against the 256-token legacy variant:
+#
+#   mixtral_8x22b_fp8_512k.yaml (legacy)  56 objects x 524,288 B  (TP=1)
+#   this file                   (packed)   8 objects x 3,670,016 B (TP=8)
+#                                        ---------------------------------
+#                                          both = 29,360,128 B/submit
+#
+# SCOPE: rig profile, not an upstream example. Portable example semantics
+# are unsettled, so this stays under scripts/ipu-poc/models/.
+#
+# WHY EIGHT OBJECTS, NOT ONE. Mixtral is GQA, not MLA. The same trace that
+# collapsed DeepSeek to a single rank (see deepseek_v3_fp8_packed.yaml)
+# produced EIGHT distinct keys per chunk here -- "model@8@0@..." through
+# "model@8@7@..." -- because save_only_first_rank defaults to
+# metadata.use_mla (token_database.py:119) and is AND-ed with use_mla again
+# (cache_engine.py:118). For a GQA model both terms are False, so no rank is
+# passive and worker_id stays in the key.
+#
+# WHY THE PER-RANK OBJECT IS 1/8 THE SIZE. Mixtral has 8 KV heads, so TP=8
+# SHARDS them one per rank. Per-rank page is
+# kv_size(2) x num_kv_heads(1) x head_size(128) x dtype_bytes(1) x 256
+# = 65,536 B, and 56 layers pack to 3,670,016 B.
+#
+# This is the opposite of MiniMax-M3, which has only 4 KV heads: at TP=8
+# they are REPLICATED, so its per-rank object does NOT shrink with TP
+# (see minimax_m3_bf16_tp8.yaml).
+#
+# SHAPE VALIDATION, NOT AN A/B. The legacy page-burst form cannot express
+# TP>1 -- submit_geometry_from_uniform() hardcodes kv_ranks_per_chunk to 1.
+# So the pair above holds bytes and tokens_per_chunk constant but moves TWO
+# variables: granularity (56 -> 8 objects) and rank count (1 -> 8). A
+# throughput delta measured across it cannot be attributed to object rate.
+# What it does establish is that the packed form gets the TP=8 shape right.
+# The object-rate claim belongs to DeepSeek, where rank count is 1 in both
+# forms.
+#
+# O_DIRECT: 3,670,016 = 4096 x 896, so --l1-align-bytes 4096 is accepted.
+
+model:
+  name: "mistralai/Mixtral-8x22B-Instruct-v0.1"
+  family: mixtral
+
+runtime:
+  lmcache_tokens_per_chunk: 256
+  task_archetype: lookup_load
+  chunks_per_submit: 1
+  # 8 storing ranks, each owning a different KV head -- see above.
+  kv_ranks_per_chunk: 8
+  separate_object_groups: false
+  full_sw_kv: false
+
+object_groups:
+  - object_group_id: 0
+    name: full_attention
+    sw_size_chunks: -1          # full attention: no cross-chunk window
+    components:
+      # 56 layers x kv_size(2) x num_kv_heads(1) x head_size(128)
+      #   x dtype_bytes(1) x tokens_per_chunk(256) = 3,670,016 B
+      - name: gqa_kv_all_layers
+        role: key_value
+        cache_owning_layers: 56
+        architecture:
+          attention: gqa
+          kv_size: 2
+          num_kv_heads: 1       # 8 heads SHARDED across TP=8
+          head_size: 128
+        quantization:
+          dtype: float8_e4m3fn
+          dtype_bytes: 1
+        component_size_bytes: 3670016
+
+    object_size_bytes: 3670016
+
+# Redundant cross-check: 1 chunk x 1 group x 8 ranks = 8 objects.
+burst:
+  objects_per_submit: 8
+  burst_bytes: 29360128         # 8 x 3,670,016 = 28 MiB per submit
