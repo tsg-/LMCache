@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # acc_ssh_stats.py -- periodic ACC core-usage and Falcon transport counters,
-# pulled over the netns -> IMC -> ACC SSH path (Naveen's recipe) instead of
-# blind serial-console injection. Core usage and transport counters use separate
-# textfiles so transport can be sampled more frequently without duplicating
-# Prometheus series.
+# pulled over the netns -> IMC -> ACC SSH path published by the platform team
+# instead of blind serial-console injection. Core usage and transport counters
+# use separate textfiles so transport can be sampled more frequently without
+# duplicating Prometheus series.
 #
 # Path: `[ip netns exec <netns>] ssh root@100.0.0.100` (IMC)
 #       -> `ssh root@192.168.96.2` (ACC, passwordless)
