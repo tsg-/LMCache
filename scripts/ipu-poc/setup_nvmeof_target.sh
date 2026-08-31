@@ -24,10 +24,14 @@
 #    drives, they have two independent owners -- mkp2's md layer and mkp1's
 #    imported md0 -- which is a corpus-corruption path. Observed on both reboots.
 #
-# Usage (on mkp2, as root):
-#   ./setup_nvmeof_target.sh up       # load modules, build subsystems + port
+# Usage (on the target host, as root). The drive serials and the initiator's
+# host NQN identify one specific chassis, so both are inputs, not defaults:
+#   INITIATOR_NQN=$(ssh <initiator> cat /etc/nvme/hostnqn) \
+#   SUBSYS_SERIALS="target-nvme1=<serialA> target-nvme2=<serialB>" \
+#   TRADDR=<fabric-ip> ./setup_nvmeof_target.sh up
 #   ./setup_nvmeof_target.sh down     # unexport (leaves modules loaded)
 #   ./setup_nvmeof_target.sh status
+# down and status walk the same subsystems, so they need the same two inputs.
 #
 # Bring the INITIATOR up separately, from mkp1: quiesce_nvmeof_target.sh up
 set -uo pipefail
@@ -37,16 +41,29 @@ TRADDR=${TRADDR:-200.0.0.37}
 PORT_ID=${PORT_ID:-1}
 TRSVCID=${TRSVCID:-4420}
 
-# mkp1's host NQN. attr_allow_any_host stays 0 and this is the only entry, so an
-# unexpected initiator is refused rather than silently served.
-INITIATOR_NQN=${INITIATOR_NQN:-nqn.2014-08.org.nvmexpress:uuid:ef2fe2c0-486a-11ee-a1ca-9cc2c4236910}
+# The initiator's host NQN. attr_allow_any_host stays 0 and this is the only
+# entry, so an unexpected initiator is refused rather than silently served.
+# Read it on the initiator with `cat /etc/nvme/hostnqn`.
+INITIATOR_NQN=${INITIATOR_NQN:-}
+[ -n "$INITIATOR_NQN" ] ||
+  { echo "ABORT: set INITIATOR_NQN to the initiator's /etc/nvme/hostnqn"; exit 1; }
 
-# subsystem NQN -> drive serial. This mapping is the naming contract the results
-# docs are written against; do not reorder it. Serials read 2026-08-02.
-declare -A SUBSYS_SERIAL=(
-  [mkp2-nvme1]=S64GNE0R704043
-  [mkp2-nvme2]=S64GNE0R704046
-)
+# subsystem name -> drive serial, from SUBSYS_SERIALS as a space-separated list
+# of name=serial pairs. Kept out of this file because the serials identify one
+# specific chassis; the binding contract is by serial (invariant 1), not the
+# particular serials. Read them with `nvme list -o json`.
+#   SUBSYS_SERIALS="target-nvme1=<serialA> target-nvme2=<serialB>"
+# Order is the naming contract the results docs are written against, so keep a
+# host's list stable once a corpus exists on it.
+declare -A SUBSYS_SERIAL=()
+for pair in ${SUBSYS_SERIALS:-}; do
+  case $pair in
+    *=*) SUBSYS_SERIAL[${pair%%=*}]=${pair#*=} ;;
+    *) echo "ABORT: SUBSYS_SERIALS entry is not name=serial: $pair"; exit 1 ;;
+  esac
+done
+[ "${#SUBSYS_SERIAL[@]}" -gt 0 ] ||
+  { echo "ABORT: set SUBSYS_SERIALS=\"name=serial [name=serial ...]\""; exit 1; }
 
 # Resolve a serial to its /dev/disk/by-id symlink. by-id is used rather than a
 # bare /dev/nvmeXnY so the export survives a rename; the serial is in the link
