@@ -76,12 +76,17 @@ rank)`, each packing one or more components whose sizes need not agree.
 | `deepseek_v3_fp8.yaml` | DeepSeek-V3 FP8 | page burst | 61 | 144 KiB | 8.58 MiB |
 | `mixtral_8x22b_fp8.yaml` | Mixtral 8x22B FP8 | page burst | 56 | 256 KiB | 14 MiB |
 | `mixtral_8x22b_fp8_512k.yaml` | Mixtral 8x22B FP8, 256-token chunk | page burst | 56 | 512 KiB | 28 MiB |
+| `deepseek_v3_fp8_packed.yaml` | DeepSeek-V3 FP8 | object group | 1 | 8.58 MiB | 8.58 MiB |
+| `mixtral_8x22b_fp8_tp8_packed.yaml` | Mixtral 8x22B FP8, TP=8 | object group | 8 | 3.5 MiB | 28 MiB |
 | `minimax_m3_bf16_tp8.yaml` | MiniMax-M3 bf16, TP=8 | object group | 8 | 9.34 MiB | 74.7 MiB |
 
 The four Mixtral profiles change only chunk size (32/64/128/256 tokens), so page
 size is the single variable: 64/128/256/512 KiB. DeepSeek's MLA cache is
 576 B/token, which has no integer 64 KiB page. Profiles occupy separate key
 namespaces, so one prefix holds all corpora.
+
+The packed DeepSeek and Mixtral profiles are object-rate experiments, not part
+of the default five-profile page-burst sweep below.
 
 MiniMax-M3 is the reason the object-group form exists. Its 60-layer main K/V
 and its 57-layer key-only DSA indexer are both full attention, so LMCache
@@ -188,8 +193,13 @@ export PREFIX=sweep-$(date +%s)
 export IN_FLIGHT=8 NUM_WORKERS=16
 mkdir -p results
 
-for profile in scripts/ipu-poc/models/*.yaml; do
-  case $profile in *minimax_m3*) continue ;; esac
+for profile in \
+  scripts/ipu-poc/models/mixtral_8x22b_fp8_64k.yaml \
+  scripts/ipu-poc/models/mixtral_8x22b_fp8_128k.yaml \
+  scripts/ipu-poc/models/deepseek_v3_fp8.yaml \
+  scripts/ipu-poc/models/mixtral_8x22b_fp8.yaml \
+  scripts/ipu-poc/models/mixtral_8x22b_fp8_512k.yaml
+do
   model=$(basename "$profile" .yaml)
   echo "===== $model ====="
   ROUNDS=2 bash scripts/ipu-poc/run_model_geometry.sh store "$profile"

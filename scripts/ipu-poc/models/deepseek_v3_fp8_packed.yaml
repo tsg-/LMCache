@@ -79,6 +79,10 @@ object_groups:
         quantization:
           dtype: float8_e4m3fn
           dtype_bytes: 1
+        block_geometry:
+          tokens_per_block: 128
+          slots_per_block: 128
+          transfer_tokens_per_chunk: 256
         component_size_bytes: 8994816
 
     object_size_bytes: 8994816
