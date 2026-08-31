@@ -261,6 +261,30 @@ def test_inventory_rejects_a_storage_path_setting(tmp_path: Path) -> None:
     assert "hostnames only" in result.stderr
 
 
+def test_inventory_is_rejected_before_it_executes(tmp_path: Path) -> None:
+    """The inventory is sourced, so the contract must hold before that."""
+    marker = tmp_path / "executed"
+    inventory = tmp_path / "hostile.env"
+    inventory.write_text(f"INITIATOR_HOSTS=(mmgi0)\nTARGET_HOST=mmgt\ntouch {marker}\n")
+
+    result = _run_script(INVENTORY_RUNNER, "show", str(inventory))
+
+    assert result.returncode == 2
+    assert "hostnames only" in result.stderr
+    assert not marker.exists()
+
+
+def test_inventory_rejects_command_substitution(tmp_path: Path) -> None:
+    """A hostname list cannot be computed by running a command."""
+    inventory = tmp_path / "substituted.env"
+    inventory.write_text("INITIATOR_HOSTS=($(hostname))\nTARGET_HOST=mmgt\n")
+
+    result = _run_script(INVENTORY_RUNNER, "show", str(inventory))
+
+    assert result.returncode == 2
+    assert "hostnames only" in result.stderr
+
+
 def test_inventory_runner_advertises_corpus_verification() -> None:
     """The coordinator exposes a separate identity gate before a sweep."""
     result = _run_script(INVENTORY_RUNNER, "--help")

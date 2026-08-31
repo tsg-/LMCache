@@ -53,11 +53,30 @@ validate_hostname() {
     die "invalid hostname in inventory: $name"
 }
 
+# The inventory is sourced, so it is executable bash. Vet it line by line
+# first: a check that runs after `source` enforces the hostnames-only contract
+# only after whatever else was in the file has already run.
+lint_inventory() {
+  local inventory=$1
+  local line lineno=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    lineno=$((lineno + 1))
+    [[ "$line" =~ ^[[:space:]]*(#|$) ]] && continue
+    [[ "$line" =~ ^[[:space:]]*INITIATOR_HOSTS=\([^()\;\&\|\$\`\<\>]*\)[[:space:]]*$ ]] &&
+      continue
+    [[ "$line" =~ ^[[:space:]]*TARGET_HOST=[[:alnum:]\"\'][[:alnum:].\-\"\']*[[:space:]]*$ ]] &&
+      continue
+    die "inventory must contain hostnames only; line $lineno is not a host" \
+      "assignment: $line"
+  done <"$inventory"
+}
+
 load_inventory() {
   local inventory=$1
   [ -f "$inventory" ] || die "inventory not found: $inventory"
+  lint_inventory "$inventory"
 
-  unset INITIATOR_HOSTS TARGET_HOST BASE_PATH PYTHON LMCACHE_VENV
+  unset INITIATOR_HOSTS TARGET_HOST
   # shellcheck disable=SC1090
   source "$inventory"
 
@@ -66,10 +85,6 @@ load_inventory() {
   [ "${#INITIATOR_HOSTS[@]}" -gt 0 ] ||
     die "INITIATOR_HOSTS must not be empty"
   [ -n "${TARGET_HOST:-}" ] || die "inventory must define TARGET_HOST"
-  if [ -n "${BASE_PATH+x}" ] || [ -n "${PYTHON+x}" ] ||
-    [ -n "${LMCACHE_VENV+x}" ]; then
-    die "inventory must contain hostnames only"
-  fi
 
   local host
   for host in "${INITIATOR_HOSTS[@]}" "$TARGET_HOST"; do
