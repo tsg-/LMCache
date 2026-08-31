@@ -1,0 +1,25 @@
+{
+  "Subsystems": [
+    {
+      "Name": "nvme-subsys0",
+      "NQN": "nqn.2026-07.io.lmcache.alt:bmg1",
+      "Controllers": [
+        {
+          "Controller": "nvme0",
+          "Cntlid": "0x1",
+          "SerialNumber": "TESTSERIAL01",
+          "ModelNumber": "KIOXIA KCMYXRUG1T92",
+          "Transport": "rdma",
+          "Address": "traddr=192.168.200.4 trsvcid=4420"
+        }
+      ]
+    },
+    {
+      "Name": "nvme-subsys1",
+      "NQN": "nqn.other.example:something",
+      "Controllers": [
+        {"Controller": "nvme1"}
+      ]
+    }
+  ]
+}
