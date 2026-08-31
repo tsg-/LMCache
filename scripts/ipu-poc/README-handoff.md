@@ -94,15 +94,28 @@ All under `scripts/ipu-poc/` unless noted. Edit **site-specific** `VENV`, corpus
 `docs/design/v1/platform/ipu-poc/instrumentation/`
 
 ```bash
-# On each test host (root):
-RDMA_FABRIC_IFACE=ens2f0 \
-ACC_TELEMETRY_ENDPOINT=10.0.0.35:50051 \
-ACC_TELEMETRY_PROTO_DIR=/path/to/telemetry_pb2 \
-bash host/install.sh
+# MMG-400 ACC telemetry (from scripts/ipu-poc/):
+IMC_PASSWORD=<imc-root-password> \
+  ./install_acc_stats.sh mmgi0 ':acc1:200.0.4.3'
+IMC_PASSWORD=<imc-root-password> \
+  ./install_acc_stats.sh mmgi1 ':acc1:200.0.3.3'
+IMC_PASSWORD=<imc-root-password> ./install_acc_stats.sh mmgt
+IMC_PASSWORD=<imc-root-password> ACC_GRPC_SHADOW=1 \
+  ./install_acc_stats.sh mmgt  # optional target shadow; no dashboard cutover
 
 # On control laptop:
-BENCH_TUNNELS=1 HOSTS="host1:19100 host2:19101" ./up.sh
+HOSTS="mmgt:19106 mmgi0:19107 mmgi1:19108" \
+  MMG_BENCH_TUNNELS=1 MMG_BENCH_INITIATORS=1 ./up.sh
 ```
+
+The installer enables a 30 s ACC core-busy timer and a separate 10 s Falcon
+transport-counter timer. On `mmgt`, `ACC_GRPC_SHADOW=1` adds a persistent
+IMC-to-ACC gRPC shadow collector at 5 s without changing the dashboard. The
+RDMA panels use a 60 s counter-rate window; use the exact measured interval for
+completed-run counter comparisons.
+
+The MMG target's PCIe, NIC, and NUMA collectors are target-specific; use the
+instrumentation README rather than the generic `host/install.sh` on `mmgt`.
 
 ## Tests
 

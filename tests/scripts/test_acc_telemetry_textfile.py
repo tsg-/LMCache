@@ -53,6 +53,21 @@ def test_render_metrics_exports_both_rc_byte_counters() -> None:
     assert "acc_telemetry_collector_timestamp_seconds 100" in rendered
 
 
+def test_render_metrics_labels_a_shadow_collector_per_acc() -> None:
+    """A shadow collector cannot collide with another ACC's textfile series."""
+    rendered = collector.render_metrics(
+        {"bytes_from_ulp_rc": 123, "bytes_to_ulp": 456},
+        success=True,
+        timestamp=100,
+        acc="acc1",
+    )
+
+    assert (
+        'acc_telemetry_bytes_total{acc="acc1",counter="bytes_from_ulp_rc",'
+        'ulp="rdma"} 123'
+    ) in rendered
+
+
 def test_render_failure_has_no_stale_counters() -> None:
     """A failed ACC query publishes only freshness and failure signals."""
     rendered = collector.render_metrics({}, success=False, timestamp=100)

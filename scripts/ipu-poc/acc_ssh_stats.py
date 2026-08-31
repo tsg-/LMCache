@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-# acc_ssh_stats.py -- periodic ACC core-usage + Falcon transport counters,
+# acc_ssh_stats.py -- periodic ACC core-usage and Falcon transport counters,
 # pulled over the netns -> IMC -> ACC SSH path (Naveen's recipe) instead of
-# blind serial-console injection.
+# blind serial-console injection. Core usage and transport counters use separate
+# textfiles so transport can be sampled more frequently without duplicating
+# Prometheus series.
 #
 # Path: `[ip netns exec <netns>] ssh root@100.0.0.100` (IMC)
 #       -> `ssh root@192.168.96.2` (ACC, passwordless)
@@ -28,9 +30,10 @@
 # Usage: acc_ssh_stats.py <netns> <acc-label> <acc-fabric-ip> <log-dir> [interval-secs]
 # Example: acc_ssh_stats.py IPU2 acc1 200.0.6.3 /root/captures-acc1 30
 #
-# Oneshot node_exporter textfile mode (for the acc-stats systemd timer):
-#   acc_ssh_stats.py --textfile /var/lib/node_exporter/textfile/acc_stats.prom
-# Samples both known ACC cards once and writes the .prom file atomically.
+# Oneshot node_exporter textfile modes:
+#   acc_ssh_stats.py --core-textfile /var/lib/node_exporter/textfile/acc_stats.prom
+#   acc_ssh_stats.py --transport-textfile
+#       /var/lib/node_exporter/textfile/acc_transport.prom
 
 import os
 import re
@@ -134,7 +137,9 @@ def parse_tele_fields(text):
     """
     fields = []
     section = "global"
-    header_re = re.compile(r"^(Global Counters|RX counters|TX counters|RUE counters):?$")
+    header_re = re.compile(
+        r"^(Global Counters|RX counters|TX counters|RUE counters):?$"
+    )
     field_re = re.compile(r"^([A-Za-z_][\w]*)\s*:\s*(-?\d+)$")
     for line in text.splitlines():
         line = line.strip()
@@ -148,26 +153,15 @@ def parse_tele_fields(text):
     return fields
 
 
-def write_prom_textfile(path, results):
-    """Atomically write the combined ACC .prom file (mktemp + chmod + mv)."""
+def write_textfile(path, lines):
+    """Atomically write lines to a node_exporter textfile."""
     import tempfile
 
     out_dir = os.path.dirname(path)
     fd, tmp_path = tempfile.mkstemp(prefix=os.path.basename(path) + ".", dir=out_dir)
     try:
         with os.fdopen(fd, "w") as f:
-            f.write("# HELP acc_cpu_busy_percent ACC core busy percentage over a 1s /proc/stat sample\n")
-            f.write("# TYPE acc_cpu_busy_percent gauge\n")
-            for acc_label, pct, _fields in results:
-                for core, val in pct.items():
-                    f.write(f'acc_cpu_busy_percent{{acc="{acc_label}",core="{core}"}} {val:.2f}\n')
-            f.write("# HELP acc_tele_field Falcon transport-engine counter from tele_cli -t global\n")
-            f.write("# TYPE acc_tele_field counter\n")
-            for acc_label, _pct, fields in results:
-                for section, field, value in fields:
-                    f.write(
-                        f'acc_tele_field{{acc="{acc_label}",section="{section}",field="{field}"}} {value}\n'
-                    )
+            f.writelines(lines)
         os.chmod(tmp_path, 0o644)
         os.rename(tmp_path, path)
     except Exception:
@@ -175,43 +169,110 @@ def write_prom_textfile(path, results):
         raise
 
 
-def sample(netns, acc_fabric_ip):
-    remote_cmd = (
-        "cat /proc/stat; echo ---SNAP2---; sleep 1; cat /proc/stat; "
-        "echo ---TELE---; "
-        f"/opt/falcon/bin/tele_cli -t global -s {acc_fabric_ip}:50051 2>&1"
-    )
+def write_core_prom_textfile(path, results):
+    """Write ACC core busy gauges without transport counter series."""
+    lines = [
+        "# HELP acc_cpu_busy_percent ACC core busy percentage over a 1s "
+        "/proc/stat sample\n",
+        "# TYPE acc_cpu_busy_percent gauge\n",
+    ]
+    for acc_label, pct in results:
+        for core, val in pct.items():
+            metric = f'acc_cpu_busy_percent{{acc="{acc_label}",core="{core}"}}'
+            lines.append(f"{metric} {val:.2f}\n")
+    write_textfile(path, lines)
+
+
+def write_transport_prom_textfile(path, results):
+    """Write Falcon transport counters without ACC core busy gauge series."""
+    lines = [
+        "# HELP acc_tele_field Falcon transport-engine counter from tele_cli "
+        "-t global\n",
+        "# TYPE acc_tele_field counter\n",
+    ]
+    for acc_label, fields in results:
+        for section, field, value in fields:
+            metric = (
+                f'acc_tele_field{{acc="{acc_label}",section="{section}",'
+                f'field="{field}"}}'
+            )
+            lines.append(f"{metric} {value}\n")
+    write_textfile(path, lines)
+
+
+def sample_remote(netns, remote_cmd):
+    """Run one remote ACC command through its IMC management path."""
     hop_cmd = (
         f"ssh -oStrictHostKeyChecking=no -oUserKnownHostsFile=/dev/null "
         f"root@{ACC_IP} '{remote_cmd}'"
     )
     imc_cmd = [
         "ssh",
-        "-oStrictHostKeyChecking=no", "-oUserKnownHostsFile=/dev/null", "-t",
-        f"root@{IMC_IP}", hop_cmd,
+        "-oStrictHostKeyChecking=no",
+        "-oUserKnownHostsFile=/dev/null",
+        "-t",
+        f"root@{IMC_IP}",
+        hop_cmd,
     ]
     if netns:
         imc_cmd = ["ip", "netns", "exec", netns] + imc_cmd
     return ssh_hop(imc_cmd, IMC_PASSWORD)
 
 
-def run_textfile_oneshot(path):
-    """Sample every known ACC target once and write the combined .prom file."""
+def sample_core(netns):
+    """Read two /proc/stat snapshots from one ACC."""
+    remote_cmd = "cat /proc/stat; echo ---SNAP2---; sleep 1; cat /proc/stat"
+    return sample_remote(netns, remote_cmd)
+
+
+def sample_transport(netns, acc_fabric_ip):
+    """Read Falcon transport counters from one ACC."""
+    return sample_remote(
+        netns,
+        f"/opt/falcon/bin/tele_cli -t global -s {acc_fabric_ip}:50051 2>&1",
+    )
+
+
+def sample(netns, acc_fabric_ip):
+    """Read core and transport data together for the legacy capture loop."""
+    remote_cmd = (
+        "cat /proc/stat; echo ---SNAP2---; sleep 1; cat /proc/stat; "
+        "echo ---TELE---; "
+        f"/opt/falcon/bin/tele_cli -t global -s {acc_fabric_ip}:50051 2>&1"
+    )
+    return sample_remote(netns, remote_cmd)
+
+
+def run_core_textfile_oneshot(path):
+    """Sample every ACC core once and write the core-gauge textfile."""
     results = []
-    for netns, acc_label, acc_fabric_ip in ACC_TARGETS:
-        raw = sample(netns, acc_fabric_ip)
+    for netns, acc_label, _acc_fabric_ip in ACC_TARGETS:
+        raw = sample_core(netns)
         try:
-            proc_stat_part, rest = raw.split("---SNAP2---", 1)
-            snap2_part, tele_part = rest.split("---TELE---", 1)
+            proc_stat_part, snap2_part = raw.split("---SNAP2---", 1)
         except ValueError:
-            sys.stderr.write(f"WARNING: sample failed for {acc_label}, skipping\n")
+            sys.stderr.write(f"WARNING: core sample failed for {acc_label}, skipping\n")
             continue
         before = parse_proc_stat(proc_stat_part)
         after = parse_proc_stat(snap2_part)
         pct = busy_pct(before, after)
-        fields = parse_tele_fields(tele_part)
-        results.append((acc_label, pct, fields))
-    write_prom_textfile(path, results)
+        results.append((acc_label, pct))
+    write_core_prom_textfile(path, results)
+
+
+def run_transport_textfile_oneshot(path):
+    """Sample every Falcon transport counter once and write its textfile."""
+    results = []
+    for netns, acc_label, acc_fabric_ip in ACC_TARGETS:
+        raw = sample_transport(netns, acc_fabric_ip)
+        fields = parse_tele_fields(raw)
+        if not fields:
+            sys.stderr.write(
+                f"WARNING: transport sample failed for {acc_label}, skipping\n"
+            )
+            continue
+        results.append((acc_label, fields))
+    write_transport_prom_textfile(path, results)
 
 
 def main():
@@ -222,17 +283,26 @@ def main():
         )
         sys.exit(1)
 
-    if sys.argv[1:2] == ["--textfile"]:
+    if sys.argv[1:2] == ["--core-textfile"]:
         if len(sys.argv) != 3:
-            sys.stderr.write("usage: acc_ssh_stats.py --textfile <path>\n")
+            sys.stderr.write("usage: acc_ssh_stats.py --core-textfile <path>\n")
             sys.exit(1)
-        run_textfile_oneshot(sys.argv[2])
+        run_core_textfile_oneshot(sys.argv[2])
+        return
+
+    if sys.argv[1:2] == ["--transport-textfile"]:
+        if len(sys.argv) != 3:
+            sys.stderr.write("usage: acc_ssh_stats.py --transport-textfile <path>\n")
+            sys.exit(1)
+        run_transport_textfile_oneshot(sys.argv[2])
         return
 
     if len(sys.argv) < 5:
         sys.stderr.write(
-            "usage: acc_ssh_stats.py <netns> <acc-label> <acc-fabric-ip> <log-dir> [interval-secs]\n"
-            "       acc_ssh_stats.py --textfile <path>\n"
+            "usage: acc_ssh_stats.py <netns> <acc-label> <acc-fabric-ip> "
+            "<log-dir> [interval-secs]\n"
+            "       acc_ssh_stats.py --core-textfile <path>\n"
+            "       acc_ssh_stats.py --transport-textfile <path>\n"
         )
         sys.exit(1)
     netns, acc_label, acc_fabric_ip, log_dir = sys.argv[1:5]
@@ -259,7 +329,10 @@ def main():
 
         with open(log_path, "a") as f:
             f.write(f"=== {ts} {acc_label} ({netns} -> {acc_fabric_ip}) ===\n")
-            for label in sorted(pct, key=lambda l: (l != "cpu", l)):
+            for label in sorted(
+                pct,
+                key=lambda core_label: (core_label != "cpu", core_label),
+            ):
                 f.write(f"{label}: {pct[label]:.1f}%\n")
             f.write("--- tele_cli global ---\n")
             f.write(tele_part.strip() + "\n")

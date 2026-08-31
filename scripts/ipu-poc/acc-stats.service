@@ -1,5 +1,5 @@
 [Unit]
-Description=Refresh ACC core-usage + Falcon tele_cli textfile for node_exporter
+Description=Refresh ACC core-usage textfile for node_exporter
 
 [Service]
 Type=oneshot
@@ -10,4 +10,4 @@ Type=oneshot
 # so a missing file is a clear runtime error from the script rather than a unit
 # that refuses to start.
 EnvironmentFile=-/etc/default/acc-stats
-ExecStart=/usr/local/bin/acc_ssh_stats.py --textfile /var/lib/node_exporter/textfile/acc_stats.prom
+ExecStart=/usr/local/bin/acc_ssh_stats.py --core-textfile /var/lib/node_exporter/textfile/acc_stats.prom

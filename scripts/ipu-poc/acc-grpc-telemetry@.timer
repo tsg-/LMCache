@@ -1,0 +1,11 @@
+[Unit]
+Description=Collect %i ACC gRPC transport counters every 2s
+
+[Timer]
+OnBootSec=20s
+OnUnitActiveSec=2s
+AccuracySec=1s
+Unit=acc-grpc-telemetry@%i.service
+
+[Install]
+WantedBy=timers.target

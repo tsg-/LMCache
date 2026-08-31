@@ -1,0 +1,9 @@
+[Unit]
+Description=Collect %i ACC gRPC transport counters for node_exporter
+Requires=acc-grpc-tunnel@%i.service
+After=acc-grpc-tunnel@%i.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/default/acc-grpc-%i
+ExecStart=/usr/bin/env ${ACC_GRPC_PYTHON} /usr/local/bin/acc_telemetry_textfile.py
