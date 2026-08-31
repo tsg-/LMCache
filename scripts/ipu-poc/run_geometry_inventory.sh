@@ -59,13 +59,14 @@ validate_hostname() {
 lint_inventory() {
   local inventory=$1
   local line lineno=0
+  local target_host_pattern
+  target_host_pattern="^[[:space:]]*TARGET_HOST=([[:alnum:]][[:alnum:].-]*|\"[[:alnum:]][[:alnum:].-]*\"|'[[:alnum:]][[:alnum:].-]*')[[:space:]]*$"
   while IFS= read -r line || [ -n "$line" ]; do
     lineno=$((lineno + 1))
     [[ "$line" =~ ^[[:space:]]*(#|$) ]] && continue
     [[ "$line" =~ ^[[:space:]]*INITIATOR_HOSTS=\([^()\;\&\|\$\`\<\>]*\)[[:space:]]*$ ]] &&
       continue
-    [[ "$line" =~ ^[[:space:]]*TARGET_HOST=[[:alnum:]\"\'][[:alnum:].\-\"\']*[[:space:]]*$ ]] &&
-      continue
+    [[ "$line" =~ $target_host_pattern ]] && continue
     die "inventory must contain hostnames only; line $lineno is not a host" \
       "assignment: $line"
   done <"$inventory"

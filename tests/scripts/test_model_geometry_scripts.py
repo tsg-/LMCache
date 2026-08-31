@@ -248,6 +248,18 @@ def test_inventory_is_hostnames_only() -> None:
     assert "target: mmgt" in result.stdout
 
 
+def test_inventory_accepts_quoted_target_hostnames(tmp_path: Path) -> None:
+    """The target hostname may use either shell quote style."""
+    for target in ("'mmgt'", '"mmgt"'):
+        inventory = tmp_path / "quoted-target.env"
+        inventory.write_text(f"INITIATOR_HOSTS=(mmgi0)\nTARGET_HOST={target}\n")
+
+        result = _run_script(INVENTORY_RUNNER, "show", str(inventory))
+
+        assert result.returncode == 0, result.stderr
+        assert "target: mmgt" in result.stdout
+
+
 def test_inventory_rejects_a_storage_path_setting(tmp_path: Path) -> None:
     """A storage path cannot be hidden in the host inventory."""
     inventory = tmp_path / "invalid.env"
