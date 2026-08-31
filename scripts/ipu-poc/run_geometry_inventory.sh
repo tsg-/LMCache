@@ -37,7 +37,7 @@ the LMCache checkout are discovered on each initiator; no interpreter or
 filesystem paths belong in the inventory.
 
 preflight checks the environment without writing. verify runs the small
-profile-identity gate on each initiator. sweep runs the timed three-profile
+profile-identity gate on each initiator. sweep runs the timed five-profile
 read benchmark.
 EOF
 }
@@ -196,8 +196,10 @@ prefix="$run_id-$host_name"
 mkdir -p results
 for profile in \
   scripts/ipu-poc/models/mixtral_8x22b_fp8_64k.yaml \
+  scripts/ipu-poc/models/mixtral_8x22b_fp8_128k.yaml \
   scripts/ipu-poc/models/deepseek_v3_fp8.yaml \
-  scripts/ipu-poc/models/mixtral_8x22b_fp8.yaml; do
+  scripts/ipu-poc/models/mixtral_8x22b_fp8.yaml \
+  scripts/ipu-poc/models/mixtral_8x22b_fp8_512k.yaml; do
   model=$(basename "$profile" .yaml)
   ROUNDS=2 BASE_PATH="$base_path" PREFIX="$prefix" \
     bash scripts/ipu-poc/run_model_geometry.sh store "$profile"

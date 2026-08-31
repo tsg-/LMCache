@@ -1,0 +1,71 @@
+# Model: Mixtral 8x22B — FP8 quantized KV cache, 64-token chunks
+#
+# Same architecture as mixtral_8x22b_fp8.yaml at half the chunk size, which
+# puts a 128 KiB page in the sweep. 128 KiB is the measured optimum of the
+# storage path underneath: fio on md0/XFS/NVMe-oF tops out at 766.8 Gb/s
+# combined there against 677 at 256 KiB and 681 at 64 KiB, and 128 KB is also
+# the block size Solidigm specs the drive's own sequential read at. This
+# profile exists so bench l2 can be scored at the fabric optimum rather than
+# next to it.
+#
+# Page size is fixed by elems_per_token * dtype_bytes * tokens_per_chunk, and
+# at 2048 B/token a 64-token chunk lands exactly on 131072. Mixtral's chunk
+# ladder (32/64/128 tokens -> 64/128/256 KiB) changes one field and holds the
+# layer count, so page size is a single variable across the three.
+
+model:
+  name: "mistralai/Mixtral-8x22B-Instruct-v0.1 (128 KiB page)"
+  family: mixtral
+
+architecture:
+  num_layers: 56
+  num_kv_heads: 8       # GQA with 8 KV heads
+  head_size: 128
+  kv_size: 2
+
+quantization:
+  dtype: float8_e4m3fn
+  dtype_bytes: 1
+
+chunking:
+  tokens_per_chunk: 64
+
+# Derived page sizing
+page:
+  # kv_size(2) × num_kv_heads(8) × head_size(128) × dtype_bytes(1) × tokens(64)
+  # = 131,072 = 128 KiB
+  page_size_bytes: 131072
+
+# Full-prefix retrieval
+burst:
+  layers_per_burst: 56
+  burst_bytes: 7340032      # 56 × 128 KiB = 7 MiB per request
+
+# Benchmark parameters
+benchmark_params:
+  object_size: 131072
+  page_size: 131072
+  num_objects: 56
+  buffer_size: "64GB"
+  num_source_objects: 4000
+
+# Working set analysis
+capacity:
+  pages_per_gib: 8192
+  pages_in_64gib: 524288
+  requests_in_64gib: 9362
+  tokens_cached_64gib: 599168   # same as the other two chunk sizes: bytes/token is unchanged
+
+# Traffic characteristics
+traffic:
+  # At 400Gb/s (50 GB/s) serving 128 KiB pages — 2× the page rate of the
+  # 128-token profile against the same fabric ceiling.
+  max_pages_per_sec: 400000
+  max_bursts_per_sec: 7142        # 400000 / 56
+
+# IPU considerations:
+# - 7 MiB per submit, so a request holds the DMA path half as long as at
+#   256 KiB while staying well clear of the per-page overhead that dominates
+#   the 64 KiB point.
+# - Sits at the storage path's own optimum, so any shortfall measured here is
+#   attributable to the LMCache read path rather than to block size.

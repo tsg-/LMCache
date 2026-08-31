@@ -72,15 +72,16 @@ rank)`, each packing one or more components whose sizes need not agree.
 | Profile | Model | Form | Objects/submit | Object | Submit payload |
 |---|---|---|---:|---:|---:|
 | `mixtral_8x22b_fp8_64k.yaml` | Mixtral 8x22B FP8, 32-token chunk | page burst | 56 | 64 KiB | 3.5 MiB |
+| `mixtral_8x22b_fp8_128k.yaml` | Mixtral 8x22B FP8, 64-token chunk | page burst | 56 | 128 KiB | 7 MiB |
 | `deepseek_v3_fp8.yaml` | DeepSeek-V3 FP8 | page burst | 61 | 144 KiB | 8.58 MiB |
 | `mixtral_8x22b_fp8.yaml` | Mixtral 8x22B FP8 | page burst | 56 | 256 KiB | 14 MiB |
+| `mixtral_8x22b_fp8_512k.yaml` | Mixtral 8x22B FP8, 256-token chunk | page burst | 56 | 512 KiB | 28 MiB |
 | `minimax_m3_bf16_tp8.yaml` | MiniMax-M3 bf16, TP=8 | object group | 8 | 9.34 MiB | 74.7 MiB |
 
-The two Mixtral profiles are the same model at different chunk sizes, which is
-the only way to reach a 64 KiB page: page size is fixed by
-`elems_per_token * dtype_bytes * tokens_per_chunk`, and DeepSeek's MLA caches
-576 B/token, which has no integer chunk size at 64 KiB. They occupy separate key
-namespaces, so one prefix holds both corpora.
+The four Mixtral profiles change only chunk size (32/64/128/256 tokens), so page
+size is the single variable: 64/128/256/512 KiB. DeepSeek's MLA cache is
+576 B/token, which has no integer 64 KiB page. Profiles occupy separate key
+namespaces, so one prefix holds all corpora.
 
 MiniMax-M3 is the reason the object-group form exists. Its 60-layer main K/V
 and its 57-layer key-only DSA indexer are both full attention, so LMCache
@@ -197,14 +198,16 @@ for profile in scripts/ipu-poc/models/*.yaml; do
 done
 ```
 
-At `ROUNDS=2 IN_FLIGHT=8` the three swept corpora need about 420 MiB in total,
+At `ROUNDS=2 IN_FLIGHT=8` the five swept corpora need about 977 MiB in total,
 and that scales linearly with both. Per profile:
 
 | Profile | Keys stored | Corpus |
 |---|---:|---:|
 | `mixtral_8x22b_fp8_64k.yaml` | 896 | 56 MiB |
+| `mixtral_8x22b_fp8_128k.yaml` | 896 | 112 MiB |
 | `deepseek_v3_fp8.yaml` | 976 | 137 MiB |
 | `mixtral_8x22b_fp8.yaml` | 896 | 224 MiB |
+| `mixtral_8x22b_fp8_512k.yaml` | 896 | 448 MiB |
 | `minimax_m3_bf16_tp8.yaml` | 128 | 1195 MiB |
 
 Size the corpus past host DRAM or drop caches between models, or the load
@@ -239,6 +242,10 @@ M=scripts/ipu-poc/models
 ROUNDS=2 bash $R store $M/mixtral_8x22b_fp8_64k.yaml
 DURATION_SEC=60 bash $R sustained-load $M/mixtral_8x22b_fp8_64k.yaml
 
+# Mixtral 8x22B FP8, 64-token chunk — 56 x 128 KiB
+ROUNDS=2 bash $R store $M/mixtral_8x22b_fp8_128k.yaml
+DURATION_SEC=60 bash $R sustained-load $M/mixtral_8x22b_fp8_128k.yaml
+
 # DeepSeek-V3 FP8 — 61 x 144 KiB
 ROUNDS=2 bash $R store $M/deepseek_v3_fp8.yaml
 DURATION_SEC=60 bash $R sustained-load $M/deepseek_v3_fp8.yaml
@@ -246,6 +253,10 @@ DURATION_SEC=60 bash $R sustained-load $M/deepseek_v3_fp8.yaml
 # Mixtral 8x22B FP8 — 56 x 256 KiB
 ROUNDS=2 bash $R store $M/mixtral_8x22b_fp8.yaml
 DURATION_SEC=60 bash $R sustained-load $M/mixtral_8x22b_fp8.yaml
+
+# Mixtral 8x22B FP8, 256-token chunk — 56 x 512 KiB
+ROUNDS=2 bash $R store $M/mixtral_8x22b_fp8_512k.yaml
+DURATION_SEC=60 bash $R sustained-load $M/mixtral_8x22b_fp8_512k.yaml
 ```
 
 MiniMax-M3 needs its own adapter, because its 9,790,464 B object is not

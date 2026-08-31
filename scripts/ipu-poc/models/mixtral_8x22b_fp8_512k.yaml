@@ -1,0 +1,72 @@
+# Model: Mixtral 8x22B — FP8 quantized KV cache, 256-token chunks
+#
+# Same architecture as mixtral_8x22b_fp8.yaml at double the chunk size, which
+# puts a 512 KiB page in the sweep. This profile exists because `bench l2` on
+# this rig is object-rate bound, not bandwidth bound: measured peak object
+# rate is ~144-154K objects/s per host at both 128 KiB and 256 KiB, so
+# bandwidth tracks object_rate * page_size and a larger page buys throughput
+# even though the storage path underneath prefers 128 KiB. At 150K objects/s a
+# 512 KiB page implies ~629 Gb/s per host, above the ~383 Gb/s of wire, so this
+# is the point where the bench should become fabric-limited rather than
+# submit-path limited.
+#
+# Page size is fixed by elems_per_token * dtype_bytes * tokens_per_chunk, and
+# at 2048 B/token a 256-token chunk lands exactly on 524288. Mixtral's chunk
+# ladder (32/64/128/256 tokens -> 64/128/256/512 KiB) changes one field and
+# holds the layer count, so page size stays a single variable across the four.
+
+model:
+  name: "mistralai/Mixtral-8x22B-Instruct-v0.1 (512 KiB page)"
+  family: mixtral
+
+architecture:
+  num_layers: 56
+  num_kv_heads: 8       # GQA with 8 KV heads
+  head_size: 128
+  kv_size: 2
+
+quantization:
+  dtype: float8_e4m3fn
+  dtype_bytes: 1
+
+chunking:
+  tokens_per_chunk: 256
+
+# Derived page sizing
+page:
+  # kv_size(2) × num_kv_heads(8) × head_size(128) × dtype_bytes(1) × tokens(256)
+  # = 524,288 = 512 KiB
+  page_size_bytes: 524288
+
+# Full-prefix retrieval
+burst:
+  layers_per_burst: 56
+  burst_bytes: 29360128     # 56 × 512 KiB = 28 MiB per request
+
+# Benchmark parameters
+benchmark_params:
+  object_size: 524288
+  page_size: 524288
+  num_objects: 56
+  buffer_size: "64GB"
+  num_source_objects: 4000
+
+# Working set analysis
+capacity:
+  pages_per_gib: 2048
+  pages_in_64gib: 131072
+  requests_in_64gib: 2340
+  tokens_cached_64gib: 599168   # same as the other chunk sizes: bytes/token is unchanged
+
+# Traffic characteristics
+traffic:
+  # At 400Gb/s (50 GB/s) serving 512 KiB pages — half the page rate of the
+  # 128-token profile against the same fabric ceiling.
+  max_pages_per_sec: 100000
+  max_bursts_per_sec: 1785        # 100000 / 56
+
+# IPU considerations:
+# - 28 MiB per submit, so a request holds the DMA path four times as long as at
+#   128 KiB. Fewest burst boundaries per byte of any profile in the sweep.
+# - A 256-token chunk is large for a real serving workload; treat this as a
+#   headroom probe for the submit path rather than a deployable geometry.
