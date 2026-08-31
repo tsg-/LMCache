@@ -223,13 +223,11 @@ facts so they are not lost; it is not a procedure to run.
 
 There was a `falcon_host_setup.sh` here that reproduced the bring-up. It was
 removed, because owning another team's step is a trap in a specific way: the
-modules are insmod'd from build trees under `/root/naveen/`, which are rebuilt
-on the platform team's schedule, so any path we pin goes stale silently. It
-did. The script pinned
-`release-ci-falcon-1.3.2/falcon_patches/irdma-0.0.129.57-hvl/`, while all three
-hosts had moved to the `from_jijun/` build of the same version — so running it
-would have swapped the driver and dropped the `irdma_clean_cqes` CQ-resize
-use-after-free fix, without any error.
+modules are insmod'd from build trees the platform team rebuilds on its own
+schedule, so any path we pin goes stale silently. It did — the pinned path had
+been superseded on all three hosts by a newer build of the same version, so
+running the script would have downgraded the driver without any error. Ask the
+platform team which build is current instead of pinning one here.
 
 ### As-built fabric map
 
