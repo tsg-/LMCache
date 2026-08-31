@@ -49,8 +49,8 @@ external counters this endpoint exists to align against *do* include
 warmup I/O, so omitting it would leave an unexplained gap in the NIC and
 NVMe series. It is a separate series precisely so it can never be
 mistaken for, or summed into, the measured figures. Use a window of at
-least 60 s: the irdma driver refreshes ``hw_counters`` asynchronously
-(roughly 1 s), and shorter rate windows alias badly against it.
+least 60 s: RDMA drivers refresh ``hw_counters`` asynchronously (order
+1 s), and shorter rate windows alias badly against that refresh.
 
 **Thread-safety model.** The unsynchronised read in
 :meth:`BenchMetricsState.snapshot` relies on CPython's GIL making list

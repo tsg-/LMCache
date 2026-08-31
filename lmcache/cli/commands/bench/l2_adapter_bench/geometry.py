@@ -315,9 +315,8 @@ def resolve_submit_geometry(path: str) -> L2SubmitGeometry:
 def resolve_geometry_profile(path: str) -> L2GeometryProfile:
     """Load and validate a uniform-page model geometry profile.
 
-    The supported profile contract is the one used by
-    ``scripts/ipu-poc/models``: a model name, token chunk size, uniform
-    ``page_size_bytes``, and ``layers_per_burst``. The resolver validates
+    The supported profile contract is a model name, token chunk size,
+    uniform ``page_size_bytes``, and ``layers_per_burst``. The resolver validates
     the declared page size against the model's MLA or GQA fields when they
     are present.
 
