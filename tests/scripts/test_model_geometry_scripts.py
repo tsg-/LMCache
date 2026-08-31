@@ -75,6 +75,8 @@ def _run_script(
         "READ_WRITE_RATIO",
         "OUTPUT",
         "OUT",
+        "METRICS_PORT",
+        "METRICS_BIND_ADDRESS",
     ):
         environment.pop(name, None)
     environment |= env
@@ -191,10 +193,50 @@ def test_the_corpus_covers_both_geometry_forms() -> None:
 
 def test_runner_discovers_the_checkout_venv_without_python_override() -> None:
     """The handoff script selects an installed checkout interpreter itself."""
+    expected = next(
+        (
+            interpreter
+            for name in (".venv-bench-l2", ".venv")
+            if os.access(interpreter := ROOT / name / "bin" / "python", os.X_OK)
+        ),
+        None,
+    )
+    assert expected is not None, "no checkout virtual environment to discover"
+
     result = _run_runner_without_python("show", str(PROFILES[0]))
 
     assert result.returncode == 0, result.stderr
-    assert f"python: {ROOT / '.venv' / 'bin' / 'python'}" in result.stdout
+    assert f"python: {expected}" in result.stdout
+
+
+def test_runner_forwards_an_optional_metrics_port(tmp_path: Path) -> None:
+    """A sustained run can expose its live counters over loopback."""
+    invocation_log = tmp_path / "invocations.txt"
+    fake_python = tmp_path / "python"
+    fake_python.write_text(
+        '#!/usr/bin/env bash\nprintf \'%s\\n\' "$*" >> "$INVOCATION_LOG"\n'
+    )
+    fake_python.chmod(0o755)
+
+    result = _run_script(
+        RUNNER,
+        "sustained-load",
+        str(PAGE_BURST_PROFILES[0]),
+        PYTHON=str(fake_python),
+        INVOCATION_LOG=str(invocation_log),
+        BASE_PATH=str(tmp_path / "storage"),
+        PREFIX="metrics",
+        METRICS_PORT="9101",
+    )
+
+    assert result.returncode == 0, result.stderr
+    bench_invocation = next(
+        line
+        for line in invocation_log.read_text().splitlines()
+        if "-m lmcache.cli.main bench l2" in line
+    )
+    assert "--serve-metrics 9101" in bench_invocation
+    assert "--metrics-bind-address 127.0.0.1" in bench_invocation
 
 
 def test_inventory_is_hostnames_only() -> None:
@@ -225,6 +267,92 @@ def test_inventory_runner_advertises_corpus_verification() -> None:
 
     assert result.returncode == 0, result.stderr
     assert "run_geometry_inventory.sh verify INVENTORY" in result.stdout
+
+
+def test_inventory_sweep_uses_the_mmg_metrics_port(tmp_path: Path) -> None:
+    """The MMG coordinator exposes each initiator's sustained-load endpoint."""
+    inventory = tmp_path / "inventory.env"
+    inventory.write_text("INITIATOR_HOSTS=(mmgi0 mmgi1)\nTARGET_HOST=mmgt\n")
+    invocation_log = tmp_path / "remote-invocations.txt"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_ssh = fake_bin / "ssh"
+    fake_ssh.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "host=\n"
+        'for arg in "$@"; do\n'
+        '  case "$arg" in mmgt|mmgi0|mmgi1) host=$arg ;; esac\n'
+        "done\n"
+        "body=$(cat)\n"
+        'if [ "$host" = mmgt ]; then\n'
+        "  printf '%s\\n' 200.0.0.37\n"
+        'elif [[ "$body" == *findmnt* ]]; then\n'
+        "  printf '%s\\n' /root/LMCache\n"
+        "else\n"
+        '  printf \'%s\\n\' "$body" >> "$INVOCATION_LOG"\n'
+        "fi\n"
+    )
+    fake_ssh.chmod(0o755)
+
+    result = _run_script(
+        INVENTORY_RUNNER,
+        "sweep",
+        str(inventory),
+        PATH=f"{fake_bin}:{os.environ['PATH']}",
+        INVOCATION_LOG=str(invocation_log),
+        RUN_ID="test-metrics",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert invocation_log.read_text().count("METRICS_PORT=9101") == 2
+
+
+def test_preflight_carries_every_target_address_to_the_initiator(
+    tmp_path: Path,
+) -> None:
+    """A target exporting two addresses reaches the initiator as one argument.
+
+    ssh joins its arguments into a single remote command string, so a newline
+    between addresses is read as a command separator and only the first address
+    survives.
+    """
+    inventory = tmp_path / "inventory.env"
+    inventory.write_text("INITIATOR_HOSTS=(mmgi0)\nTARGET_HOST=mmgt\n")
+    argument_log = tmp_path / "remote-arguments.txt"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_ssh = fake_bin / "ssh"
+    fake_ssh.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "host=\n"
+        'for arg in "$@"; do\n'
+        '  case "$arg" in mmgt|mmgi0) host=$arg ;; esac\n'
+        "done\n"
+        'if [ "$host" = mmgt ]; then\n'
+        "  printf '%s\\n%s\\n' 200.0.6.2 200.0.5.2\n"
+        "  exit 0\n"
+        "fi\n"
+        "cat >/dev/null\n"
+        'printf "%s\\n" "${@: -1}" >> "$ARGUMENT_LOG"\n'
+        "printf '%s\\n' /root/LMCache\n"
+    )
+    fake_ssh.chmod(0o755)
+
+    result = _run_script(
+        INVENTORY_RUNNER,
+        "preflight",
+        str(inventory),
+        PATH=f"{fake_bin}:{os.environ['PATH']}",
+        ARGUMENT_LOG=str(argument_log),
+    )
+
+    assert result.returncode == 0, result.stderr
+    delivered = argument_log.read_text().strip()
+    assert "200.0.6.2" in delivered
+    assert "200.0.5.2" in delivered
+    assert "\n" not in delivered
 
 
 def test_readme_includes_an_example_for_every_profile() -> None:

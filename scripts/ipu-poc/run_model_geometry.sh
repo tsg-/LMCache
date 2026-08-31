@@ -76,6 +76,9 @@ Optional environment variables:
   READ_WRITE_RATIO mixed read:write ratio (default: 5:1)
   WRITE_PREFIX    fresh store namespace for mixed mode (required for mixed)
   OUTPUT          JSON result path (optional)
+  METRICS_PORT    serve live Prometheus metrics on this loopback TCP port
+  METRICS_BIND_ADDRESS
+                  metrics listener address (default: 127.0.0.1)
 
 The helper prints the resolved profile before submitting work.
 
@@ -189,6 +192,17 @@ run_bench() {
   )
   if [ -n "${OUTPUT:-}" ]; then
     common+=(--output "$OUTPUT" --format json)
+  fi
+  if [ -n "${METRICS_PORT:-}" ]; then
+    if ! [[ "$METRICS_PORT" =~ ^[1-9][0-9]*$ ]] ||
+      [ "$METRICS_PORT" -gt 65535 ]; then
+      echo "ABORT: METRICS_PORT must be a TCP port in 1..65535" >&2
+      exit 2
+    fi
+    common+=(
+      --serve-metrics "$METRICS_PORT"
+      --metrics-bind-address "${METRICS_BIND_ADDRESS:-127.0.0.1}"
+    )
   fi
 
   case "$mode" in

@@ -4,12 +4,14 @@
 # Run or preflight a profile-shaped L2 sweep from a host-only inventory.
 #
 # The inventory deliberately identifies machines only. The benchmark directory
-# is fixed beneath the expected remote NVMe-oF mount so an operator cannot
-# accidentally redirect a run to the OS filesystem.
+# sits beneath the remote NVMe-oF mount; BENCH_MOUNT may name a different mount
+# per rig, but preflight is what keeps a run off the OS filesystem -- it refuses
+# any mount that is not a real mount point backed by a controller the target
+# serves.
 set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-readonly BENCH_MOUNT=/mnt/lmcache-stage2
+readonly BENCH_MOUNT=${BENCH_MOUNT:-/mnt/lmcache}
 readonly BENCH_ROOT="$BENCH_MOUNT/bench-l2"
 MODE=${1:-help}
 if [ "$#" -gt 0 ]; then
@@ -28,10 +30,11 @@ The inventory is Bash syntax and must contain only:
   INITIATOR_HOSTS=(host1 host2 ...)
   TARGET_HOST=host
 
-The coordinator uses /mnt/lmcache-stage2/bench-l2 on every initiator. It
-refuses to run unless that mount exists and contains an NVMe-oF controller
-served by TARGET_HOST. Python and the LMCache checkout are discovered on each
-initiator; no interpreter or filesystem paths belong in the inventory.
+The coordinator uses $BENCH_MOUNT/bench-l2 on every initiator, where
+BENCH_MOUNT defaults to /mnt/lmcache. It refuses to run unless that mount
+exists and contains an NVMe-oF controller served by TARGET_HOST. Python and
+the LMCache checkout are discovered on each initiator; no interpreter or
+filesystem paths belong in the inventory.
 
 preflight checks the environment without writing. verify runs the small
 profile-identity gate on each initiator. sweep runs the timed three-profile
@@ -92,8 +95,11 @@ target_addresses() {
 preflight_initiator() {
   local host=$1
   local addresses=$2
+  # ssh joins its arguments into a single remote shell command, so a newline
+  # inside an argument is read as a command separator. Send the address list
+  # comma-joined and split it again on the far side.
   ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" \
-    bash -s -- "$BENCH_MOUNT" "$addresses" <<'REMOTE'
+    bash -s -- "$BENCH_MOUNT" "$(tr '\n' ',' <<<"$addresses")" <<'REMOTE'
 set -euo pipefail
 
 mount=$1
@@ -111,7 +117,7 @@ while IFS= read -r address; do
     matched=1
     break
   fi
-done <<<"$addresses"
+done <<<"$(tr ',' '\n' <<<"$addresses")"
 [ "$matched" -eq 1 ] ||
   { echo "ABORT: no NVMe-oF controller matches the target export" >&2; exit 2; }
 
@@ -196,7 +202,8 @@ for profile in \
   ROUNDS=2 BASE_PATH="$base_path" PREFIX="$prefix" \
     bash scripts/ipu-poc/run_model_geometry.sh store "$profile"
   OUTPUT="results/$run_id-$host_name-$model.json" \
-    DURATION_SEC=60 BASE_PATH="$base_path" PREFIX="$prefix" \
+    DURATION_SEC=60 METRICS_PORT=9101 \
+    BASE_PATH="$base_path" PREFIX="$prefix" \
     bash scripts/ipu-poc/run_model_geometry.sh sustained-load "$profile"
 done
 REMOTE

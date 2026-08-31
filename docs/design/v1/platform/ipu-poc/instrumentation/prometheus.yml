@@ -47,13 +47,6 @@ scrape_configs:
   # drivers assign METRICS_BASE_PORT + id, and a single fixed target would only
   # ever see initiator 0.
   #
-  # PLANNED CONFIGURATION, not yet exercisable from this branch:
-  #   - `--serve-metrics` lives on feat/bench-l2-sustained-only (0d88de0a).
-  #   - run_multi_initiator_{load,mixed}.sh, which assign the per-id ports, are
-  #     untracked and absent from that branch too.
-  # Until both land, expect all four to stay down. Ports 19104/19105 have never
-  # been exercised against a real 4-initiator run.
-  #
   # Expect `up == 0` between sweep cells: the endpoint dies with the process.
   # That is not a scrape failure. A 120s cell at the 5s interval yields ~24
   # samples. Rate over the `measured` phase only -- the `phase` label separates
@@ -96,11 +89,10 @@ scrape_configs:
   # Local port encodes both host and initiator id: 1911x -> mmgi0, 1912x -> mmgi1,
   # last digit is the id. Remote side is METRICS_BASE_PORT + id on each host.
   #
-  # NOT YET EXERCISED. `bench l2` is not installed on mmgi0/mmgi1 as of
-  # 2026-08-27 (the geometry sweep there drives fio), so expect all eight to
-  # stay down. Same short-lived-endpoint semantics as the mkp job above: `up ==
-  # 0` between cells is expected, and rates are valid over `phase="measured"`
-  # only.
+  # The host-only geometry coordinator uses id 0 (port 9101) on each host.
+  # Ports 9102-9104 remain reserved for an explicit local multi-process run.
+  # As with the mkp job, `up == 0` between cells is expected, and rates are
+  # valid over `phase="measured"` only.
   - job_name: lmcache_bench_mmg
     static_configs:
       # ssh -N -L 1911{0,1,2,3}:127.0.0.1:910{1,2,3,4} mmgi0
