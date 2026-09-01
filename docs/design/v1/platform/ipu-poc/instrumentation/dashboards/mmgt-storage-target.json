@@ -22,7 +22,7 @@
         "type": "prometheus",
         "uid": "PROM"
       },
-      "description": "Application payload goodput per operation, summed across bench l2 initiators on mmgi0/mmgi1. Identical expression to LMCache aggregate goodput below. Over 01:35-01:45 UTC on 2026-08-28 this read 126.75 Gb/s mean against NVMe RD's 126.72, so payload and device reads reconcile to 0.02% and nothing is being served from page cache. Read and write goodput are deliberately not added together. Use the end-of-run JSON for publishable throughput.",
+      "description": "Application payload throughput per operation, summed across bench l2 initiators on mmgi0/mmgi1 and across warmup+measured -- unlike LMCache aggregate goodput below, which is measured-only. Warmup is real O_DIRECT I/O against the same devices and fabric NVMe RD/RDMA WR account for, so leaving it out understated this panel by up to ~3.5x during a multi-initiator sweep where hosts run warmup/measured out of phase with each other. Expect this to track NVMe RD/RDMA WR closely at all times, not just during a measured window. A rate() window straddling a warmup->measured transition still dips briefly, since each phase is its own counter starting from zero. Read and write goodput are deliberately not added together. For the clean steady-state number, use LMCache aggregate goodput below or the end-of-run JSON.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -78,13 +78,13 @@
             "uid": "PROM"
           },
           "editorMode": "code",
-          "expr": "sum by (operation) (rate(lmcache_bench_l2_success_bytes_total{job=\"lmcache_bench_mmg\",host=~\"mmgi.*\",phase=\"measured\"}[60s])) * 8",
+          "expr": "sum by (operation) (rate(lmcache_bench_l2_success_bytes_total{job=\"lmcache_bench_mmg\",host=~\"mmgi.*\"}[60s])) * 8",
           "legendFormat": "{{operation}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "LMCache Goodput",
+      "title": "LMCache",
       "type": "stat"
     },
     {
@@ -92,7 +92,7 @@
         "type": "prometheus",
         "uid": "PROM"
       },
-      "description": "Aggregate kernel read throughput off the eight md0 members, in bits/s. Shares a hue with RDMA WR: the two ends of the read path. Tracks LMCache Goodput to within 0.1% during a retrieve run. The storage stack section shows the same figure in bytes/s.",
+      "description": "Aggregate kernel read throughput off the eight md0 members, in bits/s. Shares a hue with RDMA WR: the two ends of the read path. Tracks LMCache to within 0.1% during a retrieve run. The storage stack section shows the same figure in bytes/s.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -232,7 +232,7 @@
         "type": "prometheus",
         "uid": "PROM"
       },
-      "description": "Aggregate kernel write throughput off the eight md0 members, in bits/s. Shares a hue with RDMA RD: the two ends of the write path. Reads 0 throughout a Load-only (retrieve) window, which is the expected result and not a dead query - check the operation names on LMCache Goodput to tell the two cases apart.",
+      "description": "Aggregate kernel write throughput off the eight md0 members, in bits/s. Shares a hue with RDMA RD: the two ends of the write path. Reads 0 throughout a Load-only (retrieve) window, which is the expected result and not a dead query - check the operation names on LMCache to tell the two cases apart.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1256,7 +1256,7 @@
         "code": {
           "language": "plaintext"
         },
-        "content": "**`operation`** is the phase: `Load` is retrieve (reads), `Store` is insert (writes). The names appear on the **LMCache Goodput** tile above.\n\nIn a `Load`-only window **NVMe WR** and **RDMA RD** read ~0 by construction - that is the read path confirming itself, not a dead query. **LMCache Goodput** and **NVMe RD** should track each other; a gap between them would mean reads served from page cache. **RDMA WR** and **RDMA RD** come off a burst-latched ACC counter on a 5m window, so trust their trend, not a single reading.\n\n**RDMA WR = fabric TX = payload pushed to initiators**, and it is the same bytes as **NVMe RD** one hop earlier. **RDMA RD = fabric RX = payload arriving from initiators**, same bytes as **NVMe WR**. The summary tiles and the Falcon panel below name the same two counters.",
+        "content": "**`operation`** is the phase: `Load` is retrieve (reads), `Store` is insert (writes). The names appear on the **LMCache** tile above.\n\nIn a `Load`-only window **NVMe WR** and **RDMA RD** read ~0 by construction - that is the read path confirming itself, not a dead query. **LMCache** and **NVMe RD** should track each other at all times, warmup included; a gap between them would mean reads served from page cache, or a brief dip at a warmup->measured transition. **RDMA WR** and **RDMA RD** come off a burst-latched ACC counter on a 5m window, so trust their trend, not a single reading.\n\n**RDMA WR = fabric TX = payload pushed to initiators**, and it is the same bytes as **NVMe RD** one hop earlier. **RDMA RD = fabric RX = payload arriving from initiators**, same bytes as **NVMe WR**. The summary tiles and the Falcon panel below name the same two counters.",
         "mode": "markdown"
       },
       "title": "Reading this section",
@@ -3690,7 +3690,7 @@
                 "uid": "PROM"
               },
               "editorMode": "code",
-              "expr": "clamp_min(sum(deriv(acc_tele_field{host=\"mmgt\",acc=\"acc2\",field=\"bytes_to_ulp\"}[5m])), 0) * 8",
+              "expr": "clamp_min(sum(rate(acc_telemetry_bytes_total{host=\"mmgt\",acc=\"acc2\",counter=\"bytes_to_ulp\"}[60s])), 0) * 8",
               "legendFormat": "RDMA RX",
               "range": true,
               "refId": "A"
@@ -3760,7 +3760,7 @@
                 "uid": "PROM"
               },
               "editorMode": "code",
-              "expr": "clamp_min(sum(deriv(acc_tele_field{host=\"mmgt\",acc=\"acc2\",field=\"bytes_from_ulp_rc\"}[5m])), 0) * 8",
+              "expr": "clamp_min(sum(rate(acc_telemetry_bytes_total{host=\"mmgt\",acc=\"acc2\",counter=\"bytes_from_ulp_rc\"}[60s])), 0) * 8",
               "legendFormat": "RDMA TX",
               "range": true,
               "refId": "A"
@@ -3909,7 +3909,7 @@
                 "uid": "PROM"
               },
               "editorMode": "code",
-              "expr": "clamp_min(sum(deriv(acc_tele_field{host=\"mmgt\",acc=\"acc1\",field=\"bytes_to_ulp\"}[5m])), 0) * 8",
+              "expr": "clamp_min(sum(rate(acc_telemetry_bytes_total{host=\"mmgt\",acc=\"acc1\",counter=\"bytes_to_ulp\"}[60s])), 0) * 8",
               "legendFormat": "RDMA RX",
               "range": true,
               "refId": "A"
@@ -3979,7 +3979,7 @@
                 "uid": "PROM"
               },
               "editorMode": "code",
-              "expr": "clamp_min(sum(deriv(acc_tele_field{host=\"mmgt\",acc=\"acc1\",field=\"bytes_from_ulp_rc\"}[5m])), 0) * 8",
+              "expr": "clamp_min(sum(rate(acc_telemetry_bytes_total{host=\"mmgt\",acc=\"acc1\",counter=\"bytes_from_ulp_rc\"}[60s])), 0) * 8",
               "legendFormat": "RDMA TX",
               "range": true,
               "refId": "A"
@@ -4531,6 +4531,155 @@
       ],
       "title": "Initiator ACC aggregate busy % by host",
       "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 108
+      },
+      "panels": [],
+      "title": "Sanity checks",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM"
+      },
+      "description": "LMCache Load bytes as a percentage of NVMe RD, gated to only compute while both initiators (mmgi0, mmgi1) are actively running -- Initiators Active == 2. Outside that window the two metrics decay at different rates for reasons that have nothing to do with a real mismatch (see the Initiators Active panel above), so this deliberately shows '-' rather than a misleading number. Historically reconciles to within 0.02-0.1% during a genuine steady-state read. A sustained reading well under 100% during an active window is the one case that would mean reads served from page cache instead of the media.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "noValue": "-",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 90
+              },
+              {
+                "color": "green",
+                "value": 97
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 6,
+        "x": 0,
+        "y": 109
+      },
+      "id": 55,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "last"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "text": {
+          "titleSize": 14,
+          "valueSize": 26
+        },
+        "textMode": "value_and_name",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PROM"
+          },
+          "editorMode": "code",
+          "expr": "(sum(rate(lmcache_bench_l2_success_bytes_total{job=\"lmcache_bench_mmg\",host=~\"mmgi.*\",operation=\"Load\"}[60s])) / sum(rate(node_disk_read_bytes_total{host=\"mmgt\",device=~\"$device\"}[60s])) * 100) and on() (sum(up{job=\"lmcache_bench_mmg\",host=~\"mmgi.*\",initiator=\"0\"}) == 2)",
+          "legendFormat": "LMCache / NVMe RD",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "LMCache / NVMe RD reconciliation",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM"
+      },
+      "description": "What each initiator is actually running, for correlating a number elsewhere on this dashboard with the run that produced it. `model` is the --kvcache-shape-profile file's stem (e.g. mixtral_8x22b_fp8_64k), the same identifier result JSON filenames and the sweep tables in README-model-geometry.md use -- or the resolved geometry's own model name when no profile file was given. Scrub the dashboard's time picker and this table follows: it shows whatever was last true within the selected window, same as any other panel here.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 6,
+        "y": 109
+      },
+      "id": 56,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PROM"
+          },
+          "editorMode": "code",
+          "expr": "lmcache_bench_l2_in_flight_target{job=\"lmcache_bench_mmg\",host=~\"mmgi.*\"}",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "__auto",
+          "refId": "A"
+        }
+      ],
+      "title": "Active Runs — model, operation, phase, in-flight",
+      "type": "table"
     }
   ],
   "refresh": "4s",
