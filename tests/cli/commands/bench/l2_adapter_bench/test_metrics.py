@@ -88,15 +88,24 @@ def _free_port() -> int:
 def _series(text: str, metric: str, **labels: str) -> float:
     """Return the value of one sample, or raise if it is not present.
 
-    Matches on the exact label set, so a test asserting
-    ``phase="measured"`` cannot be satisfied by a warmup sample.
+    Matches any sample whose labels are a superset of *labels*, not an
+    exact set: every real series also carries a ``model`` label, and
+    requiring every call site here to spell that out would make this
+    helper track the collector's implementation rather than the
+    behavior under test. A test asserting ``phase="measured"`` still
+    cannot be satisfied by a warmup sample, since ``phase`` itself is
+    always checked.
     """
-    rendered = ",".join(f'{k}="{v}"' for k, v in labels.items())
-    prefix = f"lmcache_bench_l2_{metric}{{{rendered}}} "
+    prefix = f"lmcache_bench_l2_{metric}{{"
     for line in text.splitlines():
-        if line.startswith(prefix):
-            return float(line[len(prefix) :])
-    raise AssertionError(f"no sample {prefix!r} in:\n{text}")
+        if not line.startswith(prefix):
+            continue
+        block, _, value = line[len(prefix) :].partition("} ")
+        sample_labels = dict(item.split("=", 1) for item in block.split(",") if item)
+        sample_labels = {k: v.strip('"') for k, v in sample_labels.items()}
+        if all(sample_labels.get(k) == v for k, v in labels.items()):
+            return float(value)
+    raise AssertionError(f"no sample matching {labels} for {metric} in:\n{text}")
 
 
 def _names(text: str, metric: str) -> list[str]:
@@ -405,6 +414,57 @@ def test_re_registering_the_same_phase_replaces_it() -> None:
         == 1.0
     )
     assert len(state.snapshot()) == 1
+
+
+def test_model_label_is_attached_to_every_series() -> None:
+    """A dashboard needs to know which profile produced a run's numbers.
+
+    The label is fixed at construction, not per phase or operation, so
+    every series a state produces carries the same value.
+    """
+    state = BenchMetricsState(model_name="mixtral_8x22b_fp8_64k")
+    result = _result("Store")
+    state.register("Store", result, PHASE_MEASURED)
+    result.completed_submits = 3
+
+    text = _scrape(state)
+
+    assert (
+        _series(
+            text,
+            "completed_submits_total",
+            operation="Store",
+            phase=PHASE_MEASURED,
+            model="mixtral_8x22b_fp8_64k",
+        )
+        == 3.0
+    )
+
+
+def test_an_unset_model_label_renders_as_empty_not_omitted() -> None:
+    """The default constructor still must not raise or omit the label.
+
+    A caller that never sets ``model_name`` (every pre-existing test in
+    this file) must keep working, and the label must render as an empty
+    value rather than disappear -- an omitted label would silently
+    change the series' identity for any consumer that names it.
+    """
+    state = BenchMetricsState()
+    result = _result("Store")
+    state.register("Store", result, PHASE_MEASURED)
+
+    text = _scrape(state)
+
+    assert (
+        _series(
+            text,
+            "completed_submits_total",
+            operation="Store",
+            phase=PHASE_MEASURED,
+            model="",
+        )
+        == 0.0
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -736,7 +796,12 @@ def test_a_rounds_run_with_warmup_labels_the_combined_series(
     run_l2_adapter_bench(MagicMock(), args)
 
     text = _scrape(captured["state"])
-    phases = {block.split(",")[1] for block in _names(text, "completed_submits_total")}
+    # prometheus_client renders labels alphabetically (model, operation,
+    # phase), not in declaration order, so pick "phase=" out by name.
+    phases = {
+        next(item for item in block.split(",") if item.startswith("phase="))
+        for block in _names(text, "completed_submits_total")
+    }
     assert phases == {f'phase="{PHASE_WARMUP_AND_MEASURED}"'}, text
     # 3 rounds (1 warmup + 2 measured) x 2 in-flight submits, and the
     # count must not have been rewound by _strip_warmup.
@@ -785,3 +850,82 @@ def test_a_sustained_run_separates_its_warmup_window(
     )
     assert warmup > 0
     assert measured > 0
+
+
+def test_a_profile_run_labels_its_series_with_the_profile_stem(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The dashboard correlates a run with a model by this label.
+
+    The profile file's stem is what result JSON filenames and the sweep
+    tables in README-model-geometry.md already use to name a run, so the
+    live label matches what an operator sees everywhere else.
+    """
+    profile = tmp_path / "deepseek_v3_fp8.yaml"
+    profile.write_text(
+        "\n".join(
+            [
+                'model: {name: "deepseek-ai/DeepSeek-V3"}',
+                (
+                    "architecture: {num_layers: 61, attention: mla, "
+                    "cached_elems_per_token: 576}"
+                ),
+                "quantization: {dtype_bytes: 1}",
+                "chunking: {tokens_per_chunk: 256}",
+                "page: {page_size_bytes: 147456}",
+                "burst: {layers_per_burst: 61, burst_bytes: 8994816}",
+            ]
+        )
+    )
+    captured = _capture_state(monkeypatch)
+    port = _free_port()
+    args = _parse(
+        "--serve-metrics",
+        str(port),
+        "--kvcache-shape-profile",
+        str(profile),
+        "--key-prefix",
+        "metrics-profile",
+        "--in-flight",
+        "2",
+        "--rounds",
+        "1",
+        "--warmup-rounds",
+        "0",
+        adapter_json=json.dumps({"type": "fs", "base_path": str(tmp_path / "l2")}),
+    )
+
+    run_l2_adapter_bench(MagicMock(), args)
+
+    assert captured["state"].model_name == "deepseek_v3_fp8"
+    text = _scrape(captured["state"])
+    assert (
+        _series(
+            text,
+            "completed_submits_total",
+            operation="Store",
+            phase=PHASE_MEASURED,
+            model="deepseek_v3_fp8",
+        )
+        > 0
+    )
+
+
+def test_a_shape_spec_run_falls_back_to_the_geometry_model_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No profile file means no stem to name the run with.
+
+    The raw/uniform geometry path has no ``--kvcache-shape-profile``, so
+    the label falls back to whatever the resolved geometry already calls
+    itself rather than being left empty.
+    """
+    captured = _capture_state(monkeypatch)
+    port = _free_port()
+    args = _e2e_args(
+        tmp_path, port, "--rounds", "1", "--warmup-rounds", "0", prefix="metrics-shape"
+    )
+
+    run_l2_adapter_bench(MagicMock(), args)
+
+    assert captured["state"].model_name == "bench-model"

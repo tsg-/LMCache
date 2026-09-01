@@ -10,6 +10,7 @@ adapter benchmark.
 from __future__ import annotations
 
 # Standard
+from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 import argparse
 import os
@@ -730,7 +731,16 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
     # outside the try/finally that closes it. The mirror obligation is
     # that every init failure between here and that try/finally must call
     # ``stop_metrics`` itself, or it leaks the listener instead.
-    metrics_state = BenchMetricsState()
+    # A profile file's stem matches the identifier already used everywhere
+    # else a run names itself (result JSON filenames, the sweep tables in
+    # README-model-geometry.md). Falls back to the resolved geometry's own
+    # model name for the raw/uniform-shape path, which has no profile file.
+    model_label = (
+        Path(geometry_profile_path).stem
+        if geometry_profile_path
+        else geometry.model_name
+    )
+    metrics_state = BenchMetricsState(model_name=model_label)
     stop_metrics: Callable[[], None] = _noop_shutdown
     if metrics_port:
         try:
