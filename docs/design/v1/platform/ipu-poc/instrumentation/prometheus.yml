@@ -1,5 +1,5 @@
 global:
-  scrape_interval: 5s
+  scrape_interval: 4s
   evaluation_interval: 15s
   external_labels:
     project: ipu-poc-nvmeof-alt
@@ -48,7 +48,7 @@ scrape_configs:
   # ever see initiator 0.
   #
   # Expect `up == 0` between sweep cells: the endpoint dies with the process.
-  # That is not a scrape failure. A 120s cell at the 5s interval yields ~24
+  # That is not a scrape failure. A 120s cell at the 4s interval yields ~30
   # samples. Rate over the `measured` phase only -- the `phase` label separates
   # it from `warmup`, and including warmup biases the result.
   - job_name: lmcache_bench
@@ -93,6 +93,10 @@ scrape_configs:
   # Ports 9102-9104 remain reserved for an explicit local multi-process run.
   # As with the mkp job, `up == 0` between cells is expected, and rates are
   # valid over `phase="measured"` only.
+  #
+  # Verified live 2026-09-01: both id-0 targets scraped real
+  # lmcache_bench_l2_* series from an in-progress geometry sweep on
+  # mmgi0/mmgi1.
   - job_name: lmcache_bench_mmg
     static_configs:
       # ssh -N -L 1911{0,1,2,3}:127.0.0.1:910{1,2,3,4} mmgi0

@@ -32,6 +32,9 @@ services:
       # into .env on first run if GRAFANA_PASSWORD is unset.
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:?set GRAFANA_PASSWORD or run ./up.sh}
       - GF_AUTH_ANONYMOUS_ENABLED=false
+      # Grafana's own floor is 5s regardless of what a dashboard's refresh
+      # picker offers; matches the Prometheus scrape_interval (4s) below it.
+      - GF_DASHBOARDS_MIN_REFRESH_INTERVAL=4s
     ports:
       - "127.0.0.1:3000:3000"
     depends_on:

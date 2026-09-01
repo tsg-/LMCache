@@ -11,7 +11,7 @@ test hosts. Two halves:
 Two metrics flows, both loopback-bound and tunnelled:
 
 - **host counters** — collector script → `.prom` file → node_exporter on
-  `127.0.0.1:9100` → SSH tunnel → Prometheus (5s scrape) → Grafana.
+  `127.0.0.1:9100` → SSH tunnel → Prometheus (4s scrape) → Grafana.
 - **`bench l2` counters** — the CLI's own `--serve-metrics` endpoint on
   `127.0.0.1:9101+` → SSH tunnel → same Prometheus, job `lmcache_bench`. Short
   lived: it exists only while a benchmark process runs.
@@ -110,6 +110,7 @@ Grafana provisions the datasource and dashboard automatically.
 | `docker-compose.yml` | control | Prometheus 2.55.1 + Grafana 11.3.0, loopback-bound |
 | `provisioning/` | control | Grafana datasource (uid `PROM`) + dashboard provider |
 | `dashboards/lmcache-mkp.json` | control | 26 panels, uid `ipu-poc-mkp-stub` — provisioned copy; LMCache row first |
+| `dashboards/mmgt-storage-target.json` | control | 63 panels incl. rows, uid `mmgt-storage-target` — MMG-400 target storage/DDIO/ACC dashboard |
 | `up.sh` | control | Tunnels + stack + health check |
 
 ### The `lmcache_bench` job
@@ -138,7 +139,7 @@ Two properties matter when reading the series:
 
 - **The target is down between cells.** The endpoint lives only as long as one
   `bench l2` invocation, so `up == 0` between sweep cells is expected, not a
-  scrape failure. A 120 s cell at the 5 s interval yields roughly 24 samples.
+  scrape failure. A 120 s cell at the 4 s interval yields roughly 30 samples.
 - **`phase` separates `warmup` from `measured`**, which is what lets a
   Prometheus-side rate be compared against the run's JSON independently. Rate
   over the measured phase only; including warmup biases it.
@@ -357,7 +358,7 @@ series.
 
 Two traps when reading the resulting series:
 
-- **Transport counters update every 10 s but Prometheus scrapes at 5 s**, so
+- **Transport counters update every 10 s but Prometheus scrapes at 4 s**, so
   `acc_tele_field` remains a staircase. Use `rate(...[60s]) * 8` for the live
   RDMA panels so their headline window matches NVMe and LMCache goodput.
   For a completed benchmark cell, use `increase()` over its exact measured
@@ -455,7 +456,7 @@ remain unvalidated, so the dashboard must not infer them from counter names.
 immediately after a workload ends can read 0 — again indistinguishable from no
 traffic. Settle ≥1s; the ad-hoc probes use 2s.
 
-**Sampling aliasing is real.** irdma ~1s + textfile timer + 5s scrape + 15s rate
+**Sampling aliasing is real.** irdma ~1s + textfile timer + 4s scrape + 15s rate
 window understates peaks: a 94.4 Gbps bench read rendered as a 75.6 Gbps peak.
 Rate panels need a **≥60s measurement window** to be meaningful.
 
@@ -468,9 +469,12 @@ panel broken.
 bind-mount under an already read-only bind mount. The JSON lives at
 `/var/lib/grafana/dashboards` instead.
 
-**`dashboards/lmcache-mkp.json` is the only dashboard.** It is what compose
-bind-mounts and what the provider loads; edit that one. An earlier redundant
-hand-import copy at the kit root was dropped.
+**Every JSON under `dashboards/` is provisioned; there is no hand-import
+copy.** The provider (`provisioning/dashboards/lmcache.yml`) points at
+`/var/lib/grafana/dashboards`, which compose bind-mounts from `dashboards/`
+whole, so `lmcache-mkp.json` (mkp1/mkp2) and `mmgt-storage-target.json`
+(MMG-400) are both live — edit either in place. An earlier redundant
+hand-import copy at the kit root was dropped; do not recreate one there.
 
 **The Grafana admin password is not committed.** `docker-compose.yml` declares
 `GRAFANA_PASSWORD` required with no default, so bringing the stack up without it
