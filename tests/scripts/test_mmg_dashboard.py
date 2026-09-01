@@ -46,6 +46,20 @@ def test_mmg_dashboard_hides_negative_llc_percentages() -> None:
     assert ">= 0" in expressions
 
 
+def test_mmg_dashboard_filters_negative_ddio_absorption() -> None:
+    """DDIO absorption hides negative lower bounds without a Boolean cast."""
+    dashboard = json.loads(DASHBOARD.read_text())
+    absorption_panel = next(
+        panel
+        for panel in dashboard["panels"]
+        if panel["title"] == "Target DDIO Absorption"
+    )
+
+    expression = absorption_panel["targets"][0]["expr"]
+    assert expression.endswith(">= 0")
+    assert ">= bool 0" not in expression
+
+
 def test_mmg_dashboard_matches_the_target_acc_aggregate_chart() -> None:
     """Initiator ACC telemetry has the target chart's aggregate history view."""
     dashboard = json.loads(DASHBOARD.read_text())

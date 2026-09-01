@@ -36,9 +36,17 @@ def pad_cell(cell, twips: int) -> None:
     cell._tc.get_or_add_tcPr().append(margins)
 
 
+def prevent_row_split(row) -> None:
+    """Keep a one-row command block on one page."""
+    properties = row._tr.get_or_add_trPr()
+    no_split = OxmlElement("w:cantSplit")
+    properties.append(no_split)
+
+
 def command(doc: Document, text: str) -> None:
     """Add a compact shaded command block."""
     table = doc.add_table(rows=1, cols=1)
+    prevent_row_split(table.rows[0])
     cell = table.cell(0, 0)
     shade_cell(cell, "F1F2F4")
     pad_cell(cell, 120)
@@ -46,9 +54,8 @@ def command(doc: Document, text: str) -> None:
     lines = text.strip().splitlines()
     paragraph = cell.paragraphs[0]
     paragraph.style = "Command"
-    paragraph.add_run(lines[0])
-    for line in lines[1:]:
-        cell.add_paragraph(line, style="Command")
+    paragraph.paragraph_format.keep_together = True
+    paragraph.add_run("\n".join(lines))
 
 
 def build_styles(doc: Document) -> None:
@@ -107,11 +114,21 @@ def build_document(output: Path) -> None:
         "hosts. No controller host is configured. On each initiator, "
         "run_model_geometry.sh finds an LMCache interpreter automatically."
     )
-
-    doc.add_heading("1. Create a host inventory", level=1)
     doc.add_paragraph(
-        "Create a two-initiator MMG inventory. Do not put IP addresses, "
-        "filesystem paths, Python paths, or workload settings in this file."
+        "Before you run preflight, confirm that the coordinator can use "
+        "passwordless SSH to both initiators and the target, that each "
+        "initiator has the delivered LMCache checkout, and that the target "
+        "namespaces are attached and mounted on the initiators."
+    )
+
+    doc.add_heading("1. Use the supplied host inventory", level=1)
+    doc.add_paragraph(
+        "Use the supplied inventory file "
+        "scripts/ipu-poc/inventories/mmg-two-initiator.env as the argument to "
+        "every coordinator command. It names machines only. Edit its host "
+        "aliases only when running on a different rig; do not put IP "
+        "addresses, filesystem paths, Python paths, or workload settings in "
+        "this file."
     )
     command(
         doc,
@@ -124,12 +141,6 @@ TARGET_HOST=mmgt""",
         "remains storage-only; it is contacted only to verify its live "
         "NVMe-oF export addresses."
     )
-    doc.add_paragraph(
-        "This is a topology template. Before proceeding, the target must "
-        "export the namespaces and each initiator must attach and mount the "
-        "matching storage."
-    )
-
     doc.add_heading("2. Run preflight", level=1)
     command(
         doc,
@@ -154,21 +165,30 @@ TARGET_HOST=mmgt""",
         "read zero objects. It is a correctness check, not a bandwidth result."
     )
 
+    doc.add_page_break()
     doc.add_heading("4. Run the sweep", level=1)
     command(
         doc,
-        """RUN_ID=mmg-geometry-$(date +%Y%m%d-%H%M%S) \\
+        """export RUN_ID=mmg-geometry-$(date +%Y%m%d-%H%M%S)
+IN_FLIGHTS='8 16 24' WARMUP_SEC=60 DURATION_SEC=120 INCLUDE_MINIMAX=1 \\
   bash scripts/ipu-poc/run_geometry_inventory.sh sweep \\
   scripts/ipu-poc/inventories/mmg-two-initiator.env""",
     )
     doc.add_paragraph(
-        "For every initiator, the coordinator runs the three compatible "
-        "single-page profiles: Mixtral 64 KiB, DeepSeek-V3 144 KiB, and "
-        "Mixtral 256 KiB. Each profile gets a store followed by a 60-second "
-        "read. Each host writes only below "
-        "/mnt/lmcache-stage2/bench-l2/<run-id>/<hostname> and uses a "
-        "host-specific key prefix. Result JSON files remain in the remote "
-        "checkout's results/ directory."
+        "For every initiator, the coordinator runs the five page-burst "
+        "profiles, in page-size order: Mixtral 64 KiB, Mixtral 128 KiB, "
+        "DeepSeek-V3 144 KiB, Mixtral 256 KiB, and Mixtral 512 KiB, then "
+        "MiniMax-M3. Every profile is stored and read at 8, 16, and 24 "
+        "in-flight submits. Each sustained load warms up for 60 seconds and "
+        "measures for 120 seconds. MiniMax-M3 uses the O_DIRECT-compatible "
+        "padding profile, which adds a 3,072 B alignment tail (about 0.03% "
+        "of an object). Its fp8 DSA-indexer geometry assumption remains to "
+        "be confirmed, so retain that caveat when comparing it with the "
+        "five page-burst profiles. Each host writes only below "
+        "BENCH_MOUNT/bench-l2/<run-id>/<hostname>, which defaults to "
+        "/mnt/lmcache, and uses a host-specific key prefix. Result JSON "
+        "files remain in the remote checkout's results/ directory and "
+        "include the in-flight count in their names."
     )
 
     doc.add_heading("5. Accept or reject the result", level=1)
@@ -178,6 +198,28 @@ TARGET_HOST=mmgt""",
         "to fit in DRAM on most benchmark hosts, so it is a functional sweep; "
         "scale the corpus beyond memory before making a storage-performance "
         "claim."
+    )
+    doc.add_heading("Collect the result JSON", level=2)
+    doc.add_paragraph(
+        "Keep the exported RUN_ID from step 4. Use the supplied inventory to "
+        "list every result produced by this sweep; copy the JSON files off the "
+        "initiators before comparing or sharing a result."
+    )
+    command(
+        doc,
+        """source scripts/ipu-poc/inventories/mmg-two-initiator.env
+for host in "${INITIATOR_HOSTS[@]}"; do
+  ssh "$host" bash -s -- "$RUN_ID" <<'REMOTE'
+set -euo pipefail
+run_id=$1
+for repo in "$HOME/LMCache" /root/LMCache; do
+  [ -x "$repo/scripts/ipu-poc/run_model_geometry.sh" ] && break
+done
+[ -x "$repo/scripts/ipu-poc/run_model_geometry.sh" ] ||
+  { echo "ABORT: LMCache geometry checkout not found" >&2; exit 2; }
+find "$repo/results" -maxdepth 1 -name "$run_id-*.json" -print
+REMOTE
+done""",
     )
 
     doc.add_heading("Background and appendices", level=1)
@@ -273,14 +315,20 @@ done""",
     doc.add_paragraph(
         "The layout check must report zero unwritten extents; otherwise reads "
         "can be served as zeros without device I/O. Compare a bench result "
-        "with the FIO cell nearest its actual concurrency, not the FIO peak."
+        "with the FIO cell nearest its actual concurrency, not the FIO peak. "
+        "The 64 KiB FIO cells control only the 64 KiB profile. This command "
+        "uses eight jobs, so aggregate outstanding I/O is 8 × iodepth; use a "
+        "matching block size and aggregate concurrency before comparing any "
+        "other profile."
     )
 
-    doc.add_heading("Appendix E — Optional observability", level=2)
+    doc.add_heading("Appendix E — Optional telemetry setup", level=2)
     doc.add_paragraph(
-        "The result JSON is the record for a sweep. Prometheus and Grafana are "
-        "useful for live inspection and independent counter checks, not for "
-        "replacing the completed-run JSON."
+        "The result JSON is the record for a sweep. Set up telemetry only "
+        "after a successful functional sweep when live inspection or "
+        "independent counter checks are needed; it is not a benchmark "
+        "prerequisite. Prometheus and Grafana do not replace the completed-run "
+        "JSON."
     )
     command(
         doc,

@@ -13,6 +13,10 @@ set -euo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 readonly BENCH_MOUNT=${BENCH_MOUNT:-/mnt/lmcache}
 readonly BENCH_ROOT="$BENCH_MOUNT/bench-l2"
+readonly IN_FLIGHTS=${IN_FLIGHTS:-"1"}
+readonly WARMUP_SEC=${WARMUP_SEC:-0}
+readonly DURATION_SEC=${DURATION_SEC:-60}
+readonly INCLUDE_MINIMAX=${INCLUDE_MINIMAX:-0}
 MODE=${1:-help}
 if [ "$#" -gt 0 ]; then
   shift
@@ -39,6 +43,12 @@ filesystem paths belong in the inventory.
 preflight checks the environment without writing. verify runs the small
 profile-identity gate on each initiator. sweep runs the timed five-profile
 read benchmark.
+
+Sweep environment variables:
+  IN_FLIGHTS       space-separated submit counts (default: "1")
+  WARMUP_SEC       warmup seconds before each sustained load (default: 0)
+  DURATION_SEC     measured seconds for each sustained load (default: 60)
+  INCLUDE_MINIMAX  set to 1 to append the O_DIRECT-padded MiniMax-M3 profile
 EOF
 }
 
@@ -187,18 +197,40 @@ REMOTE
   done
 }
 
+validate_sweep_options() {
+  local in_flight
+  [[ "$IN_FLIGHTS" =~ ^[1-9][0-9]*(\ [1-9][0-9]*)*$ ]] ||
+    die "IN_FLIGHTS must be a space-separated list of positive integers"
+  for in_flight in $IN_FLIGHTS; do
+    [ "$in_flight" -le 1024 ] ||
+      die "IN_FLIGHTS entries must not exceed 1024"
+  done
+  [[ "$WARMUP_SEC" =~ ^[0-9]+([.][0-9]+)?$ ]] ||
+    die "WARMUP_SEC must be a non-negative number of seconds"
+  [[ "$DURATION_SEC" =~ ^[1-9][0-9]*([.][0-9]+)?$ ]] ||
+    die "DURATION_SEC must be a positive number of seconds"
+  [[ "$INCLUDE_MINIMAX" =~ ^[01]$ ]] ||
+    die "INCLUDE_MINIMAX must be 0 or 1"
+}
+
 run_sweep() {
   preflight
+  validate_sweep_options
 
   local run_id=${RUN_ID:-"geometry-$(date +%Y%m%d-%H%M%S)"}
   local host
   local -a pids=()
   for host in "${INITIATOR_HOSTS[@]}"; do
-    ssh -o BatchMode=yes "$host" bash -s -- "$run_id" "$BENCH_ROOT" <<'REMOTE' &
+    ssh -o BatchMode=yes "$host" bash -s -- "$run_id" "$BENCH_ROOT" \
+      "$IN_FLIGHTS" "$WARMUP_SEC" "$DURATION_SEC" "$INCLUDE_MINIMAX" <<'REMOTE' &
 set -euo pipefail
 
 run_id=$1
 bench_root=$2
+in_flights=$3
+warmup_sec=$4
+duration_sec=$5
+include_minimax=$6
 for repo in "$HOME/LMCache" /root/LMCache; do
   [ -x "$repo/scripts/ipu-poc/run_model_geometry.sh" ] && break
 done
@@ -210,19 +242,33 @@ host_name=$(hostname -s)
 base_path="$bench_root/$run_id/$host_name"
 prefix="$run_id-$host_name"
 mkdir -p results
-for profile in \
+unset L2_ADAPTER L1_ALIGN_BYTES
+profiles=(
   scripts/ipu-poc/models/mixtral_8x22b_fp8_64k.yaml \
   scripts/ipu-poc/models/mixtral_8x22b_fp8_128k.yaml \
   scripts/ipu-poc/models/deepseek_v3_fp8.yaml \
   scripts/ipu-poc/models/mixtral_8x22b_fp8.yaml \
-  scripts/ipu-poc/models/mixtral_8x22b_fp8_512k.yaml; do
-  model=$(basename "$profile" .yaml)
-  ROUNDS=2 BASE_PATH="$base_path" PREFIX="$prefix" \
-    bash scripts/ipu-poc/run_model_geometry.sh store "$profile"
-  OUTPUT="results/$run_id-$host_name-$model.json" \
-    DURATION_SEC=60 METRICS_PORT=9101 \
-    BASE_PATH="$base_path" PREFIX="$prefix" \
-    bash scripts/ipu-poc/run_model_geometry.sh sustained-load "$profile"
+  scripts/ipu-poc/models/mixtral_8x22b_fp8_512k.yaml
+)
+[ "$include_minimax" -eq 0 ] ||
+  profiles+=(scripts/ipu-poc/models/minimax_m3_bf16_tp8_odirect.yaml)
+read -r -a in_flight_values <<<"$in_flights"
+
+for in_flight in "${in_flight_values[@]}"; do
+  for profile in "${profiles[@]}"; do
+    model=$(basename "$profile" .yaml)
+    common_env=(
+      "BASE_PATH=$base_path"
+      "PREFIX=$prefix-if${in_flight}"
+      "IN_FLIGHT=$in_flight"
+    )
+    env ROUNDS=2 "${common_env[@]}" \
+      bash scripts/ipu-poc/run_model_geometry.sh store "$profile"
+    env OUTPUT="results/$run_id-$host_name-$model-if${in_flight}.json" \
+      WARMUP_SEC="$warmup_sec" DURATION_SEC="$duration_sec" METRICS_PORT=9101 \
+      "${common_env[@]}" \
+      bash scripts/ipu-poc/run_model_geometry.sh sustained-load "$profile"
+  done
 done
 REMOTE
     pids+=("$!")

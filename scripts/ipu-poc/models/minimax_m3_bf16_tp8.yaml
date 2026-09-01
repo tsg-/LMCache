@@ -42,8 +42,9 @@
 # 132 B/token indexer breaks the alignment the main KV would have had on
 # its own. `bench l2` validates alignment per object, so an O_DIRECT run
 # with --l1-align-bytes 4096 against this profile is REJECTED rather than
-# silently misaligned. Benchmark M3 on a buffered backend, or pad the
-# indexer in a separate variant of this file.
+# silently misaligned. Benchmark M3 on a buffered backend, or use
+# minimax_m3_bf16_tp8_odirect.yaml, which adds a padding component to
+# reach a 4096-aligned object.
 #
 # That rejection is a consequence of the fp8 assumption above, not a
 # property of M3: the bf16 alternative is 11,599,872 = 4096 x 2832, so

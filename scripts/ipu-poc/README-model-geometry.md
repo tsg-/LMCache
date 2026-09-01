@@ -79,6 +79,7 @@ rank)`, each packing one or more components whose sizes need not agree.
 | `deepseek_v3_fp8_packed.yaml` | DeepSeek-V3 FP8 | object group | 1 | 8.58 MiB | 8.58 MiB |
 | `mixtral_8x22b_fp8_tp8_packed.yaml` | Mixtral 8x22B FP8, TP=8 | object group | 8 | 3.5 MiB | 28 MiB |
 | `minimax_m3_bf16_tp8.yaml` | MiniMax-M3 bf16, TP=8 | object group | 8 | 9.34 MiB | 74.7 MiB |
+| `minimax_m3_bf16_tp8_odirect.yaml` | MiniMax-M3 bf16, TP=8, padded | object group | 8 | 9.34 MiB | 74.7 MiB |
 
 The four Mixtral profiles change only chunk size (32/64/128/256 tokens), so page
 size is the single variable: 64/128/256/512 KiB. DeepSeek's MLA cache is
@@ -105,6 +106,16 @@ size can express. Two consequences for an operator:
   rejection follows from the dtype above rather than from M3 itself — the bf16
   alternative is 4096-aligned (11,599,872 = 4096 x 2832), so confirming bf16
   would put O_DIRECT back on the table.
+
+  For an O_DIRECT number now, without waiting on that confirmation, use
+  `minimax_m3_bf16_tp8_odirect.yaml`. It adds a 3,072 B synthetic padding
+  component (~0.031% overhead) that rounds the packed object up to
+  9,793,536 B = 4096 x 2391. A smaller `--l1-align-bytes` does not work
+  around this: 9,790,464 is a multiple of 512, so the harness's own check
+  would accept it, but `local_disk_backend.py` checks against the
+  filesystem's block size (`stat.f_bsize`, 4096 on XFS regardless of the
+  device's logical sector size) and still rejects it. Padding is the only
+  fix that clears both checks.
 
 The byte-accounting consumers -- `geom_readback.py`, `geom_calib.py`,
 `geom_report.py`, and `geom_multi_report.py` -- derive application bytes from a
@@ -181,10 +192,29 @@ One `PREFIX` covers every profile: the namespace is scoped by profile SHA, so
 the profiles under one prefix occupy distinct key spaces and cannot read each
 other's corpora. Store each, then read it back over a fixed window.
 
-The loop below uses the default O_DIRECT `fs_native` adapter, which
-`minimax_m3_bf16_tp8.yaml` cannot satisfy -- its object size is not
-4096-aligned. Skip it here and run it separately against a buffered adapter,
-shown under "One Model at a Time".
+For the two-initiator inventory coordinator, a reproducible concurrency matrix
+is configured entirely through the environment. This example runs each of the
+five O_DIRECT profiles plus MiniMax-M3 at 8, 16, and 24 submits in flight,
+after a 60-second warmup and for a 120-second measurement window:
+
+```bash
+export RUN_ID=geometry-$(date +%Y%m%d-%H%M%S)
+IN_FLIGHTS='8 16 24' WARMUP_SEC=60 DURATION_SEC=120 INCLUDE_MINIMAX=1 \
+  bash scripts/ipu-poc/run_geometry_inventory.sh sweep \
+  scripts/ipu-poc/inventories/mmg-two-initiator.env
+```
+
+The output name ends in `-if<in_flight>.json`. The coordinator uses a distinct
+key prefix for every in-flight level, so a later store cannot collide with the
+same model's earlier level. MiniMax-M3 selects
+`minimax_m3_bf16_tp8_odirect.yaml`, which adds the documented 3,072 B
+alignment pad and uses the same O_DIRECT `fs_native` adapter as the other
+rows. Its fp8 DSA-indexer geometry assumption remains a comparison caveat.
+
+The loop below uses the default O_DIRECT `fs_native` adapter. Include the
+padded MiniMax profile when you want its O_DIRECT result; the unpadded
+`minimax_m3_bf16_tp8.yaml` remains available only for inspecting the exact
+unrounded geometry.
 
 ```bash
 export BASE_PATH=/mnt/lmcache-kvcache
@@ -198,7 +228,8 @@ for profile in \
   scripts/ipu-poc/models/mixtral_8x22b_fp8_128k.yaml \
   scripts/ipu-poc/models/deepseek_v3_fp8.yaml \
   scripts/ipu-poc/models/mixtral_8x22b_fp8.yaml \
-  scripts/ipu-poc/models/mixtral_8x22b_fp8_512k.yaml
+  scripts/ipu-poc/models/mixtral_8x22b_fp8_512k.yaml \
+  scripts/ipu-poc/models/minimax_m3_bf16_tp8_odirect.yaml
 do
   model=$(basename "$profile" .yaml)
   echo "===== $model ====="
@@ -218,7 +249,7 @@ and that scales linearly with both. Per profile:
 | `deepseek_v3_fp8.yaml` | 976 | 137 MiB |
 | `mixtral_8x22b_fp8.yaml` | 896 | 224 MiB |
 | `mixtral_8x22b_fp8_512k.yaml` | 896 | 448 MiB |
-| `minimax_m3_bf16_tp8.yaml` | 128 | 1195 MiB |
+| `minimax_m3_bf16_tp8_odirect.yaml` | 128 | 1195 MiB |
 
 Size the corpus past host DRAM or drop caches between models, or the load
 measures the page cache. Check the hit rate before reading any rate:
@@ -269,22 +300,19 @@ ROUNDS=2 bash $R store $M/mixtral_8x22b_fp8_512k.yaml
 DURATION_SEC=60 bash $R sustained-load $M/mixtral_8x22b_fp8_512k.yaml
 ```
 
-MiniMax-M3 needs its own adapter, because its 9,790,464 B object is not
-4096-aligned and O_DIRECT is therefore not available. `NUM_WORKERS` does not
-reach a supplied adapter, so set the worker count inside the JSON:
+For O_DIRECT, use the padded MiniMax-M3 profile. Its 3,072 B `align_pad`
+component brings each object to 9,793,536 B (4096 x 2391), so it works with
+the default adapter and the same environment as the other profiles:
 
 ```bash
-export L2_ADAPTER='{"type":"fs_native","base_path":"/mnt/lmcache-kvcache","use_odirect":false,"num_workers":16}'
-export L1_ALIGN_BYTES=1
-
-# MiniMax-M3 bf16 TP=8 — 8 x 9.34 MiB, one object group, two components
-ROUNDS=2 bash $R store $M/minimax_m3_bf16_tp8.yaml
-DURATION_SEC=60 bash $R sustained-load $M/minimax_m3_bf16_tp8.yaml
+# MiniMax-M3 bf16 TP=8 — 8 x 9.34 MiB padded objects, three components
+ROUNDS=2 bash $R store $M/minimax_m3_bf16_tp8_odirect.yaml
+DURATION_SEC=60 bash $R sustained-load $M/minimax_m3_bf16_tp8_odirect.yaml
 ```
 
-This measures the page cache unless the corpus exceeds host DRAM: the store
-above writes 1195 MiB and the reads are buffered. Raise `ROUNDS` past DRAM or
-drop caches between the store and the read.
+The original unpadded MiniMax file describes 9,790,464 B objects. It cannot
+use O_DIRECT on a 4096 B filesystem; if you intentionally run it with a
+buffered adapter, do not compare that result with the O_DIRECT rows.
 
 Re-running one profile's `store` under a prefix that already holds its corpus
 measures `fs_native`'s existence check rather than the write path, because a

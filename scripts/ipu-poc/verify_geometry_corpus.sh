@@ -80,7 +80,7 @@ echo "   base path: $BASE_PATH"
 
 echo
 echo "== namespace regression tests =="
-( cd "$ROOT" && "$PYTHON" -m pytest -q "$TEST_FILE" )
+( cd "$ROOT" && "$PYTHON" -m pytest --noconftest -q "$TEST_FILE" )
 
 # The tests run against a temporary directory. Repeat the load-bearing case on
 # the storage actually under test, where O_DIRECT alignment and the adapter's

@@ -23,6 +23,7 @@ SCRIPTS = ROOT / "scripts" / "ipu-poc"
 RUNNER = SCRIPTS / "run_model_geometry.sh"
 FANOUT = SCRIPTS / "run_geom_multi.sh"
 INVENTORY_RUNNER = SCRIPTS / "run_geometry_inventory.sh"
+VERIFY_CORPUS = SCRIPTS / "verify_geometry_corpus.sh"
 READBACK = SCRIPTS / "geom_readback.py"
 README = SCRIPTS / "README-model-geometry.md"
 PROFILES = sorted((SCRIPTS / "models").glob("*.yaml"))
@@ -239,6 +240,13 @@ def test_runner_forwards_an_optional_metrics_port(tmp_path: Path) -> None:
     assert "--metrics-bind-address 127.0.0.1" in bench_invocation
 
 
+def test_corpus_verifier_isolates_its_focused_script_suite() -> None:
+    """The verifier must not load unrelated repository-wide test fixtures."""
+    assert '"$PYTHON" -m pytest --noconftest -q "$TEST_FILE"' in (
+        VERIFY_CORPUS.read_text()
+    )
+
+
 def test_inventory_is_hostnames_only() -> None:
     """The MMG example identifies the physical initiators and target only."""
     result = _run_script(INVENTORY_RUNNER, "show", str(MMG_INVENTORY))
@@ -342,6 +350,18 @@ def test_inventory_sweep_uses_the_mmg_metrics_port(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr
     assert invocation_log.read_text().count("METRICS_PORT=9101") == 2
+
+
+def test_inventory_sweep_accepts_a_timed_inflight_matrix() -> None:
+    """The coordinator can run a reproducible sustained-load matrix."""
+    source = INVENTORY_RUNNER.read_text()
+
+    assert 'IN_FLIGHTS=${IN_FLIGHTS:-"1"}' in source
+    assert 'WARMUP_SEC=${WARMUP_SEC:-0}' in source
+    assert 'DURATION_SEC=${DURATION_SEC:-60}' in source
+    assert "minimax_m3_bf16_tp8_odirect.yaml" in source
+    assert 'PREFIX=$prefix-if${in_flight}' in source
+    assert 'OUTPUT="results/$run_id-$host_name-$model-if${in_flight}.json"' in source
 
 
 def test_preflight_carries_every_target_address_to_the_initiator(
