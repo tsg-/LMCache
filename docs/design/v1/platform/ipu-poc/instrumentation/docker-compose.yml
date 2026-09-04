@@ -8,12 +8,16 @@ services:
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.retention.time=30d
-      - --storage.tsdb.retention.size=10GB
+      - --storage.tsdb.retention.size=100GB
       # Lets `curl -X POST /-/reload` pick up prometheus.yml edits without a
       # restart, which would otherwise interrupt scraping mid-benchmark.
       - --web.enable-lifecycle
     ports:
       - "127.0.0.1:9090:9090"
+    # Linux Docker does not provide this Docker Desktop hostname unless it is
+    # declared explicitly. It reaches SSH forwards bound on the monitoring host.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
   grafana:

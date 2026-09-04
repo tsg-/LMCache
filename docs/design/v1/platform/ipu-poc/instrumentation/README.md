@@ -1,11 +1,15 @@
-# mkp-instrumentation — observability kit for NVMe-oF / RDMA test pairs
+# LMCache telemetry — MMG-400 observability kit
 
-Everything needed to reproduce the mkp1/mkp2 monitoring stack on another pair of
-test hosts. Two halves:
+The deployed monitoring host is `mmgi0`, in `/root/lmcache-telemetry`. It
+scrapes the MMG-400 target and initiators: `mmgt`, `mmgi0`, and `mmgi1`.
+Persistent Docker state is under `/home/docker/`, configured with Docker's
+`data-root`; do not place Prometheus data on `/`.
+
+Two halves:
 
 - **`host/`** — runs *on each test host*: node_exporter + six textfile
   collectors, each driven by its own systemd timer.
-- **root of this dir** — runs *on the laptop/control host*: SSH tunnels plus
+- **root of this dir** — runs *on the mmgi0 monitoring host*: SSH tunnels plus
   Prometheus and Grafana in Docker.
 
 Two metrics flows, both loopback-bound and tunnelled:
@@ -19,7 +23,7 @@ Two metrics flows, both loopback-bound and tunnelled:
 node_exporter binds to loopback only; the SSH tunnel is the sole exposure. No
 firewall changes are needed on the test hosts.
 
-## Replicate on a new pair
+## Deploy the MMG-400 stack
 
 ### 1. Per test host
 
@@ -67,29 +71,27 @@ ssh <newhost> 'systemctl list-timers --all | grep -E "rdma|nvme|pcm|numa"'
 ssh <newhost> 'curl -s localhost:9100/metrics | grep -c ^rdma_hw_counter{'
 ```
 
-### 2. Control host
-
-Edit `prometheus.yml` so the `targets` and the `relabel_configs` regexes match
-your local tunnel ports and host names. There are eleven relabel rules across the
-three jobs — five in `node`, four in `lmcache_bench`, two in
-`lmcache_bench_mmg` — and `lmcache_bench` also carries `host` and `workload` as
-static labels that have to change with them. Then:
+### 2. Monitoring host
 
 ```bash
-export HOSTS="<newhost1>:19100 <newhost2>:19101"
-./up.sh
+ssh mmgi0
+cd /root/lmcache-telemetry
+COLLECTOR_CHECKS='' ./up.sh
 ```
 
-The built-in default is `mkp1:19100 mkp2:19101 mmgt:19106 mmgi0:19107
-mmgi1:19108` — the older NVMe-oF pair plus the three MMG-400 hosts. **Set
-`HOSTS` on every invocation** on any other rig. `ensure_tunnel` uses
-`ExitOnForwardFailure` under `set -e`, so a host you do not have aborts `up.sh`
-at that tunnel rather than leaving a down target behind — exporting `HOSTS` once,
-as above, is what keeps the re-runs working.
+The built-in target set is `mmgt:19106 mmgi0:19107 mmgi1:19108`. The
+node-exporter service listens on loopback only, so `up.sh` creates SSH forwards
+bound to Docker's local bridge gateway. They are reachable by Prometheus but not
+by the management network. `COLLECTOR_CHECKS=''` is required with the dedicated
+forwarding-only key because the optional freshness probe executes remote `stat`
+commands. `ensure_tunnel` uses `ExitOnForwardFailure` under `set -e`, so an
+unreachable host aborts rather than leaving a down target behind.
 
-`up.sh` opens the SSH tunnels (idempotent), starts Docker Desktop if needed,
-brings up the compose stack, reloads Prometheus, and prints target health.
-Grafana provisions the datasource and dashboard automatically.
+`up.sh` opens the SSH tunnels (idempotent), brings up the compose stack, reloads
+Prometheus, and prints target health. Grafana provisions the datasource and
+dashboard automatically. For active geometry sweeps, add
+`MMG_BENCH_TUNNELS=1`; otherwise the benchmark endpoints correctly report as
+disabled.
 
 ## What's in the box
 
@@ -106,12 +108,12 @@ Grafana provisions the datasource and dashboard automatically.
 | `host/bin/mmgt_nic_textfile.sh` | mmgt only | `ethtool -S` on both fabric ports; replaces `rdma_nic` on the MMG-400 target |
 | `host/systemd/*.service`, `*.timer` | test host | node_exporter + one timer per collector |
 | `host/systemd/pcm-memory.service.d/pcm.conf` | mmgt only | Pins `PCM_MEMORY_BIN` to the dated PCM build |
-| `prometheus.yml` | control | 5s scrape of the node tunnels (relabelled to `host=`) plus the `lmcache_bench` and `lmcache_bench_mmg` initiator ports (relabelled to `initiator=`) |
-| `docker-compose.yml` | control | Prometheus 2.55.1 + Grafana 11.3.0, loopback-bound |
-| `provisioning/` | control | Grafana datasource (uid `PROM`) + dashboard provider |
-| `dashboards/lmcache-mkp.json` | control | 26 panels, uid `ipu-poc-mkp-stub` — provisioned copy; LMCache row first |
-| `dashboards/mmgt-storage-target.json` | control | 63 panels incl. rows, uid `mmgt-storage-target` — MMG-400 target storage/DDIO/ACC dashboard |
-| `up.sh` | control | Tunnels + stack + health check |
+| `prometheus.yml` | mmgi0 | 4s scrape of node tunnels plus MMG bench ports |
+| `docker-compose.yml` | mmgi0 | Prometheus 2.55.1 + Grafana 11.3.0; volumes use Docker's `/home/docker/` data root |
+| `provisioning/` | mmgi0 | Grafana datasource (uid `PROM`) + dashboard provider |
+| `dashboards/lmcache-mkp.json` | mmgi0 | Legacy mkp1/mkp2 dashboard; provisioned but not applicable to this rig |
+| `dashboards/mmgt-storage-target.json` | mmgi0 | 63 panels incl. rows, uid `mmgt-storage-target` — MMG-400 target storage/DDIO/ACC dashboard |
+| `up.sh` | mmgi0 | Tunnels + stack + health check |
 
 ### The `lmcache_bench` job
 
@@ -472,9 +474,11 @@ bind-mount under an already read-only bind mount. The JSON lives at
 **Every JSON under `dashboards/` is provisioned; there is no hand-import
 copy.** The provider (`provisioning/dashboards/lmcache.yml`) points at
 `/var/lib/grafana/dashboards`, which compose bind-mounts from `dashboards/`
-whole, so `lmcache-mkp.json` (mkp1/mkp2) and `mmgt-storage-target.json`
-(MMG-400) are both live — edit either in place. An earlier redundant
-hand-import copy at the kit root was dropped; do not recreate one there.
+whole. `mmgt-storage-target.json` is the active MMG-400 dashboard.
+`lmcache-mkp.json` remains only as a legacy dashboard for its original
+mkp1/mkp2 topology; it is expected to show no data on this rig. An earlier
+redundant hand-import copy at the kit root was dropped; do not recreate one
+there.
 
 **The Grafana admin password is not committed.** `docker-compose.yml` declares
 `GRAFANA_PASSWORD` required with no default, so bringing the stack up without it
@@ -490,7 +494,7 @@ a local secret into `.env` (mode 600, gitignored) on first run; export
 - **The host-only geometry sweep uses one process per host.** It publishes id 0
   on each initiator; the remaining per-host ports are intentionally idle unless
   a multi-process driver is selected.
-- **The dashboard is hardcoded to `mkp1` and `mkp2`.** 23 of its 43 queries pin
+- **The legacy dashboard is hardcoded to `mkp1` and `mkp2`.** 23 of its 43 queries pin
   one of those two host labels, and the Block I/O row additionally pins the role
   split by device — `mkp1` to `md.+` (initiator RAID0), `mkp2` to `nvme.+`
   (target SSDs). On a differently-named rig roughly half the panels render empty,

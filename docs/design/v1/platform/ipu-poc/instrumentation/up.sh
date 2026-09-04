@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Bring up SSH tunnels + Prom/Grafana stack for mkp1/mkp2 observability.
+# Bring up SSH tunnels + Prom/Grafana stack for the MMG-400 observability rig.
 # Idempotent: safe to re-run.
 set -euo pipefail
 
@@ -18,7 +18,7 @@ ensure_password() {
         return
     fi
     local generated
-    generated="$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24)"
+    generated="$(openssl rand -hex 12)"
     umask 077
     printf 'GRAFANA_PASSWORD=%s\n' "$generated" >>.env
     echo "  generated a Grafana password into .env (mode 600)"
@@ -28,6 +28,18 @@ check_tunnel() {
     local port="$1"
     lsof -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1
 }
+
+# On Linux, Prometheus runs in Docker and reaches the host through the bridge
+# gateway rather than the host loopback device. Binding each SSH forward to
+# that gateway exposes it only to local Docker networks, not the management
+# network. Docker Desktop continues to use the normal loopback binding.
+if [ "$(uname -s)" = "Linux" ] && docker info >/dev/null 2>&1; then
+    TUNNEL_BIND_ADDR="$(
+        docker network inspect bridge \
+            --format '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null || true
+    )"
+fi
+TUNNEL_BIND_ADDR="${TUNNEL_BIND_ADDR:-127.0.0.1}"
 
 # sha256sum (coreutils) is the safer default on Linux, where Perl's
 # Digest::SHA -- what `shasum` needs -- is not guaranteed on a minimal
@@ -48,7 +60,9 @@ sha256_file() {
 # max_age is roughly 3x the collector's timer interval -- see
 # host/systemd/*.timer and scripts/ipu-poc/acc-*.timer for the source
 # values. Override with COLLECTOR_CHECKS="host:file:max_age_s ...".
-COLLECTOR_CHECKS="${COLLECTOR_CHECKS:-\
+# Set COLLECTOR_CHECKS='' for a forwarding-only monitoring key. Such a key
+# cannot execute the remote stat commands used by this optional probe.
+COLLECTOR_CHECKS="${COLLECTOR_CHECKS-\
 mmgt:acc_transport.prom:30 mmgt:acc_stats.prom:90 mmgt:acc_grpc_acc1.prom:6 \
 mmgt:acc_grpc_acc2.prom:6 mmgt:pcm_memory.prom:15 mmgt:pcm_pcie.prom:15 \
 mmgt:numa_stats.prom:15 mmgt:nvme_stats.prom:45 mmgt:mmgt_nic.prom:15 \
@@ -113,27 +127,15 @@ ensure_tunnel() {
         # therefore owns a direct SSH connection.
         ssh -f -N -o ControlMaster=no -o ControlPath=none \
             -o ExitOnForwardFailure=yes \
-            -L "$local_port:127.0.0.1:$remote_port" "$host"
+        -L "$TUNNEL_BIND_ADDR:$local_port:127.0.0.1:$remote_port" "$host"
         echo "  tunnel $host:$remote_port -> :$local_port opened"
     fi
 }
 
-# Override for a different pair of hosts:
-#   HOSTS="newhost1:19100 newhost2:19101" ./up.sh
+# Override for a different host set:
+#   HOSTS="newhost1:19106 newhost2:19107" ./up.sh
 # Keep the local ports aligned with the targets in prometheus.yml.
-HOSTS="${HOSTS:-mkp1:19100 mkp2:19101 mmgt:19106 mmgi0:19107 mmgi1:19108}"
-
-# Benchmark tunnels for the lmcache_bench job. Off by default: the endpoint
-# exists only while a `bench l2` process runs, so opening these when no
-# benchmark is planned just adds targets that are permanently down.
-#   BENCH_TUNNELS=1 ./up.sh              # mkp1 initiators 0..3 -> :19102-19105
-#   BENCH_TUNNELS=1 BENCH_INITIATORS=2 ./up.sh
-# The drivers assign METRICS_BASE_PORT + id on the initiator host; these map to
-# the four targets configured in prometheus.yml.
-BENCH_HOST="${BENCH_HOST:-mkp1}"
-BENCH_INITIATORS="${BENCH_INITIATORS:-4}"
-BENCH_REMOTE_BASE="${BENCH_REMOTE_BASE:-9101}"
-BENCH_LOCAL_BASE="${BENCH_LOCAL_BASE:-19102}"
+HOSTS="${HOSTS:-mmgt:19106 mmgi0:19107 mmgi1:19108}"
 
 # Same for the lmcache_bench_mmg job, where the load runs on two initiator
 # hosts. Local base per host is 19110 / 19120, so the last digit of the local
@@ -152,17 +154,12 @@ for entry in $HOSTS; do
     ensure_tunnel "${entry%%:*}" "${entry##*:}" 9100
 done
 
-echo "== collector freshness (mmgt/mmgi0/mmgi1) =="
-check_collectors
-
-if [ -n "${BENCH_TUNNELS:-}" ]; then
-    for ((i = 0; i < BENCH_INITIATORS; i++)); do
-        ensure_tunnel "$BENCH_HOST" \
-            "$((BENCH_LOCAL_BASE + i))" "$((BENCH_REMOTE_BASE + i))"
-    done
+if [ -n "$COLLECTOR_CHECKS" ]; then
+    echo "== collector freshness (mmgt/mmgi0/mmgi1) =="
+    check_collectors
 else
-    echo "  bench tunnels skipped (BENCH_TUNNELS=1 to open" \
-        "$BENCH_LOCAL_BASE-$((BENCH_LOCAL_BASE + BENCH_INITIATORS - 1)))"
+    echo "== collector freshness =="
+    echo "  skipped (COLLECTOR_CHECKS='')"
 fi
 
 if [ -n "${MMG_BENCH_TUNNELS:-}" ]; then
@@ -196,6 +193,14 @@ if ! docker info >/dev/null 2>&1; then
 fi
 docker compose up -d
 
+PROMETHEUS_ENDPOINT="$(docker compose port prometheus 9090 2>/dev/null || true)"
+PROMETHEUS_ENDPOINT="${PROMETHEUS_ENDPOINT%%$'\n'*}"
+[ -n "$PROMETHEUS_ENDPOINT" ] || {
+    echo "ERROR: Prometheus has no published port" >&2
+    exit 1
+}
+PROMETHEUS_URL="http://$PROMETHEUS_ENDPOINT"
+
 host_prometheus_sha="$(sha256_file prometheus.yml)"
 container_prometheus_sha=
 for i in 1 2 3 4 5; do
@@ -221,7 +226,8 @@ fi
 echo "== Prometheus reload =="
 reloaded=
 for i in 1 2 3 4 5; do
-    if curl -fsS -X POST --max-time 5 http://127.0.0.1:9090/-/reload >/dev/null; then
+    if curl --noproxy '*' -fsS -X POST --max-time 5 \
+        "$PROMETHEUS_URL/-/reload" >/dev/null; then
         reloaded=1
         break
     fi
@@ -245,9 +251,11 @@ sleep 5
 # sweep cells (the tunnel accepts the TCP connection, then the far end resets
 # it -- "EOF"). Only the first is actually broken. Conflating them is exactly
 # how a dead tunnel went unnoticed for a full session.
-curl -s --max-time 5 'http://127.0.0.1:9090/api/v1/targets?state=active' \
+export MMG_BENCH_TUNNELS_ENABLED="${MMG_BENCH_TUNNELS:+1}"
+curl --noproxy '*' -s --max-time 5 \
+    "$PROMETHEUS_URL/api/v1/targets?state=active" \
     | python3 -c "
-import json, sys
+import json, os, sys
 d = json.load(sys.stdin)
 tunnel_down = []
 for t in sorted(d['data']['activeTargets'], key=lambda t: t['labels'].get('job', '')):
@@ -258,7 +266,9 @@ for t in sorted(d['data']['activeTargets'], key=lambda t: t['labels'].get('job',
         who += f\" initiator={lb['initiator']}\"
     note = ''
     if job.startswith('lmcache_bench') and t['health'] != 'up':
-        if 'connection refused' in t.get('lastError', ''):
+        if not os.environ.get('MMG_BENCH_TUNNELS_ENABLED'):
+            note = '  (bench tunnels not enabled)'
+        elif 'connection refused' in t.get('lastError', ''):
             note = '  TUNNEL DOWN'
             tunnel_down.append(job)
         else:
@@ -266,11 +276,9 @@ for t in sorted(d['data']['activeTargets'], key=lambda t: t['labels'].get('job',
     print(f\"  {job:14} {who:22} health={t['health']}{note}\")
 if 'lmcache_bench_mmg' in tunnel_down:
     print('  -> run: MMG_BENCH_TUNNELS=1 ./up.sh')
-if 'lmcache_bench' in tunnel_down:
-    print('  -> run: BENCH_TUNNELS=1 ./up.sh')
 "
 
 echo
 echo "Grafana:    http://127.0.0.1:3000  (user admin; password in .env)"
-echo "Prometheus: http://127.0.0.1:9090"
+echo "Prometheus: $PROMETHEUS_URL"
 echo "Dashboard:  http://127.0.0.1:3000/d/ipu-poc-mkp-stub"
