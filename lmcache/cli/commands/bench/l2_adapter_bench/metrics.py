@@ -118,12 +118,27 @@ class BenchMetricsState:
             not per-``register`` call: one process benchmarks one model,
             and a label that changed mid-process would fragment a single
             run's series the same way switching phase does on purpose.
+        num_workers: The adapter's configured I/O worker count for this
+            process's lifetime, rendered as the ``num_workers`` label.
+            Concurrency knob, fixed like ``model_name`` for the same
+            reason -- one process runs at one concurrency setting.
+        page_size_bytes: The geometry's per-object payload size in bytes
+            (page-burst profiles) or per-object-group task size
+            (object-group profiles), rendered as the ``page_size_bytes``
+            label. Also fixed at construction.
     """
 
-    def __init__(self, model_name: str = "") -> None:
+    def __init__(
+        self,
+        model_name: str = "",
+        num_workers: int = 0,
+        page_size_bytes: int = 0,
+    ) -> None:
         self._lock = threading.Lock()
         self._results: dict[tuple[str, str], "BenchResult"] = {}
         self.model_name = model_name
+        self.num_workers = num_workers
+        self.page_size_bytes = page_size_bytes
 
     def register(
         self, operation: str, result: "BenchResult", phase: str = PHASE_MEASURED
@@ -170,12 +185,12 @@ class _BenchCollector:
         submits = CounterMetricFamily(
             f"{_NAMESPACE}_completed_submits",
             "Submits completed so far in this phase.",
-            labels=["operation", "phase", "model"],
+            labels=["operation", "phase", "model", "num_workers", "page_size_bytes"],
         )
         success_keys = CounterMetricFamily(
             f"{_NAMESPACE}_success_keys",
             "Keys the adapter reported successful so far in this phase.",
-            labels=["operation", "phase", "model"],
+            labels=["operation", "phase", "model", "num_workers", "page_size_bytes"],
         )
         success_bytes = CounterMetricFamily(
             f"{_NAMESPACE}_success_bytes",
@@ -185,7 +200,7 @@ class _BenchCollector:
                 "without writing, so this counts requested payload, not "
                 "necessarily bytes that reached the media."
             ),
-            labels=["operation", "phase", "model"],
+            labels=["operation", "phase", "model", "num_workers", "page_size_bytes"],
         )
         # Rendered as ``..._submit_latency_seconds_total``:
         # ``CounterMetricFamily`` appends the suffix itself.
@@ -197,12 +212,12 @@ class _BenchCollector:
                 "submit latency. There is no percentile here on purpose -- "
                 "see the module docstring."
             ),
-            labels=["operation", "phase", "model"],
+            labels=["operation", "phase", "model", "num_workers", "page_size_bytes"],
         )
         in_flight = GaugeMetricFamily(
             f"{_NAMESPACE}_in_flight_target",
             "Configured outstanding submits held by this phase.",
-            labels=["operation", "phase", "model"],
+            labels=["operation", "phase", "model", "num_workers", "page_size_bytes"],
         )
         phase_start = GaugeMetricFamily(
             f"{_NAMESPACE}_phase_start_time_seconds",
@@ -211,7 +226,7 @@ class _BenchCollector:
                 "submit). 0 for a phase that has not opened one -- rounds "
                 "mode and mixed mode do not set this yet."
             ),
-            labels=["operation", "phase", "model"],
+            labels=["operation", "phase", "model", "num_workers", "page_size_bytes"],
         )
         phase_end = GaugeMetricFamily(
             f"{_NAMESPACE}_phase_end_time_seconds",
@@ -221,11 +236,17 @@ class _BenchCollector:
                 "instant it actually closes, never predicted from the "
                 "configured duration."
             ),
-            labels=["operation", "phase", "model"],
+            labels=["operation", "phase", "model", "num_workers", "page_size_bytes"],
         )
 
         for (operation, phase), result in self._state.snapshot():
-            labels = [operation, phase, self._state.model_name]
+            labels = [
+                operation,
+                phase,
+                self._state.model_name,
+                str(self._state.num_workers),
+                str(self._state.page_size_bytes),
+            ]
             submits.add_metric(labels, float(result.completed_submits))
             success_keys.add_metric(labels, float(result.total_success))
             success_bytes.add_metric(labels, float(result.total_success_bytes))

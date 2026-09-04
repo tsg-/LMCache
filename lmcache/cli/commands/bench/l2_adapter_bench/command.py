@@ -740,7 +740,11 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
         if geometry_profile_path
         else geometry.model_name
     )
-    metrics_state = BenchMetricsState(model_name=model_label)
+    metrics_state = BenchMetricsState(
+        model_name=model_label,
+        num_workers=getattr(adapter_cfg, "num_workers", 0),
+        page_size_bytes=geometry.page_size_bytes or task_size_bytes,
+    )
     stop_metrics: Callable[[], None] = _noop_shutdown
     if metrics_port:
         try:
