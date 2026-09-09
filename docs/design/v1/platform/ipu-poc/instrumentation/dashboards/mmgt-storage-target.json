@@ -22,7 +22,7 @@
         "type": "prometheus",
         "uid": "PROM"
       },
-      "description": "Application payload throughput per operation, summed across bench l2 initiators on mmgi0/mmgi1 and across warmup+measured -- unlike LMCache aggregate goodput below, which is measured-only. Warmup is real O_DIRECT I/O against the same devices and fabric NVMe RD/RDMA WR account for, so leaving it out understated this panel by up to ~3.5x during a multi-initiator sweep where hosts run warmup/measured out of phase with each other. Expect this to track NVMe RD/RDMA WR closely at all times, not just during a measured window. A rate() window straddling a warmup->measured transition still dips briefly, since each phase is its own counter starting from zero. Read and write goodput are deliberately not added together. For the clean steady-state number, use LMCache aggregate goodput below or the end-of-run JSON.",
+      "description": "Application payload throughput per operation, summed across mmgi0-mmgi3 and across warmup+measured. The short-lived benchmark endpoints and continuously sampled target counters can cover different phase windows; use the measured-only goodput panel or end-of-run JSON for a publishable throughput result. Read and write goodput are deliberately not added together.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -92,7 +92,7 @@
         "type": "prometheus",
         "uid": "PROM"
       },
-      "description": "Aggregate kernel read throughput off the eight md0 members, in bits/s. Shares a hue with RDMA WR: the two ends of the read path. Tracks LMCache to within 0.1% during a retrieve run. The storage stack section shows the same figure in bytes/s.",
+      "description": "Aggregate kernel read throughput from the 16 raw NVMe-oF target namespaces, in bits/s. Shares a hue with RDMA WR: the two ends of the read path. The storage stack section shows the same figure in bytes/s.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -162,7 +162,7 @@
         "type": "prometheus",
         "uid": "PROM"
       },
-      "description": "Falcon acc_tele_field bytes_from_ulp_rc, summed across IPUs on MMG Target: payload the target pushes out to the fabric, which is what an initiator read turns into. Same bytes as the Falcon panel's WR series and as NVMe RD, one hop earlier. A direction counter, not a count of RDMA WRITE opcodes. The underlying counter latches every 30s - 34 of 40 consecutive 5s buckets were empty and the other 6 carried ~356 Gb/s each - so rate() beats against the latch period and sawtooths at any window width. This uses deriv() over 5m, a least-squares fit across every sample in the window, which reads as smooth as the payload itself (CV 1.7% against 1.9%) and within ~1% of goodput. clamp_min guards against the counter resetting, which deriv() would otherwise render as a negative spike.",
+      "description": "Falcon tele_cli acc_tele_field bytes_from_ulp_rc, summed across all four IPUs on MMG Target: target-side ULP-to-fabric payload. The dashboard labels this target TX direction RDMA WR. The counter latches every 30s; rate() over 90s spans three latches for a live value without the startup dilution of a five-minute window.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -218,7 +218,7 @@
             "uid": "PROM"
           },
           "editorMode": "code",
-          "expr": "clamp_min(sum(rate(acc_telemetry_bytes_total{host=\"mmgt\",counter=\"bytes_from_ulp_rc\"}[60s])), 0) * 8",
+          "expr": "sum(rate(acc_tele_field{host=\"mmgt\",field=\"bytes_from_ulp_rc\"}[90s])) * 8",
           "legendFormat": "TX",
           "range": true,
           "refId": "A"
@@ -232,7 +232,7 @@
         "type": "prometheus",
         "uid": "PROM"
       },
-      "description": "Aggregate kernel write throughput off the eight md0 members, in bits/s. Shares a hue with RDMA RD: the two ends of the write path. Reads 0 throughout a Load-only (retrieve) window, which is the expected result and not a dead query - check the operation names on LMCache to tell the two cases apart.",
+      "description": "Aggregate kernel write throughput to the 16 raw NVMe-oF target namespaces, in bits/s. Shares a hue with RDMA RD: the two ends of the write path. Reads 0 throughout a Load-only (retrieve) window, which is the expected result and not a dead query - check the operation names on LMCache to tell the two cases apart.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -302,7 +302,7 @@
         "type": "prometheus",
         "uid": "PROM"
       },
-      "description": "Falcon acc_tele_field bytes_to_ulp, summed across IPUs on MMG Target: payload arriving from the fabric, which is what an initiator write turns into. Same bytes as the Falcon panel's RD series and as NVMe WR. Sits near zero throughout a Load-only window by construction. The underlying counter latches every 30s - 34 of 40 consecutive 5s buckets were empty and the other 6 carried ~356 Gb/s each - so rate() beats against the latch period and sawtooths at any window width. This uses deriv() over 5m, a least-squares fit across every sample in the window, which reads as smooth as the payload itself (CV 1.7% against 1.9%) and within ~1% of goodput. clamp_min guards against the counter resetting, which deriv() would otherwise render as a negative spike.",
+      "description": "Falcon tele_cli acc_tele_field bytes_to_ulp, summed across all four IPUs on MMG Target: target-side fabric-to-ULP payload. The dashboard labels this target RX direction RDMA RD. It sits near zero throughout a Load-only window by construction. The 90s rate spans three 30s latches.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -358,7 +358,7 @@
             "uid": "PROM"
           },
           "editorMode": "code",
-          "expr": "clamp_min(sum(rate(acc_telemetry_bytes_total{host=\"mmgt\",counter=\"bytes_to_ulp\"}[60s])), 0) * 8",
+          "expr": "sum(rate(acc_tele_field{host=\"mmgt\",field=\"bytes_to_ulp\"}[90s])) * 8",
           "legendFormat": "RX",
           "range": true,
           "refId": "A"
@@ -1256,7 +1256,7 @@
         "code": {
           "language": "plaintext"
         },
-        "content": "**`operation`** is the phase: `Load` is retrieve (reads), `Store` is insert (writes). The names appear on the **LMCache** tile above.\n\nIn a `Load`-only window **NVMe WR** and **RDMA RD** read ~0 by construction - that is the read path confirming itself, not a dead query. **LMCache** and **NVMe RD** should track each other at all times, warmup included; a gap between them would mean reads served from page cache, or a brief dip at a warmup->measured transition. **RDMA WR** and **RDMA RD** come off a burst-latched ACC counter on a 5m window, so trust their trend, not a single reading.\n\n**RDMA WR = fabric TX = payload pushed to initiators**, and it is the same bytes as **NVMe RD** one hop earlier. **RDMA RD = fabric RX = payload arriving from initiators**, same bytes as **NVMe WR**. The summary tiles and the Falcon panel below name the same two counters.",
+        "content": "**`operation`** is the phase: `Load` is retrieve (reads), `Store` is insert (writes). The names appear on the **LMCache** tile above.\n\nIn a `Load`-only window **NVMe WR** and **RDMA RD** read ~0 by construction - that is the read path confirming itself, not a dead query. **LMCache**, **NVMe RD**, and **RDMA WR** carry the same read-response payload at successive stages; brief warmup-to-measured transitions can still differ.\n\n**RDMA WR = target-side ULP-to-fabric TX**, the target response path; **RDMA RD = target-side fabric-to-ULP RX**. Live tiles use a 90s rate across three Falcon latches. The Falcon history chart averages exact counter growth across the selected range.",
         "mode": "markdown"
       },
       "title": "Reading this section",
@@ -1356,7 +1356,7 @@
         "type": "prometheus",
         "uid": "PROM"
       },
-      "description": "Total application payload goodput per initiator process. The Prometheus endpoint is short-lived and exists only while bench l2 is running. Operations are summed here to expose imbalance between mmgi0 and mmgi1 without combining the read and write aggregate lines.",
+      "description": "Total application payload goodput per initiator process. The Prometheus endpoint is short-lived and exists only while bench l2 is running. Operations are summed here to expose imbalance across mmgi0-mmgi3 without combining the read and write aggregate lines.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -3272,7 +3272,7 @@
         "type": "prometheus",
         "uid": "PROM"
       },
-      "description": "The same two counters as the RDMA WR and RDMA RD tiles in the summary row, as a trend. RDMA WR is fabric TX is payload pushed to initiators; RDMA RD is fabric RX is payload arriving from them. The underlying counter latches every 30s - 34 of 40 consecutive 5s buckets were empty and the other 6 carried ~356 Gb/s each - so rate() beats against the latch period and sawtooths at any window width. This uses deriv() over 5m, a least-squares fit across every sample in the window, which reads as smooth as the payload itself (CV 1.7% against 1.9%) and within ~1% of goodput. clamp_min guards against the counter resetting, which deriv() would otherwise render as a negative spike.",
+      "description": "Four-IPU Falcon tele_cli payload trends. RDMA WR is target-side ULP-to-fabric TX; RDMA RD is target-side fabric-to-ULP RX. The chart averages counter growth across the selected range.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -3348,12 +3348,12 @@
       },
       "targets": [
         {
-          "expr": "clamp_min(sum(deriv(acc_telemetry_bytes_total{host=\"mmgt\",counter=\"bytes_to_ulp\"}[$__range])), 0) * 8",
+          "expr": "sum(increase(acc_tele_field{host=\"mmgt\",field=\"bytes_to_ulp\"}[$__range])) / $__range_s * 8",
           "legendFormat": "RDMA RD \u00b7 Fabric \u2192 ULP",
           "refId": "A"
         },
         {
-          "expr": "clamp_min(sum(deriv(acc_telemetry_bytes_total{host=\"mmgt\",counter=\"bytes_from_ulp_rc\"}[$__range])), 0) * 8",
+          "expr": "sum(increase(acc_tele_field{host=\"mmgt\",field=\"bytes_from_ulp_rc\"}[$__range])) / $__range_s * 8",
           "legendFormat": "RDMA WR \u00b7 ULP \u2192 Fabric",
           "refId": "B"
         }
@@ -3690,7 +3690,7 @@
                 "uid": "PROM"
               },
               "editorMode": "code",
-              "expr": "clamp_min(sum(rate(acc_telemetry_bytes_total{host=\"mmgt\",acc=\"acc2\",counter=\"bytes_to_ulp\"}[60s])), 0) * 8",
+              "expr": "sum(rate(acc_tele_field{host=\"mmgt\",acc=\"acc2\",field=\"bytes_to_ulp\"}[90s])) * 8",
               "legendFormat": "RDMA RX",
               "range": true,
               "refId": "A"
@@ -3760,7 +3760,7 @@
                 "uid": "PROM"
               },
               "editorMode": "code",
-              "expr": "clamp_min(sum(rate(acc_telemetry_bytes_total{host=\"mmgt\",acc=\"acc2\",counter=\"bytes_from_ulp_rc\"}[60s])), 0) * 8",
+              "expr": "sum(rate(acc_tele_field{host=\"mmgt\",acc=\"acc2\",field=\"bytes_from_ulp_rc\"}[90s])) * 8",
               "legendFormat": "RDMA TX",
               "range": true,
               "refId": "A"
@@ -3909,7 +3909,7 @@
                 "uid": "PROM"
               },
               "editorMode": "code",
-              "expr": "clamp_min(sum(rate(acc_telemetry_bytes_total{host=\"mmgt\",acc=\"acc1\",counter=\"bytes_to_ulp\"}[60s])), 0) * 8",
+              "expr": "sum(rate(acc_tele_field{host=\"mmgt\",acc=\"acc1\",field=\"bytes_to_ulp\"}[90s])) * 8",
               "legendFormat": "RDMA RX",
               "range": true,
               "refId": "A"
@@ -3979,7 +3979,7 @@
                 "uid": "PROM"
               },
               "editorMode": "code",
-              "expr": "clamp_min(sum(rate(acc_telemetry_bytes_total{host=\"mmgt\",acc=\"acc1\",counter=\"bytes_from_ulp_rc\"}[60s])), 0) * 8",
+              "expr": "sum(rate(acc_tele_field{host=\"mmgt\",acc=\"acc1\",field=\"bytes_from_ulp_rc\"}[90s])) * 8",
               "legendFormat": "RDMA TX",
               "range": true,
               "refId": "A"
@@ -4170,7 +4170,7 @@
                 "uid": "PROM"
               },
               "editorMode": "code",
-              "expr": "clamp_min(sum(deriv(acc_tele_field{host=\"mmgt\",acc=\"acc3\",field=\"bytes_to_ulp\"}[5m])), 0) * 8",
+              "expr": "sum(rate(acc_tele_field{host=\"mmgt\",acc=\"acc3\",field=\"bytes_to_ulp\"}[90s])) * 8",
               "legendFormat": "RDMA RX",
               "range": true,
               "refId": "A"
@@ -4240,7 +4240,7 @@
                 "uid": "PROM"
               },
               "editorMode": "code",
-              "expr": "clamp_min(sum(deriv(acc_tele_field{host=\"mmgt\",acc=\"acc3\",field=\"bytes_from_ulp_rc\"}[5m])), 0) * 8",
+              "expr": "sum(rate(acc_tele_field{host=\"mmgt\",acc=\"acc3\",field=\"bytes_from_ulp_rc\"}[90s])) * 8",
               "legendFormat": "RDMA TX",
               "range": true,
               "refId": "A"
@@ -4389,7 +4389,7 @@
                 "uid": "PROM"
               },
               "editorMode": "code",
-              "expr": "clamp_min(sum(deriv(acc_tele_field{host=\"mmgt\",acc=\"acc4\",field=\"bytes_to_ulp\"}[5m])), 0) * 8",
+              "expr": "sum(rate(acc_tele_field{host=\"mmgt\",acc=\"acc4\",field=\"bytes_to_ulp\"}[90s])) * 8",
               "legendFormat": "RDMA RX",
               "range": true,
               "refId": "A"
@@ -4459,7 +4459,7 @@
                 "uid": "PROM"
               },
               "editorMode": "code",
-              "expr": "clamp_min(sum(deriv(acc_tele_field{host=\"mmgt\",acc=\"acc4\",field=\"bytes_from_ulp_rc\"}[5m])), 0) * 8",
+              "expr": "sum(rate(acc_tele_field{host=\"mmgt\",acc=\"acc4\",field=\"bytes_from_ulp_rc\"}[90s])) * 8",
               "legendFormat": "RDMA TX",
               "range": true,
               "refId": "A"
@@ -4477,7 +4477,7 @@
         "type": "prometheus",
         "uid": "PROM"
       },
-      "description": "Aggregate ACC CPU busy percentage on mmgi0 and mmgi1. The aggregate includes the expected polling floor.",
+      "description": "Aggregate ACC CPU busy percentage on mmgi0-mmgi3. The aggregate includes the expected polling floor.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -4549,83 +4549,6 @@
         "type": "prometheus",
         "uid": "PROM"
       },
-      "description": "LMCache Load bytes as a percentage of NVMe RD, gated to only compute while both initiators (mmgi0, mmgi1) are actively running -- Initiators Active == 2. Outside that window the two metrics decay at different rates for reasons that have nothing to do with a real mismatch (see the Initiators Active panel above), so this deliberately shows '-' rather than a misleading number. Historically reconciles to within 0.02-0.1% during a genuine steady-state read. A sustained reading well under 100% during an active window is the one case that would mean reads served from page cache instead of the media.",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": [],
-          "noValue": "-",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "orange",
-                "value": 90
-              },
-              {
-                "color": "green",
-                "value": 97
-              }
-            ]
-          },
-          "unit": "percent"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 3,
-        "w": 6,
-        "x": 0,
-        "y": 109
-      },
-      "id": 55,
-      "options": {
-        "colorMode": "background",
-        "graphMode": "none",
-        "justifyMode": "center",
-        "orientation": "horizontal",
-        "reduceOptions": {
-          "calcs": [
-            "last"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "text": {
-          "titleSize": 14,
-          "valueSize": 26
-        },
-        "textMode": "value_and_name",
-        "wideLayout": true
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "PROM"
-          },
-          "editorMode": "code",
-          "expr": "(sum(rate(lmcache_bench_l2_success_bytes_total{job=\"lmcache_bench_mmg\",host=~\"mmgi.*\",operation=\"Load\"}[60s])) / sum(rate(node_disk_read_bytes_total{host=\"mmgt\",device=~\"$device\"}[60s])) * 100) and on() (sum(up{job=\"lmcache_bench_mmg\",host=~\"mmgi.*\",initiator=\"0\"}) == 2)",
-          "legendFormat": "LMCache / NVMe RD",
-          "range": true,
-          "refId": "A"
-        }
-      ],
-      "title": "LMCache / NVMe RD reconciliation",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "PROM"
-      },
       "description": "What each initiator is actually running, for correlating a number elsewhere on this dashboard with the run that produced it. `model` is the --kvcache-shape-profile file's stem (e.g. mixtral_8x22b_fp8_64k), the same identifier result JSON filenames and the sweep tables in README-model-geometry.md use -- or the resolved geometry's own model name when no profile file was given. Scrub the dashboard's time picker and this table follows: it shows whatever was last true within the selected window, same as any other panel here.",
       "fieldConfig": {
         "defaults": {
@@ -4647,8 +4570,8 @@
       },
       "gridPos": {
         "h": 6,
-        "w": 12,
-        "x": 6,
+        "w": 24,
+        "x": 0,
         "y": 109
       },
       "id": 56,
@@ -4671,14 +4594,14 @@
             "uid": "PROM"
           },
           "editorMode": "code",
-          "expr": "lmcache_bench_l2_in_flight_target{job=\"lmcache_bench_mmg\",host=~\"mmgi.*\"}",
+          "expr": "last_over_time(lmcache_bench_l2_in_flight_target{job=\"lmcache_bench_mmg\",host=~\"mmgi.*\"}[$__range])",
           "format": "table",
           "instant": true,
           "legendFormat": "__auto",
           "refId": "A"
         }
       ],
-      "title": "Active Runs — model, operation, phase, in-flight",
+      "title": "Runs in selected range — model, operation, phase, in-flight",
       "type": "table"
     }
   ],
@@ -4693,7 +4616,7 @@
   "templating": {
     "list": [
       {
-        "allValue": "nvme(1|3|5|7|9|11|13|15)n1",
+        "allValue": "nvme(2|3|4|5|6|7|8|9|12|13|14|15|16|17|18|19)n1",
         "current": {
           "selected": true,
           "text": "All",
@@ -4703,12 +4626,12 @@
           "type": "prometheus",
           "uid": "PROM"
         },
-        "description": "md0 / RAID0 member namespaces on mmgt. All selects the eight array members; other nvme namespaces on the box are not part of the array.",
+        "description": "Raw NVMe-oF target namespaces on mmgt. All selects the 16 exported devices (nvme2-9 and nvme12-19); the boot / non-target nvme20 is excluded.",
         "includeAll": true,
         "label": "Device",
         "multi": true,
         "name": "device",
-        "query": "label_values(node_disk_written_bytes_total{host=\"mmgt\",device=~\"nvme.*n1\"}, device)",
+        "query": "label_values(node_disk_written_bytes_total{host=\"mmgt\",device=~\"nvme(2|3|4|5|6|7|8|9|12|13|14|15|16|17|18|19)n1\"}, device)",
         "type": "query"
       },
       {

@@ -93,14 +93,8 @@ def test_mmg_dashboard_documents_the_authoritative_four_ipu_map() -> None:
     assert "IPU4 is acc4 / 200.0.8.2 / mmgi3 (POC-002)" in description
 
 
-def test_mmg_dashboard_falcon_payload_derives_over_the_full_panel_range() -> None:
-    """Falcon RDMA payload derives over ``$__range``, not a fixed window.
-
-    irdma refreshes ``hw_counters`` asynchronously (roughly 1s), so a fixed
-    60s window -- fine for NVMe's per-second host counters -- understated a
-    45s run 4x here. ``deriv(...[$__range])`` spans the panel's own time
-    range instead, which is why this panel no longer shares NVMe's window.
-    """
+def test_mmg_dashboard_falcon_payload_averages_the_selected_range() -> None:
+    """Falcon history uses exact counter growth over the selected range."""
     dashboard = json.loads(DASHBOARD.read_text())
     falcon_payload = next(
         panel
@@ -112,11 +106,74 @@ def test_mmg_dashboard_falcon_payload_derives_over_the_full_panel_range() -> Non
 
     assert expressions == [
         (
-            'clamp_min(sum(deriv(acc_telemetry_bytes_total{host="mmgt",'
-            'counter="bytes_to_ulp"}[$__range])), 0) * 8'
+            'sum(increase(acc_tele_field{host="mmgt",'
+            'field="bytes_to_ulp"}[$__range])) / $__range_s * 8'
         ),
         (
-            'clamp_min(sum(deriv(acc_telemetry_bytes_total{host="mmgt",'
-            'counter="bytes_from_ulp_rc"}[$__range])), 0) * 8'
+            'sum(increase(acc_tele_field{host="mmgt",'
+            'field="bytes_from_ulp_rc"}[$__range])) / $__range_s * 8'
         ),
     ]
+
+
+def test_mmg_dashboard_uses_four_ipu_tele_cli_rdm_payloads() -> None:
+    """RDMA summaries and every IPU card must use the four-IPU source."""
+    dashboard = json.loads(DASHBOARD.read_text())
+    panels = {panel["title"]: panel for panel in dashboard["panels"]}
+    ipu_details = next(
+        panel for panel in dashboard["panels"] if panel["title"] == "IPU adapter details"
+    )
+    panels.update({panel["title"]: panel for panel in ipu_details["panels"]})
+
+    assert panels["RDMA RD"]["targets"][0]["expr"] == (
+        'sum(rate(acc_tele_field{host="mmgt",'
+        'field="bytes_to_ulp"}[90s])) * 8'
+    )
+    assert panels["RDMA WR"]["targets"][0]["expr"] == (
+        'sum(rate(acc_tele_field{host="mmgt",'
+        'field="bytes_from_ulp_rc"}[90s])) * 8'
+    )
+    for title, acc, field in (
+        ("IPU1 · RDMA RD", "acc2", "bytes_to_ulp"),
+        ("IPU1 · RDMA WR", "acc2", "bytes_from_ulp_rc"),
+        ("IPU2 · RDMA RD", "acc1", "bytes_to_ulp"),
+        ("IPU2 · RDMA WR", "acc1", "bytes_from_ulp_rc"),
+        ("IPU3 · RDMA RD", "acc3", "bytes_to_ulp"),
+        ("IPU3 · RDMA WR", "acc3", "bytes_from_ulp_rc"),
+        ("IPU4 · RDMA RD", "acc4", "bytes_to_ulp"),
+        ("IPU4 · RDMA WR", "acc4", "bytes_from_ulp_rc"),
+    ):
+        assert panels[title]["targets"][0]["expr"] == (
+            'sum(rate(acc_tele_field{host="mmgt",'
+            f'acc="{acc}",field="{field}"}}[90s])) * 8'
+        )
+
+
+def test_mmg_dashboard_uses_current_target_devices_and_run_history() -> None:
+    """Dashboard controls must cover raw 16-drive exports and selected ranges."""
+    dashboard = json.loads(DASHBOARD.read_text())
+    variables = {variable["name"]: variable for variable in dashboard["templating"]["list"]}
+    titles = {panel["title"] for panel in dashboard["panels"]}
+    runs = next(
+        panel
+        for panel in dashboard["panels"]
+        if panel["title"] == "Runs in selected range — model, operation, phase, in-flight"
+    )
+    rdma_write = next(panel for panel in dashboard["panels"] if panel["title"] == "RDMA WR")
+
+    assert variables["device"]["allValue"] == (
+        "nvme(2|3|4|5|6|7|8|9|12|13|14|15|16|17|18|19)n1"
+    )
+    assert variables["device"]["query"] == (
+        'label_values(node_disk_written_bytes_total{host="mmgt",'
+        'device=~"nvme(2|3|4|5|6|7|8|9|12|13|14|15|16|17|18|19)n1"}, device)'
+    )
+    assert "LMCache / NVMe RD reconciliation" not in titles
+    assert runs["targets"][0]["expr"] == (
+        'last_over_time(lmcache_bench_l2_in_flight_target{job="lmcache_bench_mmg",'
+        'host=~"mmgi.*"}[$__range])'
+    )
+    assert rdma_write["targets"][0]["expr"] == (
+        'sum(rate(acc_tele_field{host="mmgt",'
+        'field="bytes_from_ulp_rc"}[90s])) * 8'
+    )
