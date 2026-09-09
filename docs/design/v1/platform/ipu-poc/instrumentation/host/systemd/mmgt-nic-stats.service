@@ -3,5 +3,5 @@ Description=Refresh mmgt dual-port NIC counters for node_exporter
 
 [Service]
 Type=oneshot
-Environment="MMGT_NIC_IFACES=enp79s0f0 enp45s0f0"
+Environment="MMGT_NIC_IFACES=enp173s0f0 enp209s0f0 enp84s0f0 enp13s0f0"
 ExecStart=/usr/local/bin/mmgt_nic_textfile.sh

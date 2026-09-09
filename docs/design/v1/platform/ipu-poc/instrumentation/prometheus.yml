@@ -43,21 +43,21 @@ scrape_configs:
         replacement: mmgi3
 
   # Same `bench l2 --serve-metrics` endpoints on the MMG-400 rig, where the load
-  # is driven from two initiator hosts instead of one. A separate job keeps the
+  # is driven from four initiator hosts instead of one. A separate job keeps the
   # mkp1 panels from summing mmg series into their aggregate: the mkp dashboard
   # filters on job alone.
   #
   # Local port encodes both host and initiator id: 1911x -> mmgi0, 1912x -> mmgi1,
-  # last digit is the id. Remote side is METRICS_BASE_PORT + id on each host.
+  # 1913x -> mmgi2, 1914x -> mmgi3; the last digit is the id. Remote side is
+  # METRICS_BASE_PORT + id on each host.
   #
   # The host-only geometry coordinator uses id 0 (port 9101) on each host.
   # Ports 9102-9104 remain reserved for an explicit local multi-process run.
   # As with the mkp job, `up == 0` between cells is expected, and rates are
   # valid over `phase="measured"` only.
   #
-  # Verified live 2026-09-01: both id-0 targets scraped real
-  # lmcache_bench_l2_* series from an in-progress geometry sweep on
-  # mmgi0/mmgi1.
+  # A run is scrapeable only while its --serve-metrics endpoint and this host's
+  # matching SSH tunnel are both up.
   - job_name: lmcache_bench_mmg
     static_configs:
       # ssh -N -L 1911{0,1,2,3}:127.0.0.1:910{1,2,3,4} mmgi0
@@ -78,6 +78,24 @@ scrape_configs:
         labels:
           fabric: mgmt
           host: mmgi1
+      # ssh -N -L 1913{0,1,2,3}:127.0.0.1:910{1,2,3,4} mmgi2
+      - targets:
+          - host.docker.internal:19130   # initiator 0 -> mmgi2 127.0.0.1:9101
+          - host.docker.internal:19131   # initiator 1 -> mmgi2 127.0.0.1:9102
+          - host.docker.internal:19132   # initiator 2 -> mmgi2 127.0.0.1:9103
+          - host.docker.internal:19133   # initiator 3 -> mmgi2 127.0.0.1:9104
+        labels:
+          fabric: mgmt
+          host: mmgi2
+      # ssh -N -L 1914{0,1,2,3}:127.0.0.1:910{1,2,3,4} mmgi3
+      - targets:
+          - host.docker.internal:19140   # initiator 0 -> mmgi3 127.0.0.1:9101
+          - host.docker.internal:19141   # initiator 1 -> mmgi3 127.0.0.1:9102
+          - host.docker.internal:19142   # initiator 2 -> mmgi3 127.0.0.1:9103
+          - host.docker.internal:19143   # initiator 3 -> mmgi3 127.0.0.1:9104
+        labels:
+          fabric: mgmt
+          host: mmgi3
     relabel_configs:
       - source_labels: [__address__]
         regex: host\.docker\.internal:1911(\d)
@@ -85,5 +103,13 @@ scrape_configs:
         replacement: "$1"
       - source_labels: [__address__]
         regex: host\.docker\.internal:1912(\d)
+        target_label: initiator
+        replacement: "$1"
+      - source_labels: [__address__]
+        regex: host\.docker\.internal:1913(\d)
+        target_label: initiator
+        replacement: "$1"
+      - source_labels: [__address__]
+        regex: host\.docker\.internal:1914(\d)
         target_label: initiator
         replacement: "$1"

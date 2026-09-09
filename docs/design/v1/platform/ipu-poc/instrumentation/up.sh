@@ -139,12 +139,12 @@ ensure_tunnel() {
 # Keep the local ports aligned with the targets in prometheus.yml.
 HOSTS="${HOSTS:-mmgt:19106 mmgi0:19107 mmgi1:19108 mmgi2:19109 mmgi3:19114}"
 
-# Same for the lmcache_bench_mmg job, where the load runs on two initiator
-# hosts. Local base per host is 19110 / 19120, so the last digit of the local
-# port is the initiator id -- prometheus.yml relabels on exactly that.
-#   MMG_BENCH_TUNNELS=1 ./up.sh                       # mmgi0+mmgi1 i0..3
+# Same for the lmcache_bench_mmg job, where the load runs on four initiator
+# hosts. Local bases are 19110 / 19120 / 19130 / 19140, so the last digit of
+# the local port is the initiator id -- prometheus.yml relabels on exactly that.
+#   MMG_BENCH_TUNNELS=1 ./up.sh                       # mmgi0..mmgi3 i0..3
 #   MMG_BENCH_TUNNELS=1 MMG_BENCH_INITIATORS=2 ./up.sh
-MMG_BENCH_HOSTS="${MMG_BENCH_HOSTS:-mmgi0:19110 mmgi1:19120}"
+MMG_BENCH_HOSTS="${MMG_BENCH_HOSTS:-mmgi0:19110 mmgi1:19120 mmgi2:19130 mmgi3:19140}"
 MMG_BENCH_INITIATORS="${MMG_BENCH_INITIATORS:-4}"
 MMG_BENCH_REMOTE_BASE="${MMG_BENCH_REMOTE_BASE:-9101}"
 
@@ -174,7 +174,9 @@ if [ -n "${MMG_BENCH_TUNNELS:-}" ]; then
 else
     echo "  mmg bench tunnels skipped (MMG_BENCH_TUNNELS=1 to open" \
         "19110-$((19110 + MMG_BENCH_INITIATORS - 1)) and" \
-        "19120-$((19120 + MMG_BENCH_INITIATORS - 1)))"
+        "19120-$((19120 + MMG_BENCH_INITIATORS - 1)), " \
+        "19130-$((19130 + MMG_BENCH_INITIATORS - 1)), and" \
+        "19140-$((19140 + MMG_BENCH_INITIATORS - 1)))"
 fi
 
 echo "== docker stack =="

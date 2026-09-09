@@ -4,7 +4,7 @@ set -euo pipefail
 OUT_DIR="/var/lib/node_exporter/textfile"
 OUT_FILE="$OUT_DIR/mmgt_nic.prom"
 TMP_FILE="$(mktemp "$OUT_DIR/mmgt_nic.prom.XXXXXX")"
-IFACES="${MMGT_NIC_IFACES:-enp79s0f0 enp45s0f0}"
+IFACES="${MMGT_NIC_IFACES:-enp173s0f0 enp209s0f0 enp84s0f0 enp13s0f0}"
 
 trap 'rm -f "$TMP_FILE"' EXIT
 

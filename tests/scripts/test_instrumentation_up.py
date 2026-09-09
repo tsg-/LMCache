@@ -32,6 +32,10 @@ def test_mmg_monitoring_stack_uses_host_gateway_and_mmg_targets() -> None:
     assert "host.docker.internal:19114" in prometheus
     assert "mmgi2:19109" in launcher
     assert "mmgi3:19114" in launcher
+    assert "host.docker.internal:19130" in prometheus
+    assert "host.docker.internal:19140" in prometheus
+    assert "mmgi2:19130" in launcher
+    assert "mmgi3:19140" in launcher
     assert "mkp1:19100" not in launcher
     assert "mkp2:19101" not in launcher
     assert "COLLECTOR_CHECKS=''" in launcher
