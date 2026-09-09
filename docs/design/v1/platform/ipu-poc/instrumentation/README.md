@@ -1,6 +1,7 @@
 # LMCache telemetry — MMG-400 observability kit
 
-The deployed monitoring host is `mmgi0`, in `/root/lmcache-telemetry`. It
+The deployed monitoring host is `mmgi1` (POC-001), in
+`/root/lmcache-telemetry`. It
 scrapes the MMG-400 target and initiators: `mmgt`, `mmgi0`, and `mmgi1`.
 Persistent Docker state is under `/home/docker/`, configured with Docker's
 `data-root`; do not place Prometheus data on `/`.
@@ -9,7 +10,7 @@ Two halves:
 
 - **`host/`** — runs *on each test host*: node_exporter + six textfile
   collectors, each driven by its own systemd timer.
-- **root of this dir** — runs *on the mmgi0 monitoring host*: SSH tunnels plus
+- **root of this dir** — runs *on the mmgi1 monitoring host*: SSH tunnels plus
   Prometheus and Grafana in Docker.
 
 Two metrics flows, both loopback-bound and tunnelled:
@@ -74,7 +75,7 @@ ssh <newhost> 'curl -s localhost:9100/metrics | grep -c ^rdma_hw_counter{'
 ### 2. Monitoring host
 
 ```bash
-ssh mmgi0
+ssh mmgi1
 cd /root/lmcache-telemetry
 COLLECTOR_CHECKS='' ./up.sh
 ```
@@ -108,12 +109,12 @@ disabled.
 | `host/bin/mmgt_nic_textfile.sh` | mmgt only | `ethtool -S` on both fabric ports; replaces `rdma_nic` on the MMG-400 target |
 | `host/systemd/*.service`, `*.timer` | test host | node_exporter + one timer per collector |
 | `host/systemd/pcm-memory.service.d/pcm.conf` | mmgt only | Pins `PCM_MEMORY_BIN` to the dated PCM build |
-| `prometheus.yml` | mmgi0 | 4s scrape of node tunnels plus MMG bench ports |
-| `docker-compose.yml` | mmgi0 | Prometheus 2.55.1 + Grafana 11.3.0; volumes use Docker's `/home/docker/` data root |
-| `provisioning/` | mmgi0 | Grafana datasource (uid `PROM`) + dashboard provider |
-| `dashboards/lmcache-mkp.json` | mmgi0 | Legacy mkp1/mkp2 dashboard; provisioned but not applicable to this rig |
-| `dashboards/mmgt-storage-target.json` | mmgi0 | 63 panels incl. rows, uid `mmgt-storage-target` — MMG-400 target storage/DDIO/ACC dashboard |
-| `up.sh` | mmgi0 | Tunnels + stack + health check |
+| `prometheus.yml` | mmgi1 | 4s scrape of node tunnels plus MMG bench ports |
+| `docker-compose.yml` | mmgi1 | Prometheus 2.55.1 + Grafana 11.3.0; volumes use Docker's `/home/docker/` data root |
+| `provisioning/` | mmgi1 | Grafana datasource (uid `PROM`) + dashboard provider |
+| `dashboards/lmcache-mkp.json` | mmgi1 | Legacy mkp1/mkp2 dashboard; provisioned but not applicable to this rig |
+| `dashboards/mmgt-storage-target.json` | mmgi1 | 63 panels incl. rows, uid `mmgt-storage-target` — MMG-400 target storage/DDIO/ACC dashboard |
+| `up.sh` | mmgi1 | Tunnels + stack + health check |
 
 ### The `lmcache_bench` job
 

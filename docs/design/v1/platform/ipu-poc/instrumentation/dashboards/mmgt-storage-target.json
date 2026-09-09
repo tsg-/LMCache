@@ -451,7 +451,7 @@
         "type": "prometheus",
         "uid": "PROM"
       },
-      "description": "ACC CPU cores-equivalent busy by IPU. IPU1 is acc2 / rocep45s0f0 / PCI 0000:2d:00.0; IPU2 is acc1 / rocep79s0f0 / PCI 0000:4f:00.0. IPU3 and IPU4 appear when their telemetry is available. The expected poll-mode floor is 2.0 cores per reporting IPU. ACC memory bandwidth is not instrumented; Falcon payload and transaction counters are not substitutes for memory bandwidth.",
+      "description": "ACC CPU cores-equivalent busy by IPU. IPU1 is acc2 / 200.0.5.2 / mmgi0 (POC-003), on rocep45s0f0 / PCI 0000:2d:00.0. IPU2 is acc1 / 200.0.6.2 / mmgi1 (POC-001), on rocep79s0f0 / PCI 0000:4f:00.0. IPU3 is acc3 / 200.0.7.2 / mmgi2 (B14-P9). IPU4 is acc4 / 200.0.8.2 / mmgi3 (POC-002). The expected poll-mode floor is 2.0 cores per reporting IPU. ACC memory bandwidth is not instrumented; Falcon payload and transaction counters are not substitutes for memory bandwidth.",
       "fieldConfig": {
         "defaults": {
           "color": {

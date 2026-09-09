@@ -76,6 +76,23 @@ def test_mmg_dashboard_matches_the_target_acc_aggregate_chart() -> None:
     )
 
 
+def test_mmg_dashboard_documents_the_authoritative_four_ipu_map() -> None:
+    """Target IPU labels must identify their serving initiator and address."""
+    dashboard = json.loads(DASHBOARD.read_text())
+    target_busy = next(
+        panel
+        for panel in dashboard["panels"]
+        if panel["title"] == "Target IPU Cores Busy"
+    )
+
+    description = target_busy["description"]
+
+    assert "IPU1 is acc2 / 200.0.5.2 / mmgi0 (POC-003)" in description
+    assert "IPU2 is acc1 / 200.0.6.2 / mmgi1 (POC-001)" in description
+    assert "IPU3 is acc3 / 200.0.7.2 / mmgi2 (B14-P9)" in description
+    assert "IPU4 is acc4 / 200.0.8.2 / mmgi3 (POC-002)" in description
+
+
 def test_mmg_dashboard_falcon_payload_derives_over_the_full_panel_range() -> None:
     """Falcon RDMA payload derives over ``$__range``, not a fixed window.
 

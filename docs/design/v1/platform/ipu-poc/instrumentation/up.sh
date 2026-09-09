@@ -67,14 +67,16 @@ mmgt:acc_transport.prom:30 mmgt:acc_stats.prom:90 mmgt:acc_grpc_acc1.prom:6 \
 mmgt:acc_grpc_acc2.prom:6 mmgt:pcm_memory.prom:15 mmgt:pcm_pcie.prom:15 \
 mmgt:numa_stats.prom:15 mmgt:nvme_stats.prom:45 mmgt:mmgt_nic.prom:15 \
 mmgi0:acc_transport.prom:30 mmgi0:acc_stats.prom:90 \
-mmgi1:acc_transport.prom:30 mmgi1:acc_stats.prom:90}"
+mmgi1:acc_transport.prom:30 mmgi1:acc_stats.prom:90 \
+mmgi2:acc_transport.prom:30 mmgi2:acc_stats.prom:90 \
+mmgi3:acc_transport.prom:30 mmgi3:acc_stats.prom:90}"
 
 check_collectors() {
     local textfile_dir=/var/lib/node_exporter/textfile
     local now host entry names spec name max_age path mtimes mtime age
     local stale_found=
     now="$(date +%s)"
-    for host in mmgt mmgi0 mmgi1; do
+    for host in mmgt mmgi0 mmgi1 mmgi2 mmgi3; do
         names=""
         for entry in $COLLECTOR_CHECKS; do
             [ "${entry%%:*}" = "$host" ] && names="$names ${entry#*:}"
@@ -135,7 +137,7 @@ ensure_tunnel() {
 # Override for a different host set:
 #   HOSTS="newhost1:19106 newhost2:19107" ./up.sh
 # Keep the local ports aligned with the targets in prometheus.yml.
-HOSTS="${HOSTS:-mmgt:19106 mmgi0:19107 mmgi1:19108}"
+HOSTS="${HOSTS:-mmgt:19106 mmgi0:19107 mmgi1:19108 mmgi2:19109 mmgi3:19114}"
 
 # Same for the lmcache_bench_mmg job, where the load runs on two initiator
 # hosts. Local base per host is 19110 / 19120, so the last digit of the local
@@ -155,7 +157,7 @@ for entry in $HOSTS; do
 done
 
 if [ -n "$COLLECTOR_CHECKS" ]; then
-    echo "== collector freshness (mmgt/mmgi0/mmgi1) =="
+    echo "== collector freshness (mmgt/mmgi0/mmgi1/mmgi2/mmgi3) =="
     check_collectors
 else
     echo "== collector freshness =="

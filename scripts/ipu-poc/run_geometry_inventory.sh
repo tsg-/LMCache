@@ -147,7 +147,7 @@ done <<<"$(tr ',' '\n' <<<"$addresses")"
 [ "$matched" -eq 1 ] ||
   { echo "ABORT: no NVMe-oF controller matches the target export" >&2; exit 2; }
 
-for repo in "$HOME/LMCache" /root/LMCache; do
+for repo in /root/anthropic/LMCache "$HOME/LMCache" /root/LMCache; do
   if [ -x "$repo/scripts/ipu-poc/run_model_geometry.sh" ]; then
     printf '%s\n' "$repo"
     exit 0
@@ -183,7 +183,7 @@ set -euo pipefail
 
 run_id=$1
 bench_root=$2
-for repo in "$HOME/LMCache" /root/LMCache; do
+for repo in /root/anthropic/LMCache "$HOME/LMCache" /root/LMCache; do
   [ -x "$repo/scripts/ipu-poc/verify_geometry_corpus.sh" ] && break
 done
 [ -x "$repo/scripts/ipu-poc/verify_geometry_corpus.sh" ] ||
@@ -231,7 +231,7 @@ in_flights=$3
 warmup_sec=$4
 duration_sec=$5
 include_minimax=$6
-for repo in "$HOME/LMCache" /root/LMCache; do
+for repo in /root/anthropic/LMCache "$HOME/LMCache" /root/LMCache; do
   [ -x "$repo/scripts/ipu-poc/run_model_geometry.sh" ] && break
 done
 [ -x "$repo/scripts/ipu-poc/run_model_geometry.sh" ] ||

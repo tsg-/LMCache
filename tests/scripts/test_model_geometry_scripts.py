@@ -38,6 +38,7 @@ OBJECT_GROUP_PROFILES = [
     profile for profile in PROFILES if profile not in PAGE_BURST_PROFILES
 ]
 MMG_INVENTORY = SCRIPTS / "inventories" / "mmg-two-initiator.env"
+MMG_FOUR_INITIATOR_INVENTORY = SCRIPTS / "inventories" / "mmg-four-initiator.env"
 # A byte-different copy of mixtral_8x22b_fp8.yaml with the same resolved
 # geometry. Kept outside models/ so the sweep does not offer it as a model.
 PAGETEST = SCRIPTS / "models" / "fixtures" / "mixtral_8x22b_pagetest_256k.yaml"
@@ -157,6 +158,31 @@ def test_profiles_command_lists_every_profile() -> None:
     assert result.returncode == 0, result.stderr
     for profile in PROFILES:
         assert profile.name in result.stdout
+
+
+def test_four_initiator_inventory_is_host_only() -> None:
+    """The four-host MMG inventory can be shown by the generic coordinator."""
+    result = subprocess.run(
+        ["bash", str(INVENTORY_RUNNER), "show", str(MMG_FOUR_INITIATOR_INVENTORY)],
+        check=False,
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=300,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "initiators: mmgi0 mmgi1 mmgi2 mmgi3" in result.stdout
+    assert "target: mmgt" in result.stdout
+
+
+def test_inventory_runner_prefers_the_requested_anthropic_checkout() -> None:
+    """A stale root checkout cannot shadow the requested benchmark checkout."""
+    source = INVENTORY_RUNNER.read_text()
+
+    assert source.count(
+        'for repo in /root/anthropic/LMCache "$HOME/LMCache" /root/LMCache; do'
+    ) == 3
 
 
 def test_show_resolves_every_profile() -> None:
