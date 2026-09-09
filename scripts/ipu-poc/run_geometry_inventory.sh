@@ -262,7 +262,7 @@ for in_flight in "${in_flight_values[@]}"; do
       "PREFIX=$prefix-if${in_flight}"
       "IN_FLIGHT=$in_flight"
     )
-    env ROUNDS=2 "${common_env[@]}" \
+    env ROUNDS=2 METRICS_PORT=9101 "${common_env[@]}" \
       bash scripts/ipu-poc/run_model_geometry.sh store "$profile"
     env OUTPUT="results/$run_id-$host_name-$model-if${in_flight}.json" \
       WARMUP_SEC="$warmup_sec" DURATION_SEC="$duration_sec" METRICS_PORT=9101 \

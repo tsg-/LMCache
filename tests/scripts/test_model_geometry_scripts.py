@@ -340,7 +340,7 @@ def test_inventory_runner_advertises_corpus_verification() -> None:
 
 
 def test_inventory_sweep_uses_the_mmg_metrics_port(tmp_path: Path) -> None:
-    """The MMG coordinator exposes each initiator's sustained-load endpoint."""
+    """The MMG coordinator exposes store and sustained-load endpoints."""
     inventory = tmp_path / "inventory.env"
     inventory.write_text("INITIATOR_HOSTS=(mmgi0 mmgi1)\nTARGET_HOST=mmgt\n")
     invocation_log = tmp_path / "remote-invocations.txt"
@@ -375,7 +375,7 @@ def test_inventory_sweep_uses_the_mmg_metrics_port(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 0, result.stderr
-    assert invocation_log.read_text().count("METRICS_PORT=9101") == 2
+    assert invocation_log.read_text().count("METRICS_PORT=9101") == 4
 
 
 def test_inventory_sweep_accepts_a_timed_inflight_matrix() -> None:
