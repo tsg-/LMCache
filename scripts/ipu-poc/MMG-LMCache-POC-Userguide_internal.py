@@ -119,12 +119,12 @@ COLLECTOR_FILES = [
     (
         "docs/design/v1/platform/ipu-poc/instrumentation/host/bin/"
         "pcm_pcie_textfile.sh",
-        "Intel PCM PCIe/DDIO bandwidth per socket (mmgt only)",
+        "Intel PCM PCIe/DDIO bandwidth per socket (KV Cache Target only)",
     ),
     (
         "docs/design/v1/platform/ipu-poc/instrumentation/host/bin/"
         "mmgt_nic_textfile.sh",
-        "ethtool -S on both fabric ports (mmgt only, replaces rdma_nic)",
+        "ethtool -S on both fabric ports (KV Cache Target only, replaces rdma_nic)",
     ),
     (
         "scripts/ipu-poc/acc_ssh_stats.py",
@@ -230,8 +230,23 @@ def figure(
     caption_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
 
-def data_table(doc: Document, headers: list[str], rows: list[list[str]]) -> None:
-    """Add a shaded-header data table sized to its content."""
+STATUS_COLORS = {
+    "green": RGBColor(0x1E, 0x7B, 0x34),
+    "orange": RGBColor(0xB4, 0x53, 0x09),
+    "red": RGBColor(0xB9, 0x1C, 0x1C),
+}
+
+
+def data_table(
+    doc: Document, headers: list[str], rows: list[list[str | tuple[str, str]]]
+) -> None:
+    """Add a shaded-header data table sized to its content.
+
+    A cell may be a plain string, or a ``(text, status)`` tuple where
+    ``status`` is one of ``"green"``, ``"orange"``, ``"red"`` -- used to mark
+    a benchmark number as validated (green) or needing investigation
+    (orange/red), per STATUS_COLORS.
+    """
     table = doc.add_table(rows=1 + len(rows), cols=len(headers))
     table.style = "Table Grid"
     table.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -250,7 +265,12 @@ def data_table(doc: Document, headers: list[str], rows: list[list[str]]) -> None
         run.font.size = Pt(9)
 
     for r, row in enumerate(rows, start=1):
-        for col, text in enumerate(row):
+        for col, cell_value in enumerate(row):
+            status = None
+            if isinstance(cell_value, tuple):
+                text, status = cell_value
+            else:
+                text = cell_value
             cell = table.cell(r, col)
             pad_cell(cell, 40)
             cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
@@ -259,6 +279,9 @@ def data_table(doc: Document, headers: list[str], rows: list[list[str]]) -> None
                 shade_cell(cell, "F1F2F4")
             run = cell.paragraphs[0].add_run(text)
             run.font.size = Pt(9)
+            if status is not None:
+                run.bold = True
+                run.font.color.rgb = STATUS_COLORS[status]
     doc.add_paragraph()
 
 
@@ -331,8 +354,9 @@ def build_document(output: Path) -> None:
     subtitle_run.font.color.rgb = RGBColor(0x59, 0x59, 0x59)
     add_bottom_rule(subtitle)
     doc.add_paragraph(
-        "This guide demonstrates the MMG-400 two-initiator setup (mmgi0 and "
-        "mmgi1) against one target. The inventory names machines only. The "
+        "This guide demonstrates the MMG-400 two-initiator setup (Initiator1 "
+        "and Initiator2) against one KV Cache Target. The inventory names "
+        "machines only. The "
         "coordinator rejects an unmounted or local filesystem instead of "
         "accepting a user-supplied storage path. The tooling accepts more "
         "initiators, but this guide's topology, procedure, and results are "
@@ -352,15 +376,14 @@ def build_document(output: Path) -> None:
     doc.add_paragraph(
         "Traffic generators (1x 400 GbE each, 2x 400 GbE combined) and one "
         "KV Cache Target, connected over a Falcon fabric. "
-        "The target serves eight 1.92 TB Solidigm D7-PS1010 Gen5 x4 NVMe "
-        "SSDs over 4x 400 GbE, as built. The full-scale design point is 16x "
-        "Gen5 x4 NVMe SSDs on the same 4x 400 GbE target."
+        "The target serves 16 1.92 TB Solidigm D7-PS1010 Gen5 x4 NVMe "
+        "SSDs over 4x 400 GbE, as built."
     )
     figure(
         doc,
         DIAGRAMS_DIR / "brief-mmg400-setup-asbuilt.png",
-        "The rig as built: two initiators/traffic generators, one target, "
-        "8 drives.",
+        "The rig as built: four initiators/traffic generators, one target, "
+        "16 drives.",
     )
 
     doc.add_heading("System configuration", level=2)
@@ -368,6 +391,11 @@ def build_document(output: Path) -> None:
         "For consistent performance, set BIOS System Profile to Performance, "
         "disable C-States, and make sure the OS power/performance governor is "
         'set to "performance".'
+    )
+    figure(
+        doc,
+        DIAGRAMS_DIR / "brief-setup-flows-400g.png",
+        "Per-initiator software stack and STORE/RETRIEVE data flow.",
     )
 
     doc.add_heading("Benchmark Definition", level=1)
@@ -385,6 +413,12 @@ def build_document(output: Path) -> None:
         "adapter directly; on this rig the adapter is fs_native on the XFS "
         "filesystem mounted over NVMe-oF. It measures cache-object I/O, not "
         "end-to-end model inference."
+    )
+    figure(
+        doc,
+        DIAGRAMS_DIR / "brief-kv-tiering-pyramid.png",
+        "NVIDIA's G1-G4 memory tiers mapped to LMCache's Tier.L1/Tier.L2. "
+        "This guide measures L2 only.",
     )
     doc.add_heading("Why LMCache bench l2, not FIO alone", level=2)
     doc.add_paragraph(
@@ -655,20 +689,25 @@ done""",
 
     doc.add_page_break()
     doc.add_heading("Reference results and appendices", level=1)
-    doc.add_heading("Established bandwidth limits — 2x 400 GbE IPU setup", level=2)
+    doc.add_heading(
+        "Established bandwidth limits — 8x PCIe Gen5 NVMe setup", level=2
+    )
     doc.add_paragraph(
         "FIO establishes the envelope this path can move bytes at, "
         "independent of any application (see Appendix E). The tables below "
         "cover 64 KiB and 256 KiB locally, and 64 KiB through 1 MiB over the "
         "remote fs_native path."
     )
-    doc.add_heading("Peak local FIO throughput (on mmgt, before the fabric)", level=2)
+    doc.add_heading(
+        "Peak local FIO throughput — 100% randread (before the fabric)",
+        level=3,
+    )
     data_table(
         doc,
         ["Block size", "Peak (Gb/s)", "Peak (GB/s)", "Outstanding at peak"],
         [
-            ["64 KiB", "928", "116", "512 (8 jobs × qd64)"],
-            ["256 KiB", "952", "119", "256 (8 jobs × qd32)"],
+            ["64 KiB", ("928", "green"), ("116", "green"), "512 (8 jobs × qd64)"],
+            ["256 KiB", ("952", "green"), ("119", "green"), "256 (8 jobs × qd32)"],
         ],
     )
     doc.add_paragraph(
@@ -682,7 +721,7 @@ done""",
     doc.add_heading(
         "Peak remote FIO throughput (md0 + XFS over NVMe-oF — the fs_native "
         "envelope)",
-        level=2,
+        level=3,
     )
     data_table(
         doc,
@@ -694,13 +733,13 @@ done""",
         ],
         [
             ["64 KiB", "651.2", "~325.6", "256 (8 jobs × qd32)"],
-            ["256 KiB", "768.0", "~384.0", "512 (8 jobs × qd64)"],
-            ["512 KiB", "768.0", "~384.0", "128 (8 jobs × qd16)"],
-            ["1 MiB", "768.8", "~384.4", "128 (8 jobs × qd16)"],
+            ["256 KiB", ("768.0", "green"), ("~384.0", "green"), "512 (8 jobs × qd64)"],
+            ["512 KiB", ("768.0", "green"), ("~384.0", "green"), "128 (8 jobs × qd16)"],
+            ["1 MiB", ("768.8", "green"), ("~384.4", "green"), "128 (8 jobs × qd16)"],
         ],
     )
     doc.add_paragraph(
-        "Re-measured 2026-09-01 after mmgt/mmgi0/mmgi1 were rebooted onto a "
+        "Re-measured 2026-09-01 after the KV Cache Target/Initiator1/Initiator2 were rebooted onto a "
         "new Falcon setup and the storage stack (nvmet export, NVMe-oF "
         "connect, md0 RAID0, XFS) was rebuilt from scratch on both "
         "initiators -- both driven in lockstep, direct=1, libaio, 8 jobs, "
@@ -724,10 +763,133 @@ done""",
         "efficiency."
     )
 
-    doc.add_heading("5:1 mixed FIO results (placeholder)", level=2)
+    doc.add_page_break()
+    doc.add_heading(
+        "Established bandwidth limits — 16x PCIe Gen5 NVMe setup", level=2
+    )
+    doc.add_heading("Initiator-to-target-IPU topology", level=3)
     doc.add_paragraph(
-        "No 5:1 mixed FIO result is published yet. Populate this table only "
-        "with a separately run 5:1 read/write FIO workload."
+        "Each initiator has a dedicated target IPU, fabric IP, and set of "
+        "four exported NVMe namespaces; there is no sharing or contention "
+        "across pairs."
+    )
+    data_table(
+        doc,
+        [
+            "Initiator",
+            "Target IPU",
+            "Target fabric IP",
+            "Exported target storage",
+            "Target NUMA",
+        ],
+        [
+            ["Initiator1", "KVCacheTgt-IPU1", "200.0.5.2", "4 serial-pinned namespaces", "1"],
+            ["Initiator2", "KVCacheTgt-IPU2", "200.0.6.2", "4 serial-pinned namespaces", "1"],
+            ["Initiator3", "KVCacheTgt-IPU3", "200.0.7.2", "4 serial-pinned namespaces", "0"],
+            ["Initiator4", "KVCacheTgt-IPU4", "200.0.8.2", "4 serial-pinned namespaces", "0"],
+        ],
+    )
+    doc.add_heading(
+        "Peak local FIO throughput — 100% randread (before the fabric)",
+        level=3,
+    )
+    data_table(
+        doc,
+        ["Block size", "Peak (Gb/s)", "Peak (GB/s)", "Outstanding at peak"],
+        [
+            ["64 KiB", ("1847.9", "green"), ("231.0", "green"), "1024 (16 jobs × qd64)"],
+            ["256 KiB", ("1902.6", "green"), ("237.8", "green"), "512 (16 jobs × qd32)"],
+        ],
+    )
+    doc.add_paragraph(
+        "Measured 2026-09-07, direct=1, libaio, randread against the raw "
+        "/dev/nvmeXn1 devices: 16 jobs, one per Solidigm namespace, three "
+        "30 s repetitions after a 10 s ramp. The table reports each "
+        "block-size peak; no NVMe-oF target was configured or active. "
+        "~14.4-14.9 GB/s per drive, in line with the D7-PS1010 brief's "
+        "up-to-14.5 GB/s sequential read spec. This is the media and PCIe "
+        "ceiling for the 16-drive setup."
+    )
+
+    doc.add_heading(
+        "Four-initiator raw NVMe-oF FIO — 100% randread", level=3
+    )
+    doc.add_paragraph(
+        "Measured 2026-09-08 across the four serial-pinned NVMe-oF "
+        "subsystems, with one direct=1, libaio, readonly randread job per "
+        "imported namespace (four per initiator). All initiators ran "
+        "concurrently for 60 s with a 10 s ramp, 256 KiB I/O, and FIO "
+        "processes pinned to the local RDMA NUMA node. This is a raw block "
+        "path result, not an md0/XFS or LMCache result."
+    )
+    data_table(
+        doc,
+        [
+            "QD / SSD",
+            "Aggregate outstanding",
+            "Initiator1 (Gb/s)",
+            "Initiator2 (Gb/s)",
+            "Initiator3 (Gb/s)",
+            "Initiator4 (Gb/s)",
+            "Aggregate (Gb/s)",
+        ],
+        [
+            [
+                "16", "64",
+                ("350.2", "orange"), ("329.0", "orange"), ("278.5", "orange"), ("318.0", "orange"),
+                ("1275.6", "orange"),
+            ],
+            [
+                "32", "128",
+                ("384.0", "green"), ("357.7", "orange"), ("342.2", "orange"), ("321.1", "orange"),
+                ("1404.9", "orange"),
+            ],
+            [
+                "64", "256",
+                ("303.2", "orange"), ("367.7", "orange"), ("365.7", "orange"), ("322.6", "orange"),
+                ("1359.1", "orange"),
+            ],
+            [
+                "128", "512",
+                ("374.3", "orange"), ("318.0", "orange"), ("352.6", "orange"), ("262.3", "orange"),
+                ("1307.1", "orange"),
+            ],
+        ],
+    )
+    doc.add_paragraph(
+        "The QD32 aggregate peak is 1404.9 Gb/s, 73.8% of the 1902.6 Gb/s "
+        "local 16-drive, 256 KiB randread ceiling. Every FIO job returned "
+        "zero errors. The exported target was reconfigured once before the "
+        "sweep by an unidentified external actor, which required NVMe "
+        "namespace rescans on the initiators; it did not recur during the "
+        "four measured windows. Treat target-configuration stability as a "
+        "separate follow-up rather than averaging that event into these "
+        "clean post-recovery results."
+    )
+
+    doc.add_heading("Peak RDMA link throughput — 4-initiator cutover", level=2)
+    doc.add_paragraph(
+        "ib_write_bw (-F -a --report_gbits, RC/Ethernet, MTU 4096) run "
+        "2026-09-07 against all four initiator/target-IPU pairs on the "
+        "4-initiator fabric, independent of FIO or LMCache: raw RDMA-verbs "
+        "write bandwidth between each initiator and its paired target IPU."
+    )
+    data_table(
+        doc,
+        ["Path", "Peak (Gb/s)"],
+        [
+            ["Initiator1 (POC-003) -> KVCacheTgt-IPU1 200.0.5.2", ("384.78", "green")],
+            ["Initiator2 (POC-001) -> KVCacheTgt-IPU2 200.0.6.2", ("384.77", "green")],
+            ["Initiator3 (B14-P9) -> KVCacheTgt-IPU3 200.0.7.2", ("384.77", "green")],
+            ["Initiator4 (POC-002) -> KVCacheTgt-IPU4 200.0.8.2", ("384.75", "orange")],
+        ],
+    )
+
+    doc.add_heading("5:1 mixed FIO results", level=2)
+    doc.add_paragraph(
+        "Measured 2026-09-07 on the 16-drive raw-device setup: sequential "
+        "1 MiB rw=rw, rwmixread=83 (the integer FIO approximation of 5:1), "
+        "qd16 per drive, 300 s after a 30 s ramp. No NVMe-oF target was active."
     )
     data_table(
         doc,
@@ -739,7 +901,14 @@ done""",
             "Outstanding",
             "Notes",
         ],
-        [],
+        [[
+            "1 MiB",
+            ("1517.4", "green"),
+            ("1259.3", "green"),
+            ("258.0", "green"),
+            "256 (16 jobs x qd16)",
+            "83% read bytes",
+        ]],
     )
 
     doc.add_heading("LMCache bench l2 results", level=2)
@@ -755,15 +924,15 @@ done""",
             "Model",
             "Workers × in-flight",
             "Window",
-            "mmgi0 (Gb/s)",
-            "mmgi1 (Gb/s)",
+            "Initiator1 (Gb/s)",
+            "Initiator2 (Gb/s)",
         ],
         [
             ["Mixtral 64 KiB", "w=32 / if=8", "10 min", "67.5", "65.2"],
             ["Mixtral 256 KiB", "w=48 / if=16", "15 min", "283.1", "273.8"],
             [
                 "MiniMax-M3 (run 1)",
-                "w=32 / if=8 (mmgi0); w=48 / if=16 (mmgi1)",
+                "w=32 / if=8 (Initiator1); w=48 / if=16 (Initiator2)",
                 "15 min",
                 "367.7",
                 "370.2",
@@ -782,18 +951,18 @@ done""",
         doc,
         ["Model", "Initiator", "Throughput (Gb/s)", "Ops/s", "Avg / p99 (ms)"],
         [
-            ["Mixtral 64 KiB", "mmgi0", "67.5", "128.7k", "2.44 / 3.53"],
-            ["Mixtral 64 KiB", "mmgi1", "65.2", "124.3k", "2.51 / 3.75"],
-            ["Mixtral 256 KiB", "mmgi0", "283.1", "135.0k", "4.52 / 6.42"],
-            ["Mixtral 256 KiB", "mmgi1", "273.8", "130.5k", "4.58 / 7.01"],
-            ["MiniMax-M3 (run 2)", "mmgi0", "371.6", "4.74k", "13.49 / 16.05"],
-            ["MiniMax-M3 (run 2)", "mmgi1", "374.1", "4.78k", "26.80 / 35.03"],
+            ["Mixtral 64 KiB", "Initiator1", "67.5", "128.7k", "2.44 / 3.53"],
+            ["Mixtral 64 KiB", "Initiator2", "65.2", "124.3k", "2.51 / 3.75"],
+            ["Mixtral 256 KiB", "Initiator1", "283.1", "135.0k", "4.52 / 6.42"],
+            ["Mixtral 256 KiB", "Initiator2", "273.8", "130.5k", "4.58 / 7.01"],
+            ["MiniMax-M3 (run 2)", "Initiator1", "371.6", "4.74k", "13.49 / 16.05"],
+            ["MiniMax-M3 (run 2)", "Initiator2", "374.1", "4.78k", "26.80 / 35.03"],
         ],
     )
     doc.add_paragraph(
         "The MiniMax re-run reproduced the first run closely: 371.6 vs "
-        "367.7 Gb/s on mmgi0 and 374.1 vs 370.2 Gb/s on mmgi1. Its "
-        "mmgi1 p99 latency (35.03 ms) is higher than mmgi0's (16.05 ms), "
+        "367.7 Gb/s on Initiator1 and 374.1 vs 370.2 Gb/s on Initiator2. Its "
+        "Initiator2 p99 latency (35.03 ms) is higher than Initiator1's (16.05 ms), "
         "but the two initiators used different worker/in-flight settings, "
         "so this is an observation rather than evidence of a host defect."
     )
@@ -864,7 +1033,7 @@ done""",
         "The 64 KiB results illustrate why object-shaped work should not be "
         "reported as a percentage of FIO: FIO measured about 325.6 Gb/s per "
         "initiator at its own 64 KiB, 256-outstanding workload, whereas this "
-        "bench l2 run reached 67.5 Gb/s on mmgi0 and 65.2 Gb/s on mmgi1 with "
+        "bench l2 run reached 67.5 Gb/s on Initiator1 and 65.2 Gb/s on Initiator2 with "
         "different request structure and concurrency. Larger objects reduce "
         "per-object overhead, but MiniMax's 9.34 MiB object has no directly "
         "matching FIO row. Use FIO as a control and compare only like-sized, "
@@ -1038,14 +1207,13 @@ done""",
         "are MMG-400-specific, reaching the ACC over SSH through the IMC "
         "rather than through node_exporter's own collectors."
     )
-    doc.add_page_break()
     collector_table(doc)
 
     doc.add_heading("Appendix G — Turning on live telemetry (optional)", level=3)
     doc.add_paragraph(
         "The target's PCIe, NIC, and NUMA collectors are target-specific, so "
         "use the instrumentation README rather than the generic host "
-        "installer on mmgt."
+        "installer on the KV Cache Target."
     )
     command(
         doc,
@@ -1067,10 +1235,78 @@ COLLECTOR_CHECKS='' MMG_BENCH_TUNNELS=1 MMG_BENCH_INITIATORS=1 ./up.sh""",
     doc.add_paragraph(
         "The ACC installer uses separate 30 s core-busy and 10 s "
         "transport-counter timers. node_exporter is loopback-only, so the "
-        "SSH tunnels are the sole network exposure. The optional mmgt gRPC "
+        "SSH tunnels are the sole network exposure. The optional KV Cache Target gRPC "
         "shadow collector keeps the IMC hop open and samples at 2 s; it is a "
         "validation path while the dashboard continues to use polling "
         "counters."
+    )
+
+    doc.add_heading("Appendix H — NVMe-oF queue-pair stability summary", level=3)
+    doc.add_paragraph(
+        "The 256 KiB raw-device NVMe-oF sweep varied the I/O queue-pair "
+        "count per controller. A result is stable only when the maximum-to-"
+        "minimum bandwidth span for every initiator is no more than 10% of "
+        "that initiator's mean."
+    )
+    data_table(
+        doc,
+        ["I/O QPs", "Run mode", "Mean aggregate BW (Gb/s)", "Stable?", "Reason"],
+        [
+            [
+                "128",
+                "Initial concurrent",
+                "1237.6",
+                "No",
+                "mmgi1/mmgi2/mmgi3 spans: 36.0%/15.0%/33.0%",
+            ],
+            [
+                "64",
+                "Concurrent",
+                "1389.8",
+                "No",
+                "mmgi1/mmgi3 spans: 14.5%/10.7%",
+            ],
+            [
+                "32",
+                "Initial concurrent sweep",
+                "1454.9",
+                "No",
+                "mmgi0 span: 10.8%",
+            ],
+            [
+                "16",
+                "Concurrent",
+                "1443.3",
+                "No",
+                "mmgi0/mmgi3 spans: 21.2%/28.2%",
+            ],
+            [
+                "4",
+                "Concurrent",
+                "1032.0",
+                "No",
+                "mmgi0/mmgi2 spans: 67.1%/54.1%",
+            ],
+            [
+                "32",
+                "Validation, solo",
+                "N/A",
+                "No",
+                "mmgi3 span: 22.3%",
+            ],
+            [
+                "32",
+                "Validation, aggregate",
+                "1217.6",
+                "No",
+                "mmgi0/mmgi3 spans: 39.7%/11.9%",
+            ],
+        ],
+    )
+    doc.add_paragraph(
+        "The controllers remain configured for 32 I/O QPs each "
+        "(queue_count=33, including the admin queue). Every FIO run in this "
+        "summary completed with zero reported I/O errors."
     )
 
     output.parent.mkdir(parents=True, exist_ok=True)
