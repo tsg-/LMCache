@@ -218,11 +218,13 @@ run_sweep() {
   validate_sweep_options
 
   local run_id=${RUN_ID:-"geometry-$(date +%Y%m%d-%H%M%S)"}
-  local host
+  local host remote_command
   local -a pids=()
   for host in "${INITIATOR_HOSTS[@]}"; do
-    ssh -o BatchMode=yes "$host" bash -s -- "$run_id" "$BENCH_ROOT" \
-      "$IN_FLIGHTS" "$WARMUP_SEC" "$DURATION_SEC" "$INCLUDE_MINIMAX" <<'REMOTE' &
+    printf -v remote_command 'bash -s -- %q %q %q %q %q %q' \
+      "$run_id" "$BENCH_ROOT" "$IN_FLIGHTS" "$WARMUP_SEC" "$DURATION_SEC" \
+      "$INCLUDE_MINIMAX"
+    ssh -o BatchMode=yes "$host" "$remote_command" <<'REMOTE' &
 set -euo pipefail
 
 run_id=$1

@@ -15,8 +15,10 @@
 # netns field is empty, because the IMC link there is a plain host interface
 # holding 100.0.0.1/24 rather than a namespaced management vport:
 #
-#   IMC_PASSWORD=... ./install_acc_stats.sh mmgi0 ':acc1:200.0.4.3'
-#   IMC_PASSWORD=... ./install_acc_stats.sh mmgi1 ':acc1:200.0.3.3'
+#   IMC_PASSWORD=... ./install_acc_stats.sh mmgi0 ':acc1:200.0.3.3'
+#   IMC_PASSWORD=... ./install_acc_stats.sh mmgi1 ':acc1:200.0.4.3'
+#   IMC_PASSWORD=... ./install_acc_stats.sh mmgi2 ':acc1:200.0.9.3'
+#   IMC_PASSWORD=... ./install_acc_stats.sh mmgi3 ':acc1:200.0.10.3'
 #   IMC_PASSWORD=... ./install_acc_stats.sh mmgt          # two-card default
 #
 # Target-only gRPC shadow (does not replace acc-transport):

@@ -23,6 +23,8 @@ set -euo pipefail
 NVMET=/sys/kernel/config/nvmet
 NQN_PREFIX=nqn.2026-09.io.lmcache.mmg
 TRSVCID=4420
+SPDK_SOCKET=${SPDK_SOCKET:-/var/tmp/mmgt-spdk-nvmf.sock}
+SPDK_PID_FILE=${SPDK_PID_FILE:-/run/mmgt-spdk-nvmf.pid}
 
 # port-id, subsystem suffix, target IPU address, allowed host NQN, four serials
 TARGETS="
@@ -79,6 +81,25 @@ assert_target_addresses() {
     done <<< "$TARGETS"
 }
 
+assert_no_spdk_target() {
+    local pid
+    command -v pgrep >/dev/null ||
+        { echo "ABORT: pgrep utility is absent"; exit 1; }
+    [ ! -S "$SPDK_SOCKET" ] ||
+        { echo "ABORT: SPDK target socket exists: $SPDK_SOCKET"; exit 1; }
+    if [ -e "$SPDK_PID_FILE" ]; then
+        pid=$(cat "$SPDK_PID_FILE" 2>/dev/null || true)
+        [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null &&
+            { echo "ABORT: SPDK target pid $pid is active"; exit 1; }
+        echo "ABORT: SPDK target pid file exists: $SPDK_PID_FILE"
+        exit 1
+    fi
+    if pgrep -x nvmf_tgt >/dev/null || pgrep -x spdk_tgt >/dev/null; then
+        echo "ABORT: SPDK NVMf target process is active"
+        exit 1
+    fi
+}
+
 preflight() {
     local _port _suffix _address _host serial device
     assert_no_local_md
@@ -104,6 +125,7 @@ assert_port_matches_or_empty() {
 }
 
 up() {
+    assert_no_spdk_target
     preflight
     modprobe nvmet
     modprobe nvmet-rdma

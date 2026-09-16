@@ -405,7 +405,7 @@
       },
       "gridPos": {
         "h": 3,
-        "w": 8,
+        "w": 3,
         "x": 0,
         "y": 4
       },
@@ -451,13 +451,13 @@
         "type": "prometheus",
         "uid": "PROM"
       },
-      "description": "ACC CPU cores-equivalent busy by IPU. IPU1 is acc2 / 200.0.5.2 / mmgi0 (POC-003), on rocep45s0f0 / PCI 0000:2d:00.0. IPU2 is acc1 / 200.0.6.2 / mmgi1 (POC-001), on rocep79s0f0 / PCI 0000:4f:00.0. IPU3 is acc3 / 200.0.7.2 / mmgi2 (B14-P9). IPU4 is acc4 / 200.0.8.2 / mmgi3 (POC-002). The expected poll-mode floor is 2.0 cores per reporting IPU. ACC memory bandwidth is not instrumented; Falcon payload and transaction counters are not substitutes for memory bandwidth.",
+      "description": "ACC CPU cores-equivalent busy by IPU. IPU1 is acc2 / 200.0.5.2 / mmgi0 (POC-003), on rocep45s0f0 / PCI 0000:2d:00.0. IPU2 is acc1 / 200.0.6.2 / mmgi1 (POC-001), on rocep79s0f0 / PCI 0000:4f:00.0. IPU3 is acc3 / 200.0.7.2 / mmgi2 (B14-P9). IPU4 is acc4 / 200.0.8.2 / mmgi3 (B14-P11). The expected poll-mode floor is 2.0 cores per reporting IPU. ACC memory bandwidth is not instrumented; Falcon payload and transaction counters are not substitutes for memory bandwidth.",
       "fieldConfig": {
         "defaults": {
           "color": {
             "mode": "thresholds"
           },
-          "decimals": 2,
+          "decimals": 1,
           "max": 24,
           "min": 0,
           "noValue": "-",
@@ -484,8 +484,8 @@
       },
       "gridPos": {
         "h": 3,
-        "w": 8,
-        "x": 8,
+        "w": 7,
+        "x": 3,
         "y": 4
       },
       "id": 23,
@@ -633,13 +633,13 @@
         "type": "prometheus",
         "uid": "PROM"
       },
-      "description": "ACC CPU cores-equivalent busy on the initiator IPUs (mmgi0, mmgi1), the counterpart to Target ACC Busy Cores. One MMG-400 per initiator, ACC at 200.0.4.3 (mmgi0) and 200.0.3.3 (mmgi1), reached through each host's own IMC at 100.0.0.1/24 -- no netns, unlike the target's two namespaced cards. Collector deployed 2026-08-28 via scripts/ipu-poc/install_acc_stats.sh; node targets are tunnels :19107 and :19108. The expected poll-mode floor is 2.0 cores per IPU, so ~2.0 means idle, not broken.",
+      "description": "ACC CPU cores-equivalent busy on the initiator IPUs (mmgi0-mmgi3), the counterpart to Target ACC Busy Cores. One MMG-400 per initiator, with ACC at 200.0.3.3, 200.0.4.3, 200.0.9.3, and 200.0.10.3 respectively, reached through each host's IMC at 100.0.0.1/24 -- no netns, unlike the target's namespaced cards. The expected poll-mode floor is 2.0 cores per IPU, so ~2.0 means idle, not broken.",
       "fieldConfig": {
         "defaults": {
           "color": {
             "mode": "thresholds"
           },
-          "decimals": 2,
+          "decimals": 1,
           "max": 24,
           "min": 0,
           "noValue": "-",
@@ -666,8 +666,8 @@
       },
       "gridPos": {
         "h": 3,
-        "w": 8,
-        "x": 16,
+        "w": 7,
+        "x": 10,
         "y": 4
       },
       "id": 51,
@@ -699,7 +699,7 @@
           },
           "editorMode": "code",
           "expr": "sum(acc_cpu_busy_percent{host=\"mmgi0\",core=~\"cpu[0-9]+\"}) / 100 or vector(NaN)",
-          "legendFormat": "TG1",
+          "legendFormat": "I1",
           "range": true,
           "refId": "A"
         },
@@ -710,7 +710,7 @@
           },
           "editorMode": "code",
           "expr": "sum(acc_cpu_busy_percent{host=\"mmgi1\",core=~\"cpu[0-9]+\"}) / 100 or vector(NaN)",
-          "legendFormat": "TG2",
+          "legendFormat": "I2",
           "range": true,
           "refId": "B"
         },
@@ -721,7 +721,7 @@
           },
           "editorMode": "code",
           "expr": "sum(acc_cpu_busy_percent{host=\"mmgi2\",core=~\"cpu[0-9]+\"}) / 100 or vector(NaN)",
-          "legendFormat": "TG3",
+          "legendFormat": "I3",
           "range": true,
           "refId": "C"
         },
@@ -732,12 +732,106 @@
           },
           "editorMode": "code",
           "expr": "sum(acc_cpu_busy_percent{host=\"mmgi3\",core=~\"cpu[0-9]+\"}) / 100 or vector(NaN)",
-          "legendFormat": "TG4",
+          "legendFormat": "I4",
           "range": true,
           "refId": "D"
         }
       ],
       "title": "Initiator IPU Cores Busy",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM"
+      },
+      "description": "Configured NVMe-oF I/O queue pairs for each initiator. The collector excludes locally attached PCIe controllers and each controller admin queue, so a normal four-namespace initiator reports 512 for four controllers with 128 I/O QPs each. This is configuration, not a measure of currently active traffic QPs.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#3987e5",
+            "mode": "fixed"
+          },
+          "decimals": 0,
+          "noValue": "-",
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 7,
+        "x": 17,
+        "y": 4
+      },
+      "id": 57,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "text": {
+          "titleSize": 14,
+          "valueSize": 26
+        },
+        "textMode": "value_and_name",
+        "wideLayout": false
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PROM"
+          },
+          "editorMode": "code",
+          "expr": "sum(nvmeof_configured_io_qps_total{host=\"mmgi0\"}) or vector(NaN)",
+          "legendFormat": "I1",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PROM"
+          },
+          "editorMode": "code",
+          "expr": "sum(nvmeof_configured_io_qps_total{host=\"mmgi1\"}) or vector(NaN)",
+          "legendFormat": "I2",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PROM"
+          },
+          "editorMode": "code",
+          "expr": "sum(nvmeof_configured_io_qps_total{host=\"mmgi2\"}) or vector(NaN)",
+          "legendFormat": "I3",
+          "range": true,
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PROM"
+          },
+          "editorMode": "code",
+          "expr": "sum(nvmeof_configured_io_qps_total{host=\"mmgi3\"}) or vector(NaN)",
+          "legendFormat": "I4",
+          "range": true,
+          "refId": "D"
+        }
+      ],
+      "title": "Initiator QPs Configured",
       "type": "stat"
     },
     {
@@ -1714,7 +1808,7 @@
         "y": 35
       },
       "panels": [],
-      "title": "Storage stack \u2014 md0 / NVMe (MMG Target)",
+      "title": "Target physical NVMe namespaces (MMG Target)",
       "type": "row"
     },
     {
@@ -1722,7 +1816,7 @@
         "type": "prometheus",
         "uid": "PROM"
       },
-      "description": "Aggregate kernel read throughput across the drives selected by $device, in bytes/s. The summary row carries the same figure in bits/s for comparison against the fabric ceiling.",
+      "description": "Aggregate kernel read throughput across the target physical namespaces selected by $device, in bytes/s. The summary row carries the same figure in bits/s for comparison against the fabric ceiling. Do not add this target-media view to initiator md0: they observe the same traffic at different layers.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1778,7 +1872,7 @@
         "type": "prometheus",
         "uid": "PROM"
       },
-      "description": "Aggregate kernel write throughput across the drives selected by $device, in bytes/s. The summary row carries the same figure in bits/s for comparison against the fabric ceiling.",
+      "description": "Aggregate kernel write throughput across the target physical namespaces selected by $device, in bytes/s. The summary row carries the same figure in bits/s for comparison against the fabric ceiling. Do not add this target-media view to initiator md0: they observe the same traffic at different layers.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1830,12 +1924,134 @@
       "type": "timeseries"
     },
     {
-      "collapsed": true,
+      "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
         "y": 44
+      },
+      "panels": [],
+      "title": "Initiator md0 / NVMe-oF",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM"
+      },
+      "description": "Kernel read throughput of each initiator RAID0 md0 device, in bytes/s. Each md0 stripes four NVMe-oF namespaces. This is an initiator-layer view of the same I/O as target physical NVMe, so compare it for reconciliation but do not add the two.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "unit": "Bps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 45
+      },
+      "id": 48,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (host) (rate(node_disk_read_bytes_total{host=~\"mmgi[0-3]\",device=\"md0\"}[60s]))",
+          "legendFormat": "{{host}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Initiator md0 read throughput (bytes/s)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM"
+      },
+      "description": "Kernel write throughput of each initiator RAID0 md0 device, in bytes/s. Each md0 stripes four NVMe-oF namespaces. This is an initiator-layer view of the same I/O as target physical NVMe, so compare it for reconciliation but do not add the two.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "unit": "Bps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 45
+      },
+      "id": 49,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (host) (rate(node_disk_written_bytes_total{host=~\"mmgi[0-3]\",device=\"md0\"}[60s]))",
+          "legendFormat": "{{host}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Initiator md0 write throughput (bytes/s)",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 53
       },
       "panels": [
         {
@@ -1986,7 +2202,7 @@
             "h": 8,
             "w": 8,
             "x": 0,
-            "y": 45
+            "y": 54
           },
           "id": 3,
           "options": {
@@ -2165,7 +2381,7 @@
             "h": 8,
             "w": 8,
             "x": 8,
-            "y": 45
+            "y": 54
           },
           "id": 4,
           "options": {
@@ -2345,7 +2561,7 @@
             "h": 8,
             "w": 8,
             "x": 16,
-            "y": 45
+            "y": 54
           },
           "id": 5,
           "options": {
@@ -2386,7 +2602,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 53
+        "y": 62
       },
       "panels": [
         {
@@ -2538,7 +2754,7 @@
             "h": 8,
             "w": 8,
             "x": 0,
-            "y": 54
+            "y": 63
           },
           "id": 13,
           "options": {
@@ -2717,7 +2933,7 @@
             "h": 8,
             "w": 8,
             "x": 8,
-            "y": 54
+            "y": 63
           },
           "id": 12,
           "options": {
@@ -2897,7 +3113,7 @@
             "h": 8,
             "w": 8,
             "x": 16,
-            "y": 54
+            "y": 63
           },
           "id": 14,
           "options": {
@@ -2938,7 +3154,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 62
+        "y": 71
       },
       "panels": [],
       "title": "Fabric and platform (MMG Target)",
@@ -3056,7 +3272,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 63
+        "y": 72
       },
       "id": 8,
       "options": {
@@ -3147,7 +3363,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 63
+        "y": 72
       },
       "id": 44,
       "options": {
@@ -3236,7 +3452,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 71
+        "y": 80
       },
       "id": 7,
       "options": {
@@ -3325,7 +3541,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 71
+        "y": 80
       },
       "id": 6,
       "options": {
@@ -3367,7 +3583,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 79
+        "y": 88
       },
       "panels": [],
       "title": "ACC / IPU \u2014 Falcon cores",
@@ -3402,7 +3618,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 80
+        "y": 89
       },
       "id": 16,
       "options": {
@@ -3456,7 +3672,7 @@
         "h": 10,
         "w": 12,
         "x": 0,
-        "y": 88
+        "y": 97
       },
       "id": 15,
       "options": {
@@ -3505,7 +3721,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 98
+        "y": 107
       },
       "panels": [
         {
@@ -3518,7 +3734,7 @@
             "h": 1,
             "w": 12,
             "x": 0,
-            "y": 99
+            "y": 108
           },
           "id": 24,
           "options": {
@@ -3539,7 +3755,7 @@
             "h": 1,
             "w": 12,
             "x": 12,
-            "y": 99
+            "y": 108
           },
           "id": 28,
           "options": {
@@ -3590,7 +3806,7 @@
             "h": 3,
             "w": 4,
             "x": 0,
-            "y": 100
+            "y": 109
           },
           "id": 25,
           "options": {
@@ -3660,7 +3876,7 @@
             "h": 3,
             "w": 4,
             "x": 4,
-            "y": 100
+            "y": 109
           },
           "id": 26,
           "options": {
@@ -3730,7 +3946,7 @@
             "h": 3,
             "w": 4,
             "x": 8,
-            "y": 100
+            "y": 109
           },
           "id": 27,
           "options": {
@@ -3809,7 +4025,7 @@
             "h": 3,
             "w": 4,
             "x": 12,
-            "y": 100
+            "y": 109
           },
           "id": 29,
           "options": {
@@ -3879,7 +4095,7 @@
             "h": 3,
             "w": 4,
             "x": 16,
-            "y": 100
+            "y": 109
           },
           "id": 30,
           "options": {
@@ -3949,7 +4165,7 @@
             "h": 3,
             "w": 4,
             "x": 20,
-            "y": 100
+            "y": 109
           },
           "id": 31,
           "options": {
@@ -3998,7 +4214,7 @@
             "h": 1,
             "w": 12,
             "x": 0,
-            "y": 103
+            "y": 112
           },
           "id": 32,
           "options": {
@@ -4019,7 +4235,7 @@
             "h": 1,
             "w": 12,
             "x": 12,
-            "y": 103
+            "y": 112
           },
           "id": 36,
           "options": {
@@ -4070,7 +4286,7 @@
             "h": 3,
             "w": 4,
             "x": 0,
-            "y": 104
+            "y": 113
           },
           "id": 33,
           "options": {
@@ -4140,7 +4356,7 @@
             "h": 3,
             "w": 4,
             "x": 4,
-            "y": 104
+            "y": 113
           },
           "id": 34,
           "options": {
@@ -4210,7 +4426,7 @@
             "h": 3,
             "w": 4,
             "x": 8,
-            "y": 104
+            "y": 113
           },
           "id": 35,
           "options": {
@@ -4289,7 +4505,7 @@
             "h": 3,
             "w": 4,
             "x": 12,
-            "y": 104
+            "y": 113
           },
           "id": 37,
           "options": {
@@ -4359,7 +4575,7 @@
             "h": 3,
             "w": 4,
             "x": 16,
-            "y": 104
+            "y": 113
           },
           "id": 38,
           "options": {
@@ -4429,7 +4645,7 @@
             "h": 3,
             "w": 4,
             "x": 20,
-            "y": 104
+            "y": 113
           },
           "id": 39,
           "options": {
@@ -4501,7 +4717,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 80
+        "y": 89
       },
       "id": 53,
       "options": {
@@ -4538,7 +4754,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 108
+        "y": 117
       },
       "panels": [],
       "title": "Sanity checks",
@@ -4572,7 +4788,7 @@
         "h": 6,
         "w": 24,
         "x": 0,
-        "y": 109
+        "y": 118
       },
       "id": 56,
       "options": {

@@ -2,13 +2,13 @@
 
 The deployed monitoring host is `mmgi1` (POC-001), in
 `/root/lmcache-telemetry`. It
-scrapes the MMG-400 target and initiators: `mmgt`, `mmgi0`, and `mmgi1`.
+scrapes the MMG-400 target and initiators: `mmgt` and `mmgi0`–`mmgi3`.
 Persistent Docker state is under `/home/docker/`, configured with Docker's
 `data-root`; do not place Prometheus data on `/`.
 
 Two halves:
 
-- **`host/`** — runs *on each test host*: node_exporter + six textfile
+- **`host/`** — runs *on each test host*: node_exporter + seven textfile
   collectors, each driven by its own systemd timer.
 - **root of this dir** — runs *on the mmgi1 monitoring host*: SSH tunnels plus
   Prometheus and Grafana in Docker.
@@ -39,7 +39,7 @@ ssh <newhost> '
 
 `install.sh` installs deps (`nvme-cli`, `ethtool`, `jq`, Intel PCM), fetches node_exporter
 1.8.2 if absent, creates the `node_exporter` system user and
-`/var/lib/node_exporter/textfile`, installs the six collectors and thirteen
+`/var/lib/node_exporter/textfile`, installs the seven collectors and fifteen
 units, enables the timers, and verifies freshness plus series counts. It is
 idempotent. It also requires Python's `grpc` module and the generated
 `telemetry_pb2.py` and `telemetry_pb2_grpc.py` files in
@@ -47,7 +47,7 @@ idempotent. It also requires Python's `grpc` module and the generated
 
 **All three variables are required and any one missing aborts the script.**
 `SKIP_ACC_TELEMETRY=1` stands in for the two `ACC_TELEMETRY_` ones on a host with
-no accelerator to point them at, and installs five collectors and eleven units
+no accelerator to point them at, and installs six collectors and thirteen units
 instead. Skipping it gives up the authoritative payload-byte source — see
 [Load-bearing constraints](#load-bearing-constraints) on why the NIC counters are
 not a substitute.
@@ -103,6 +103,7 @@ disabled.
 | `host/bin/rdma_nic_textfile.sh` | test host | `ethtool -S` fabric-NIC counters — traffic-presence diagnostic only |
 | `host/bin/acc_telemetry_textfile.py` | test host | ACC gRPC RC byte counters — authoritative Falcon payload-byte source |
 | `host/bin/nvme_stats_textfile.sh` | test host | NVMe SMART per namespace |
+| `host/bin/nvmeof_qp_textfile.sh` | initiator | configured NVMe-oF I/O QPs per controller and initiator |
 | `host/bin/pcm_memory_textfile.sh` | test host | Intel PCM DRAM read/write bandwidth per socket |
 | `host/bin/numa_stats_textfile.sh` | test host | kernel node memory, allocation, and CPU-time counters |
 | `host/bin/pcm_pcie_textfile.sh` | mmgt only | Intel PCM PCIe/DDIO bandwidth per socket — feeds the LLC hit% and DDIO absorption panels |

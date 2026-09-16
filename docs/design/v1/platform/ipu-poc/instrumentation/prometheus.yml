@@ -14,7 +14,7 @@ scrape_configs:
           - host.docker.internal:19107   # mmgi0 via ssh -L 19107:127.0.0.1:9100 mmgi0
           - host.docker.internal:19108   # mmgi1 via ssh -L 19108:127.0.0.1:9100 mmgi1
           - host.docker.internal:19109   # mmgi2 via ssh -L 19109:127.0.0.1:9100 mmgi2
-          - host.docker.internal:19114   # mmgi3 via ssh -L 19114:127.0.0.1:9100 mmgi3
+          - host.docker.internal:19100   # mmgi3 via ssh -L 19100:127.0.0.1:9100 mmgi3
         labels:
           fabric: mgmt
     relabel_configs:
@@ -38,7 +38,7 @@ scrape_configs:
         target_label: host
         replacement: mmgi2
       - source_labels: [__address__]
-        regex: host\.docker\.internal:19114
+        regex: host\.docker\.internal:19100
         target_label: host
         replacement: mmgi3
 

@@ -106,9 +106,9 @@ echo "== user + textfile dir =="
 id node_exporter >/dev/null 2>&1 || useradd --system --no-create-home --shell /sbin/nologin node_exporter
 install -d -o node_exporter -g node_exporter -m 0755 "$TEXTFILE_DIR"
 
-collectors=(nvme_stats_textfile.sh rdma_hwcounters_textfile.sh rdma_nic_textfile.sh
-            pcm_memory_textfile.sh numa_stats_textfile.sh)
-timers=(rdma-hwcounters nvme-stats rdma-nic pcm-memory numa-stats)
+collectors=(nvme_stats_textfile.sh nvmeof_qp_textfile.sh rdma_hwcounters_textfile.sh
+            rdma_nic_textfile.sh pcm_memory_textfile.sh numa_stats_textfile.sh)
+timers=(rdma-hwcounters nvme-stats nvmeof-qp rdma-nic pcm-memory numa-stats)
 if [ -z "$SKIP_ACC_TELEMETRY" ]; then
     collectors+=(acc_telemetry_textfile.py)
     timers+=(acc-telemetry)
@@ -173,7 +173,7 @@ systemctl start "${timers[@]/%/.service}"
 echo
 echo "== verify: $(hostname) =="
 systemctl list-timers --all --no-pager \
-    | grep -E 'rdma-hwcounters|nvme-stats|rdma-nic|pcm-memory|numa-stats|acc-telemetry' || true
+    | grep -E 'rdma-hwcounters|nvme-stats|nvmeof-qp|rdma-nic|pcm-memory|numa-stats|acc-telemetry' || true
 echo
 echo "  textfile freshness (now $(date '+%H:%M:%S')):"
 ls -l --time-style=+%H:%M:%S "$TEXTFILE_DIR"/*.prom | awk '{printf "    %s  %s\n", $6, $7}'
@@ -184,9 +184,9 @@ curl -s "http://${LISTEN}/metrics" \
     | sed 's/^/    /'
 echo
 echo "  sample series present:"
-for m in rdma_hw_counter rdma_nic_stat nvme_smart_field rdma_port_up \
-         pcm_memory_bandwidth_megabytes_per_second numa_node_memory_bytes \
-         acc_telemetry_bytes_total; do
+for m in rdma_hw_counter rdma_nic_stat nvme_smart_field nvmeof_configured_io_qps \
+         rdma_port_up pcm_memory_bandwidth_megabytes_per_second \
+         numa_node_memory_bytes acc_telemetry_bytes_total; do
     n=$(curl -s "http://${LISTEN}/metrics" | grep -c "^${m}{") || n=0
     printf '    %-18s %s series\n' "$m" "$n"
 done

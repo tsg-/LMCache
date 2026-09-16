@@ -90,7 +90,7 @@ def test_mmg_dashboard_documents_the_authoritative_four_ipu_map() -> None:
     assert "IPU1 is acc2 / 200.0.5.2 / mmgi0 (POC-003)" in description
     assert "IPU2 is acc1 / 200.0.6.2 / mmgi1 (POC-001)" in description
     assert "IPU3 is acc3 / 200.0.7.2 / mmgi2 (B14-P9)" in description
-    assert "IPU4 is acc4 / 200.0.8.2 / mmgi3 (POC-002)" in description
+    assert "IPU4 is acc4 / 200.0.8.2 / mmgi3 (B14-P11)" in description
 
 
 def test_mmg_dashboard_falcon_payload_averages_the_selected_range() -> None:
@@ -177,3 +177,72 @@ def test_mmg_dashboard_uses_current_target_devices_and_run_history() -> None:
         'sum(rate(acc_tele_field{host="mmgt",'
         'field="bytes_from_ulp_rc"}[90s])) * 8'
     )
+
+
+def test_mmg_dashboard_separates_target_nvme_from_initiator_md0() -> None:
+    """Target media and initiator RAID0 traffic stay distinct observations."""
+    dashboard = json.loads(DASHBOARD.read_text())
+    panels = dashboard["panels"]
+    titles = {panel["title"]: panel for panel in panels}
+
+    assert "Target physical NVMe namespaces (MMG Target)" in titles
+    assert "Initiator md0 / NVMe-oF" in titles
+
+    target_read = titles["NVMe read throughput (bytes/s)"]
+    initiator_read = titles["Initiator md0 read throughput (bytes/s)"]
+    initiator_write = titles["Initiator md0 write throughput (bytes/s)"]
+
+    assert target_read["targets"][0]["expr"] == (
+        'sum(rate(node_disk_read_bytes_total{host="mmgt",device=~"$device"}[60s]))'
+    )
+    assert initiator_read["targets"][0]["expr"] == (
+        'sum by (host) (rate(node_disk_read_bytes_total{host=~"mmgi[0-3]",'
+        'device="md0"}[60s]))'
+    )
+    assert initiator_write["targets"][0]["expr"] == (
+        'sum by (host) (rate(node_disk_written_bytes_total{host=~"mmgi[0-3]",'
+        'device="md0"}[60s]))'
+    )
+
+
+def test_mmg_dashboard_places_configured_qps_in_the_summary_row() -> None:
+    """QP configuration uses the four-initiator summary-card layout."""
+    dashboard = json.loads(DASHBOARD.read_text())
+    panel_list = dashboard["panels"]
+    panels = {panel["title"]: panel for panel in panel_list}
+
+    target_cpu = panels["Target CPU Busy"]
+    target_ipu = panels["Target IPU Cores Busy"]
+    initiator_ipu = panels["Initiator IPU Cores Busy"]
+    qps = panels["Initiator QPs Configured"]
+    initiator_read = panels["Initiator md0 read throughput (bytes/s)"]
+    initiator_write = panels["Initiator md0 write throughput (bytes/s)"]
+
+    assert target_cpu["gridPos"] == {"h": 3, "w": 3, "x": 0, "y": 4}
+    assert target_ipu["gridPos"] == {"h": 3, "w": 7, "x": 3, "y": 4}
+    assert initiator_ipu["gridPos"] == {"h": 3, "w": 7, "x": 10, "y": 4}
+    assert target_ipu["fieldConfig"]["defaults"]["decimals"] == 1
+    assert initiator_ipu["fieldConfig"]["defaults"]["decimals"] == 1
+    assert [target["legendFormat"] for target in initiator_ipu["targets"]] == [
+        "I1",
+        "I2",
+        "I3",
+        "I4",
+    ]
+    assert qps["type"] == "stat"
+    assert qps["gridPos"] == {"h": 3, "w": 7, "x": 17, "y": 4}
+    assert qps["options"]["textMode"] == "value_and_name"
+    assert [target["legendFormat"] for target in qps["targets"]] == [
+        "I1",
+        "I2",
+        "I3",
+        "I4",
+    ]
+    assert [target["expr"] for target in qps["targets"]] == [
+        'sum(nvmeof_configured_io_qps_total{host="mmgi0"}) or vector(NaN)',
+        'sum(nvmeof_configured_io_qps_total{host="mmgi1"}) or vector(NaN)',
+        'sum(nvmeof_configured_io_qps_total{host="mmgi2"}) or vector(NaN)',
+        'sum(nvmeof_configured_io_qps_total{host="mmgi3"}) or vector(NaN)',
+    ]
+    assert initiator_read["gridPos"]["y"] == 45
+    assert initiator_write["gridPos"]["y"] == 45

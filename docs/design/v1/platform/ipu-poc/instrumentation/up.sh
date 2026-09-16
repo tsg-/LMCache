@@ -64,12 +64,13 @@ sha256_file() {
 # cannot execute the remote stat commands used by this optional probe.
 COLLECTOR_CHECKS="${COLLECTOR_CHECKS-\
 mmgt:acc_transport.prom:30 mmgt:acc_stats.prom:90 mmgt:acc_grpc_acc1.prom:6 \
-mmgt:acc_grpc_acc2.prom:6 mmgt:pcm_memory.prom:15 mmgt:pcm_pcie.prom:15 \
+mmgt:acc_grpc_acc2.prom:6 mmgt:acc_grpc_acc3.prom:6 mmgt:acc_grpc_acc4.prom:6 \
+mmgt:pcm_memory.prom:15 mmgt:pcm_pcie.prom:15 \
 mmgt:numa_stats.prom:15 mmgt:nvme_stats.prom:45 mmgt:mmgt_nic.prom:15 \
-mmgi0:acc_transport.prom:30 mmgi0:acc_stats.prom:90 \
-mmgi1:acc_transport.prom:30 mmgi1:acc_stats.prom:90 \
-mmgi2:acc_transport.prom:30 mmgi2:acc_stats.prom:90 \
-mmgi3:acc_transport.prom:30 mmgi3:acc_stats.prom:90}"
+mmgi0:acc_transport.prom:30 mmgi0:acc_stats.prom:90 mmgi0:nvmeof_qp.prom:90 \
+mmgi1:acc_transport.prom:30 mmgi1:acc_stats.prom:90 mmgi1:nvmeof_qp.prom:90 \
+mmgi2:nvmeof_qp.prom:90 \
+mmgi3:acc_transport.prom:30 mmgi3:acc_stats.prom:90 mmgi3:nvmeof_qp.prom:90}"
 
 check_collectors() {
     local textfile_dir=/var/lib/node_exporter/textfile
@@ -137,7 +138,7 @@ ensure_tunnel() {
 # Override for a different host set:
 #   HOSTS="newhost1:19106 newhost2:19107" ./up.sh
 # Keep the local ports aligned with the targets in prometheus.yml.
-HOSTS="${HOSTS:-mmgt:19106 mmgi0:19107 mmgi1:19108 mmgi2:19109 mmgi3:19114}"
+HOSTS="${HOSTS:-mmgt:19106 mmgi0:19107 mmgi1:19108 mmgi2:19109 mmgi3:19100}"
 
 # Same for the lmcache_bench_mmg job, where the load runs on four initiator
 # hosts. Local bases are 19110 / 19120 / 19130 / 19140, so the last digit of

@@ -378,6 +378,57 @@ def test_inventory_sweep_uses_the_mmg_metrics_port(tmp_path: Path) -> None:
     assert invocation_log.read_text().count("METRICS_PORT=9101") == 4
 
 
+def test_inventory_sweep_preserves_timed_matrix_over_ssh(tmp_path: Path) -> None:
+    """A space-separated matrix reaches each remote worker as one argument."""
+    inventory = tmp_path / "inventory.env"
+    inventory.write_text("INITIATOR_HOSTS=(mmgi0)\nTARGET_HOST=mmgt\n")
+    argument_log = tmp_path / "remote-arguments.txt"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_ssh = fake_bin / "ssh"
+    fake_ssh.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "host=\n"
+        'for arg in "$@"; do\n'
+        '  case "$arg" in mmgt|mmgi0) host=$arg ;; esac\n'
+        "done\n"
+        "body=$(cat)\n"
+        'if [ "$host" = mmgt ]; then\n'
+        "  printf '%s\\n' 200.0.0.37\n"
+        'elif [[ "$body" == *findmnt* ]]; then\n'
+        "  printf '%s\\n' /root/LMCache\n"
+        "else\n"
+        '  remote_command=${@: -1}\n'
+        '  if [[ "$remote_command" != "bash -s -- "* ]]; then\n'
+        '    printf "not-one-remote-command:%s\\n" "$remote_command" >> "$ARGUMENT_LOG"\n'
+        "    exit 0\n"
+        "  fi\n"
+        '  eval "set -- $remote_command"\n'
+        '  printf "%s|%s|%s|%s|%s|%s\\n" "${@:4}" >> "$ARGUMENT_LOG"\n'
+        "fi\n"
+    )
+    fake_ssh.chmod(0o755)
+
+    result = _run_script(
+        INVENTORY_RUNNER,
+        "sweep",
+        str(inventory),
+        PATH=f"{fake_bin}:{os.environ['PATH']}",
+        ARGUMENT_LOG=str(argument_log),
+        RUN_ID="test-timed-matrix",
+        IN_FLIGHTS="8 16 24",
+        WARMUP_SEC="60",
+        DURATION_SEC="120",
+        INCLUDE_MINIMAX="1",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert argument_log.read_text() == (
+        "test-timed-matrix|/mnt/lmcache/bench-l2|8 16 24|60|120|1\n"
+    )
+
+
 def test_inventory_sweep_accepts_a_timed_inflight_matrix() -> None:
     """The coordinator can run a reproducible sustained-load matrix."""
     source = INVENTORY_RUNNER.read_text()
