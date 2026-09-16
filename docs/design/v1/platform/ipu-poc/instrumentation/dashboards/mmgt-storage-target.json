@@ -46,7 +46,7 @@
       },
       "gridPos": {
         "h": 3,
-        "w": 5,
+        "w": 4,
         "x": 0,
         "y": 1
       },
@@ -116,8 +116,8 @@
       },
       "gridPos": {
         "h": 3,
-        "w": 5,
-        "x": 5,
+        "w": 4,
+        "x": 4,
         "y": 1
       },
       "id": 45,
@@ -186,8 +186,8 @@
       },
       "gridPos": {
         "h": 3,
-        "w": 5,
-        "x": 10,
+        "w": 4,
+        "x": 8,
         "y": 1
       },
       "id": 43,
@@ -256,8 +256,8 @@
       },
       "gridPos": {
         "h": 3,
-        "w": 5,
-        "x": 15,
+        "w": 4,
+        "x": 12,
         "y": 1
       },
       "id": 46,
@@ -327,7 +327,7 @@
       "gridPos": {
         "h": 3,
         "w": 4,
-        "x": 20,
+        "x": 16,
         "y": 1
       },
       "id": 42,
@@ -365,6 +365,76 @@
         }
       ],
       "title": "RDMA RD",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM"
+      },
+      "description": "Falcon payload handled in both target directions: ULP-to-fabric TX (RDMA WR) plus fabric-to-ULP RX (RDMA RD), summed across all four IPUs. This is bidirectional aggregate payload, not a single-direction link-rate measurement.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#8f3bb8",
+            "mode": "fixed"
+          },
+          "mappings": [],
+          "noValue": "-",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#8f3bb8",
+                "value": null
+              }
+            ]
+          },
+          "unit": "bps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 4,
+        "x": 20,
+        "y": 1
+      },
+      "id": 58,
+      "options": {
+        "colorMode": "none",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "text": {
+          "titleSize": 14,
+          "valueSize": 26
+        },
+        "textMode": "value",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PROM"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(acc_tele_field{host=\"mmgt\",field=~\"bytes_from_ulp_rc|bytes_to_ulp\"}[90s])) * 8",
+          "legendFormat": "TX + RX",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Bidirectional RDMA Payload",
       "type": "stat"
     },
     {
@@ -4832,7 +4902,6 @@
   "templating": {
     "list": [
       {
-        "allValue": "nvme(2|3|4|5|6|7|8|9|12|13|14|15|16|17|18|19)n1",
         "current": {
           "selected": true,
           "text": "All",
@@ -4842,12 +4911,12 @@
           "type": "prometheus",
           "uid": "PROM"
         },
-        "description": "Raw NVMe-oF target namespaces on mmgt. All selects the 16 exported devices (nvme2-9 and nvme12-19); the boot / non-target nvme20 is excluded.",
+        "description": "Raw NVMe-oF target namespaces on mmgt. The selector follows the current configfs export set, so All stays correct if kernel NVMe names change after boot.",
         "includeAll": true,
         "label": "Device",
         "multi": true,
         "name": "device",
-        "query": "label_values(node_disk_written_bytes_total{host=\"mmgt\",device=~\"nvme(2|3|4|5|6|7|8|9|12|13|14|15|16|17|18|19)n1\"}, device)",
+        "query": "label_values(nvme_namespace_role{host=\"mmgt\",role=\"exported\"}, ns)",
         "type": "query"
       },
       {

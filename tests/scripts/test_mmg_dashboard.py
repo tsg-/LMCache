@@ -12,6 +12,11 @@ DASHBOARD = (
     / "docs/design/v1/platform/ipu-poc/instrumentation/dashboards"
     / "mmgt-storage-target.json"
 )
+NVME_COLLECTOR = (
+    ROOT
+    / "docs/design/v1/platform/ipu-poc/instrumentation/host/bin"
+    / "nvme_stats_textfile.sh"
+)
 
 
 def _expressions(panel: dict[str, object]) -> list[str]:
@@ -150,7 +155,7 @@ def test_mmg_dashboard_uses_four_ipu_tele_cli_rdm_payloads() -> None:
 
 
 def test_mmg_dashboard_uses_current_target_devices_and_run_history() -> None:
-    """Dashboard controls must cover raw 16-drive exports and selected ranges."""
+    """Dashboard controls must follow the target's current configfs exports."""
     dashboard = json.loads(DASHBOARD.read_text())
     variables = {variable["name"]: variable for variable in dashboard["templating"]["list"]}
     titles = {panel["title"] for panel in dashboard["panels"]}
@@ -161,12 +166,9 @@ def test_mmg_dashboard_uses_current_target_devices_and_run_history() -> None:
     )
     rdma_write = next(panel for panel in dashboard["panels"] if panel["title"] == "RDMA WR")
 
-    assert variables["device"]["allValue"] == (
-        "nvme(2|3|4|5|6|7|8|9|12|13|14|15|16|17|18|19)n1"
-    )
+    assert "allValue" not in variables["device"]
     assert variables["device"]["query"] == (
-        'label_values(node_disk_written_bytes_total{host="mmgt",'
-        'device=~"nvme(2|3|4|5|6|7|8|9|12|13|14|15|16|17|18|19)n1"}, device)'
+        'label_values(nvme_namespace_role{host="mmgt",role="exported"}, ns)'
     )
     assert "LMCache / NVMe RD reconciliation" not in titles
     assert runs["targets"][0]["expr"] == (
@@ -177,6 +179,14 @@ def test_mmg_dashboard_uses_current_target_devices_and_run_history() -> None:
         'sum(rate(acc_tele_field{host="mmgt",'
         'field="bytes_from_ulp_rc"}[90s])) * 8'
     )
+
+
+def test_nvme_collector_marks_configfs_backing_devices_as_exported() -> None:
+    """The target export set follows configfs instead of unstable NVMe names."""
+    contents = NVME_COLLECTOR.read_text()
+
+    assert "/sys/kernel/config/nvmet/subsystems" in contents
+    assert "role=exported" in contents
 
 
 def test_mmg_dashboard_separates_target_nvme_from_initiator_md0() -> None:
@@ -246,3 +256,25 @@ def test_mmg_dashboard_places_configured_qps_in_the_summary_row() -> None:
     ]
     assert initiator_read["gridPos"]["y"] == 45
     assert initiator_write["gridPos"]["y"] == 45
+
+
+def test_mmg_dashboard_shows_bidirectional_falcon_payload_in_summary() -> None:
+    """The summary has six equal tiles and sums the two Falcon directions."""
+    dashboard = json.loads(DASHBOARD.read_text())
+    panels = {panel["title"]: panel for panel in dashboard["panels"]}
+
+    summary_titles = [
+        "LMCache",
+        "NVMe RD",
+        "RDMA WR",
+        "NVMe WR",
+        "RDMA RD",
+        "Bidirectional RDMA Payload",
+    ]
+    assert [panels[title]["gridPos"] for title in summary_titles] == [
+        {"h": 3, "w": 4, "x": x, "y": 1} for x in range(0, 24, 4)
+    ]
+    assert panels["Bidirectional RDMA Payload"]["targets"][0]["expr"] == (
+        'sum(rate(acc_tele_field{host="mmgt",'
+        'field=~"bytes_from_ulp_rc|bytes_to_ulp"}[90s])) * 8'
+    )

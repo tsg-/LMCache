@@ -12,6 +12,12 @@ TMP_FILE="$(mktemp "$OUT_DIR/nvme_stats.prom.XXXXXX")"
 trap 'rm -f "$TMP_FILE"' EXIT
 
 devices=$(nvme list -o json 2>/dev/null | jq -r '.Devices[].DevicePath // empty')
+exported_paths=$(
+    for path in /sys/kernel/config/nvmet/subsystems/*/namespaces/*/device_path; do
+        [ -r "$path" ] || continue
+        cat "$path" 2>/dev/null || true
+    done | sort -u
+)
 
 {
     echo "# HELP nvme_smart_field NVMe SMART field per namespace"
@@ -32,15 +38,20 @@ devices=$(nvme list -o json 2>/dev/null | jq -r '.Devices[].DevicePath // empty'
     # matched one stale name plus one device that has never existed -- so the
     # initiator panels silently plotted a local idle PM9A3 instead of the fabric.
     #
-    # transport=pcie means locally attached; an NVMe-oF import has no transport
-    # file and carries the target's subsystem NQN instead.
+    # The target configfs export is authoritative after an NVMe re-enumeration:
+    # device names can change, but its namespace device_path follows the live
+    # backing device. Otherwise, transport=pcie means locally attached; an
+    # NVMe-oF import has no transport file and carries the target's subsystem
+    # NQN instead.
     echo "# HELP nvme_namespace_role 1 for each namespace, labelled by attachment"
     echo "# TYPE nvme_namespace_role gauge"
     for dev in $devices; do
         ns=$(basename "$dev")
         transport=$(cat "/sys/block/$ns/device/transport" 2>/dev/null || echo "")
         nqn=$(cat "/sys/block/$ns/device/subsysnqn" 2>/dev/null || echo "")
-        if [ "$transport" = "pcie" ]; then
+        if grep -Fxq "$dev" <<<"$exported_paths"; then
+            role=exported
+        elif [ "$transport" = "pcie" ]; then
             role=local
         else
             role=imported
