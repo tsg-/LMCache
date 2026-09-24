@@ -150,35 +150,29 @@ Two properties matter when reading the series:
 
 ### The `lmcache_bench_mmg` job
 
-Same endpoint and the same metric names on the MMG-400 rig, where the load runs
-on two initiator hosts (`mmgi0`, `mmgi1`) against target `mmgt`. It gets its own
-job rather than sharing `lmcache_bench`: the mkp dashboard's LMCache panels filter
-on `job` alone, so a shared name would fold mmg series into the mkp aggregate.
+The MMG-400 load runs one benchmark process on each physical initiator
+(`mmgi0`–`mmgi3`) against target `mmgt`. It gets its own job rather than sharing
+`lmcache_bench`: the mkp dashboard filters on `job` alone, so a shared name would
+fold MMG series into the mkp aggregate.
 
-The local port encodes both host and initiator id — `1911x` is `mmgi0`, `1912x`
-is `mmgi1`, and the **last digit is the id**, which is what the relabel rules key
-on. The remote side stays `METRICS_BASE_PORT + id`:
+The benchmark port differs by host. Keep these endpoint pairs together in
+`up.sh` and `prometheus.yml`:
 
-```bash
-MMG_BENCH_TUNNELS=1 ./up.sh                          # mmgi0+mmgi1, ids 0..3
-MMG_BENCH_TUNNELS=1 MMG_BENCH_INITIATORS=2 ./up.sh   # just ids 0..1 on each
+```text
+19110 -> mmgi0:9101
+19120 -> mmgi1:9102
+19130 -> mmgi2:9103
+19140 -> mmgi3:9104
 ```
 
-`MMG_BENCH_HOSTS="mmgi0:19110 mmgi1:19120"` sets the host-to-local-base map; keep
-it aligned with `prometheus.yml`.
-
-The id is **per host, not global**, so `mmgi0 init 0` and `mmgi1 init 0` are two
-separate benchmark processes. `run_geometry_inventory.sh sweep` runs one process
-per host and exposes only id 0. Open only those two tunnels for that workflow:
+Start the tunnels for an active run with:
 
 ```bash
-HOSTS="mmgt:19106 mmgi0:19107 mmgi1:19108" \
-  MMG_BENCH_TUNNELS=1 MMG_BENCH_INITIATORS=1 ./up.sh
+MMG_BENCH_TUNNELS=1 ./up.sh
 ```
 
-Ports for ids 1–3 are reserved for an explicit multi-process run and are expected
-to stay down during the geometry sweep. Install the bench with
-`scripts/ipu-poc/install_bench_l2_handoff.sh` on each initiator first.
+`phase` separates warmup from measured traffic. Dashboard goodput queries must
+filter `phase="measured"` so the live tile matches the JSON measurement window.
 
 `--web.enable-lifecycle` is set on the Prometheus container so `curl -X POST
 http://127.0.0.1:9090/-/reload` picks up config edits. Reload (or recreate)

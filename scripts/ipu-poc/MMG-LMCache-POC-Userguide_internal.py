@@ -1228,9 +1228,9 @@ IMC_PASSWORD={imc-root-password} ./install_acc_stats.sh mmgt
 IMC_PASSWORD={imc-root-password} ACC_GRPC_SHADOW=1 \
     ./install_acc_stats.sh mmgt
 
-# On the deployed monitoring host (mmgi0)
+# On the deployed monitoring host (mmgi1)
 cd /root/lmcache-telemetry
-COLLECTOR_CHECKS='' MMG_BENCH_TUNNELS=1 MMG_BENCH_INITIATORS=1 ./up.sh""",
+COLLECTOR_CHECKS='' MMG_BENCH_TUNNELS=1 ./up.sh""",
     )
     doc.add_paragraph(
         "The ACC installer uses separate 30 s core-busy and 10 s "

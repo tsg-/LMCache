@@ -78,7 +78,7 @@
             "uid": "PROM"
           },
           "editorMode": "code",
-          "expr": "sum by (operation) (rate(lmcache_bench_l2_success_bytes_total{job=\"lmcache_bench_mmg\",host=~\"mmgi.*\"}[60s])) * 8",
+          "expr": "sum by (operation) (rate(lmcache_bench_l2_success_bytes_total{job=\"lmcache_bench_mmg\",host=~\"mmgi.*\",phase=\"measured\"}[60s])) * 8",
           "legendFormat": "{{operation}}",
           "range": true,
           "refId": "A"

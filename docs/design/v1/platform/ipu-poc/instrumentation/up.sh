@@ -140,14 +140,10 @@ ensure_tunnel() {
 # Keep the local ports aligned with the targets in prometheus.yml.
 HOSTS="${HOSTS:-mmgt:19106 mmgi0:19107 mmgi1:19108 mmgi2:19109 mmgi3:19100}"
 
-# Same for the lmcache_bench_mmg job, where the load runs on four initiator
-# hosts. Local bases are 19110 / 19120 / 19130 / 19140, so the last digit of
-# the local port is the initiator id -- prometheus.yml relabels on exactly that.
-#   MMG_BENCH_TUNNELS=1 ./up.sh                       # mmgi0..mmgi3 i0..3
-#   MMG_BENCH_TUNNELS=1 MMG_BENCH_INITIATORS=2 ./up.sh
-MMG_BENCH_HOSTS="${MMG_BENCH_HOSTS:-mmgi0:19110 mmgi1:19120 mmgi2:19130 mmgi3:19140}"
-MMG_BENCH_INITIATORS="${MMG_BENCH_INITIATORS:-4}"
-MMG_BENCH_REMOTE_BASE="${MMG_BENCH_REMOTE_BASE:-9101}"
+# One physical benchmark process runs on each initiator. The benchmark ports
+# intentionally differ by host, so every row explicitly maps host:local:remote.
+MMG_BENCH_ENDPOINTS="${MMG_BENCH_ENDPOINTS:-\
+mmgi0:19110:9101 mmgi1:19120:9102 mmgi2:19130:9103 mmgi3:19140:9104}"
 
 echo "== credentials =="
 ensure_password
@@ -166,18 +162,14 @@ else
 fi
 
 if [ -n "${MMG_BENCH_TUNNELS:-}" ]; then
-    for entry in $MMG_BENCH_HOSTS; do
-        for ((i = 0; i < MMG_BENCH_INITIATORS; i++)); do
-            ensure_tunnel "${entry%%:*}" \
-                "$((${entry##*:} + i))" "$((MMG_BENCH_REMOTE_BASE + i))"
-        done
+    for entry in $MMG_BENCH_ENDPOINTS; do
+        IFS=: read -r host local_port remote_port <<<"$entry"
+        ensure_tunnel "$host" "$local_port" "$remote_port"
     done
 else
     echo "  mmg bench tunnels skipped (MMG_BENCH_TUNNELS=1 to open" \
-        "19110-$((19110 + MMG_BENCH_INITIATORS - 1)) and" \
-        "19120-$((19120 + MMG_BENCH_INITIATORS - 1)), " \
-        "19130-$((19130 + MMG_BENCH_INITIATORS - 1)), and" \
-        "19140-$((19140 + MMG_BENCH_INITIATORS - 1)))"
+        "mmgi0:19110->9101, mmgi1:19120->9102, " \
+        "mmgi2:19130->9103, and mmgi3:19140->9104)"
 fi
 
 echo "== docker stack =="

@@ -103,9 +103,8 @@ IMC_PASSWORD=<imc-root-password> ./install_acc_stats.sh mmgt
 IMC_PASSWORD=<imc-root-password> ACC_GRPC_SHADOW=1 \
   ./install_acc_stats.sh mmgt  # optional target shadow; no dashboard cutover
 
-# On control laptop:
-HOSTS="mmgt:19106 mmgi0:19107 mmgi1:19108" \
-  MMG_BENCH_TUNNELS=1 MMG_BENCH_INITIATORS=1 ./up.sh
+# On the MMG monitoring host:
+MMG_BENCH_TUNNELS=1 ./up.sh
 ```
 
 The installer enables a 30 s ACC core-busy timer and a separate 10 s Falcon

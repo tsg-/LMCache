@@ -181,6 +181,17 @@ def test_mmg_dashboard_uses_current_target_devices_and_run_history() -> None:
     )
 
 
+def test_mmg_dashboard_summary_uses_the_measured_bench_window() -> None:
+    """The summary goodput tile must exclude warmup traffic."""
+    dashboard = json.loads(DASHBOARD.read_text())
+    lmcache = next(panel for panel in dashboard["panels"] if panel["title"] == "LMCache")
+
+    assert lmcache["targets"][0]["expr"] == (
+        'sum by (operation) (rate(lmcache_bench_l2_success_bytes_total{'
+        'job="lmcache_bench_mmg",host=~"mmgi.*",phase="measured"}[60s])) * 8'
+    )
+
+
 def test_nvme_collector_marks_configfs_backing_devices_as_exported() -> None:
     """The target export set follows configfs instead of unstable NVMe names."""
     contents = NVME_COLLECTOR.read_text()
