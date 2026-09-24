@@ -7,7 +7,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 # Third Party
 import pytest
@@ -31,6 +31,56 @@ def _load_module() -> ModuleType:
 
 
 collector = _load_module()
+
+
+def _proto_message(**values: int | float | bool) -> SimpleNamespace:
+    """Build a protobuf-like message with the supplied scalar fields."""
+    return SimpleNamespace(
+        DESCRIPTOR=SimpleNamespace(
+            fields=[SimpleNamespace(name=name) for name in values]
+        ),
+        **values,
+    )
+
+
+class _FakeReader:
+    """Return one complete telemetry sample through the loop's reader boundary."""
+
+    def __init__(self) -> None:
+        """Initialize the fixed sample and call counters."""
+        self.calls = 0
+        self.reconnects = 0
+
+    def collect(self) -> tuple[dict[str, int], dict[str, dict[str, int]]]:
+        """Return the counters from one RPC response."""
+        self.calls += 1
+        return (
+            {"bytes_from_ulp_rc": 123, "bytes_to_ulp": 456},
+            {
+                "global": {
+                    "bytes_from_ulp_rc": 123,
+                    "bytes_to_ulp": 456,
+                },
+                "rx": {"rx_dropped_conn_rsrc": 3},
+                "tx": {"tx_retransmitted": 5},
+                "rue": {"rue_events": 9},
+            },
+        )
+
+    def reconnect(self) -> None:
+        """Record a reconnect requested by a failed collection."""
+        self.reconnects += 1
+
+
+class _FailOnceReader(_FakeReader):
+    """Fail the first collection, then return a complete ACC sample."""
+
+    def collect(self) -> tuple[dict[str, int], dict[str, dict[str, int]]]:
+        """Raise once to exercise the persistent loop's recovery path."""
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("transient gRPC failure")
+        return super().collect()
 
 
 def test_render_metrics_exports_both_rc_byte_counters() -> None:
@@ -62,6 +112,139 @@ def test_render_metrics_labels_a_shadow_collector_per_acc() -> None:
         acc="acc1",
     )
 
+    assert (
+        'acc_telemetry_bytes_total{acc="acc1",counter="bytes_from_ulp_rc",'
+        'ulp="rdma"} 123'
+    ) in rendered
+
+
+def test_extract_telemetry_fields_reads_every_numeric_section() -> None:
+    """A missing section would silently remove a Falcon diagnostic counter."""
+    fields = collector.extract_telemetry_fields(
+        SimpleNamespace(
+            global_counters=_proto_message(bytes_from_ulp_rc=123),
+            rx_counters=_proto_message(rx_dropped_conn_rsrc=3, enabled=True),
+            tx_counters=_proto_message(tx_retransmitted=5.0),
+            rue_counters=_proto_message(rue_events=9),
+        )
+    )
+
+    assert fields == {
+        "global": {"bytes_from_ulp_rc": 123},
+        "rx": {"rx_dropped_conn_rsrc": 3},
+        "tx": {"tx_retransmitted": 5.0},
+        "rue": {"rue_events": 9},
+    }
+
+
+def test_normalize_telemetry_response_preserves_byte_counter_compatibility() -> None:
+    """Replacing tele_cli must retain the existing byte-counter metric values."""
+    counters, fields = collector.normalize_telemetry_response(
+        SimpleNamespace(
+            global_counters=_proto_message(
+                bytes_from_ulp_rc=123,
+                bytes_to_ulp=456,
+            ),
+            rx_counters=_proto_message(rx_dropped_conn_rsrc=3),
+            tx_counters=_proto_message(tx_retransmitted=5),
+            rue_counters=_proto_message(rue_events=9),
+        )
+    )
+
+    assert counters == {"bytes_from_ulp_rc": 123, "bytes_to_ulp": 456}
+    assert fields["rx"] == {"rx_dropped_conn_rsrc": 3}
+
+
+def test_collection_loop_writes_one_acc_sample_on_its_fixed_schedule(
+    tmp_path: Path,
+) -> None:
+    """Serializing other ACCs must not delay this instance's next deadline."""
+    reader = _FakeReader()
+    waits: list[float] = []
+
+    collector.run_collection_loop(
+        reader,
+        output_dir=tmp_path,
+        output_filename="acc_grpc_acc1.prom",
+        acc="acc1",
+        interval_seconds=2.0,
+        now=lambda: 100.5,
+        monotonic=lambda: 0.0,
+        wait=lambda delay: waits.append(delay) or True,
+    )
+
+    rendered = (tmp_path / "acc_grpc_acc1.prom").read_text(encoding="ascii")
+
+    assert reader.calls == 1
+    assert waits == [2.0]
+    assert (
+        'acc_telemetry_read_timestamp_seconds{acc="acc1",source="grpc"} 100.5'
+        in rendered
+    )
+    assert (
+        'acc_tele_field{acc="acc1",section="tx",field="tx_retransmitted"} 5'
+    ) in rendered
+
+
+def test_collection_loop_publishes_failure_then_reconnects_and_continues(
+    tmp_path: Path,
+) -> None:
+    """A transient RPC failure cannot stop this ACC's persistent collector."""
+    reader = _FailOnceReader()
+    output = tmp_path / "acc_grpc_acc1.prom"
+    snapshots: list[str] = []
+
+    def wait(_delay: float) -> bool:
+        """Capture each published sample and stop after the recovered sample."""
+        snapshots.append(output.read_text(encoding="ascii"))
+        return len(snapshots) == 2
+
+    collector.run_collection_loop(
+        reader,
+        output_dir=tmp_path,
+        output_filename=output.name,
+        acc="acc1",
+        interval_seconds=2.0,
+        now=lambda: 100.5,
+        monotonic=lambda: 0.0,
+        wait=wait,
+    )
+
+    assert 'acc_telemetry_collector_success{acc="acc1"} 0' in snapshots[0]
+    assert 'acc_telemetry_reconnects_total{acc="acc1"} 1' in snapshots[0]
+    assert 'acc_telemetry_collector_success{acc="acc1"} 1' in snapshots[1]
+    assert reader.reconnects == 1
+
+
+def test_render_metrics_exports_all_falcon_counter_sections() -> None:
+    """Dropping a gRPC section would leave existing dashboard series absent."""
+    rendered = collector.render_metrics(
+        {"bytes_from_ulp_rc": 123, "bytes_to_ulp": 456},
+        success=True,
+        timestamp=100,
+        acc="acc1",
+        tele_fields={
+            "global": {
+                "bytes_from_ulp_rc": 123,
+                "bytes_to_ulp": 456,
+                "cache_active": 7,
+            },
+            "rx": {"rx_dropped_conn_rsrc": 3},
+            "tx": {"tx_retransmitted": 5},
+            "rue": {"rue_events": 9},
+        },
+    )
+
+    assert (
+        'acc_tele_field{acc="acc1",section="global",field="cache_active"} 7'
+    ) in rendered
+    assert (
+        'acc_tele_field{acc="acc1",section="rx",field="rx_dropped_conn_rsrc"} 3'
+    ) in rendered
+    assert (
+        'acc_tele_field{acc="acc1",section="tx",field="tx_retransmitted"} 5'
+    ) in rendered
+    assert ('acc_tele_field{acc="acc1",section="rue",field="rue_events"} 9') in rendered
     assert (
         'acc_telemetry_bytes_total{acc="acc1",counter="bytes_from_ulp_rc",'
         'ulp="rdma"} 123'

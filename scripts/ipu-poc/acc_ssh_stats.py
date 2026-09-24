@@ -183,7 +183,7 @@ def write_core_prom_textfile(path, results):
     write_textfile(path, lines)
 
 
-def write_transport_prom_textfile(path, results):
+def write_transport_prom_textfile(path, results, read_timestamps=None):
     """Write Falcon transport counters without ACC core busy gauge series."""
     lines = [
         "# HELP acc_tele_field Falcon transport-engine counter from tele_cli "
@@ -197,6 +197,21 @@ def write_transport_prom_textfile(path, results):
                 f'field="{field}"}}'
             )
             lines.append(f"{metric} {value}\n")
+    if read_timestamps:
+        lines.extend(
+            [
+                "# HELP acc_telemetry_read_timestamp_seconds Unix timestamp "
+                "when the ACC counter read completed\n",
+                "# TYPE acc_telemetry_read_timestamp_seconds gauge\n",
+            ]
+        )
+        for acc_label, _fields in results:
+            timestamp = read_timestamps.get(acc_label)
+            if timestamp is not None:
+                lines.append(
+                    "acc_telemetry_read_timestamp_seconds"
+                    f'{{acc="{acc_label}",source="ssh"}} {timestamp}\n'
+                )
     write_textfile(path, lines)
 
 
@@ -263,8 +278,10 @@ def run_core_textfile_oneshot(path):
 def run_transport_textfile_oneshot(path):
     """Sample every Falcon transport counter once and write its textfile."""
     results = []
+    read_timestamps = {}
     for netns, acc_label, acc_fabric_ip in ACC_TARGETS:
         raw = sample_transport(netns, acc_fabric_ip)
+        read_timestamp = time.time()
         fields = parse_tele_fields(raw)
         if not fields:
             sys.stderr.write(
@@ -272,7 +289,8 @@ def run_transport_textfile_oneshot(path):
             )
             continue
         results.append((acc_label, fields))
-    write_transport_prom_textfile(path, results)
+        read_timestamps[acc_label] = read_timestamp
+    write_transport_prom_textfile(path, results, read_timestamps)
 
 
 def main():

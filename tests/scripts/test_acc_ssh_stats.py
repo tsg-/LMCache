@@ -47,3 +47,19 @@ def test_transport_textfile_does_not_publish_core_busy_gauges(tmp_path: Path) ->
         'acc_tele_field{acc="acc1",section="global",field="bytes_from_ulp_rc"} 1234'
     ) in text
     assert "acc_cpu_busy_percent" not in text
+
+
+def test_transport_textfile_records_each_acc_read_time(tmp_path: Path) -> None:
+    """A combined serial file must retain the individual ACC sample times."""
+    collector = _load_collector()
+    output = tmp_path / "acc_transport.prom"
+
+    collector.write_transport_prom_textfile(
+        output,
+        [("acc1", [("global", "bytes_from_ulp_rc", 1234)])],
+        {"acc1": 100.5},
+    )
+
+    text = output.read_text()
+
+    assert 'acc_telemetry_read_timestamp_seconds{acc="acc1",source="ssh"} 100.5' in text

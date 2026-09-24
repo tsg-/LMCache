@@ -10,7 +10,6 @@ ROOT = Path(__file__).parents[2]
 SCRIPT = ROOT / "scripts/ipu-poc/acc_grpc_tunnel.py"
 TUNNEL_UNIT = ROOT / "scripts/ipu-poc/acc-grpc-tunnel@.service"
 COLLECTOR_UNIT = ROOT / "scripts/ipu-poc/acc-grpc-telemetry@.service"
-COLLECTOR_TIMER = ROOT / "scripts/ipu-poc/acc-grpc-telemetry@.timer"
 
 
 def _load_module():
@@ -92,15 +91,15 @@ def test_proto_copy_reuses_the_persistent_imc_master() -> None:
     )
 
 
-def test_shadow_units_keep_the_tunnel_and_collector_separate() -> None:
-    """The fast gRPC path is installed as a non-disruptive shadow collector."""
+def test_collector_unit_runs_one_persistent_acc_loop() -> None:
+    """A service instance must own one ACC instead of serializing all four."""
     tunnel_unit = TUNNEL_UNIT.read_text(encoding="utf-8")
     collector_unit = COLLECTOR_UNIT.read_text(encoding="utf-8")
-    collector_timer = COLLECTOR_TIMER.read_text(encoding="utf-8")
 
     assert "EnvironmentFile=/etc/default/acc-stats" in tunnel_unit
     assert "ExecStart=/usr/local/bin/acc_grpc_tunnel.py" in tunnel_unit
     assert "Requires=acc-grpc-tunnel@%i.service" in collector_unit
-    assert "ExecStart=/usr/bin/env ${ACC_GRPC_PYTHON}" in collector_unit
-    assert "acc-grpc-telemetry@%i.service" in collector_timer
-    assert "OnUnitActiveSec=5s" in collector_timer
+    assert "Type=simple" in collector_unit
+    assert "acc_telemetry_textfile.py --loop" in collector_unit
+    assert "Restart=always" in collector_unit
+    assert "WantedBy=multi-user.target" in collector_unit
