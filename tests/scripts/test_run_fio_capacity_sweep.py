@@ -46,6 +46,7 @@ def test_remote_xfs_dry_run_uses_requested_work_directory(tmp_path: Path) -> Non
         "REPS": "0",
         "MIX_BS": "256k",
         "MIX_RATIOS": "83",
+        "NUMJOBS": "8",
     }
     result = subprocess.run(
         [str(SCRIPT), "--surface", "remote_xfs", "--mixed-only", "--dry-run"],
@@ -58,8 +59,10 @@ def test_remote_xfs_dry_run_uses_requested_work_directory(tmp_path: Path) -> Non
     assert result.returncode == 0, result.stderr + result.stdout
     out_dir = tmp_path / "out" / "override"
     assert f"devices={requested_work_dir}" in (out_dir / "context.txt").read_text()
+    assert "runtime=60 ramp=10 numjobs=8" in (out_dir / "context.txt").read_text()
     job = out_dir / "jobs" / "mixed83_remote_xfs_bs256k_qd64_rep1.fio"
     assert f"directory={requested_work_dir}" in job.read_text()
+    assert "numjobs=8" in job.read_text()
 
 
 def test_remote_xfs_rejects_requested_directory_inside_corpus(tmp_path: Path) -> None:
