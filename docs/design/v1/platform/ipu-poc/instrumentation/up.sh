@@ -54,17 +54,14 @@ sha256_file() {
 
 # Prometheus reporting a scrape target `up` only proves node_exporter
 # answered -- it says nothing about whether a specific textfile collector
-# is still running. acc-transport.timer being silently disabled on mmgt for
-# 22+ hours (2026-09-01) is exactly the failure this catches: node/mmgt
-# stayed `up` the whole time on the strength of the other seven collectors.
+# is still running.
 # max_age is roughly 3x the collector's timer interval -- see
 # host/systemd/*.timer and scripts/ipu-poc/acc-*.timer for the source
 # values. Override with COLLECTOR_CHECKS="host:file:max_age_s ...".
 # Set COLLECTOR_CHECKS='' for a forwarding-only monitoring key. Such a key
 # cannot execute the remote stat commands used by this optional probe.
 COLLECTOR_CHECKS="${COLLECTOR_CHECKS-\
-mmgt:acc_transport.prom:30 mmgt:acc_stats.prom:90 mmgt:acc_grpc_acc1.prom:6 \
-mmgt:acc_grpc_acc2.prom:6 mmgt:acc_grpc_acc3.prom:6 mmgt:acc_grpc_acc4.prom:6 \
+mmgt:acc_stats.prom:90 \
 mmgt:pcm_memory.prom:15 mmgt:pcm_pcie.prom:15 \
 mmgt:numa_stats.prom:15 mmgt:nvme_stats.prom:45 mmgt:mmgt_nic.prom:15 \
 mmgi0:acc_transport.prom:30 mmgi0:acc_stats.prom:90 mmgi0:nvmeof_qp.prom:90 \
@@ -152,10 +149,18 @@ echo "== SSH tunnels =="
 for entry in $HOSTS; do
     ensure_tunnel "${entry%%:*}" "${entry##*:}" 9100
 done
+ensure_tunnel mmgt 19111 9188
 
 if [ -n "$COLLECTOR_CHECKS" ]; then
     echo "== collector freshness (mmgt/mmgi0/mmgi1/mmgi2/mmgi3) =="
     check_collectors
+    if ssh -o BatchMode=yes -o ConnectTimeout=5 mmgt \
+        'curl -fsS --max-time 2 http://127.0.0.1:9188/metrics' \
+        2>/dev/null | grep -qx 'acc_telemetry_exporter_complete 1'; then
+        echo "  mmgt: ACC exporter complete"
+    else
+        echo "  mmgt: ACC exporter missing or incomplete"
+    fi
 else
     echo "== collector freshness =="
     echo "  skipped (COLLECTOR_CHECKS='')"

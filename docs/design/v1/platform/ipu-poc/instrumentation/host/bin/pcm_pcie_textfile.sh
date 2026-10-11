@@ -3,6 +3,8 @@ set -euo pipefail
 
 OUT_DIR="/var/lib/node_exporter/textfile"
 OUT_FILE="$OUT_DIR/pcm_pcie.prom"
+find "$OUT_DIR" -maxdepth 1 -type f -name 'pcm_pcie.prom.??????' \
+    -mmin +1 -delete
 TMP_FILE="$(mktemp "$OUT_DIR/pcm_pcie.prom.XXXXXX")"
 CSV_FILE="$(mktemp /tmp/pcm_pcie.XXXXXX.csv)"
 PCM_PCIE_BIN="${PCM_PCIE_BIN:-/usr/local/bin/pcm-pcie-20260811}"

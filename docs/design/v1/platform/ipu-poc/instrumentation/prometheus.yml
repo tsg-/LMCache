@@ -42,6 +42,16 @@ scrape_configs:
         target_label: host
         replacement: mmgi3
 
+  - job_name: acc_grpc
+    scrape_interval: 4s
+    scrape_timeout: 2s
+    static_configs:
+      - targets:
+          - host.docker.internal:19111   # mmgt  via ssh -L 19111:127.0.0.1:9188
+        labels:
+          fabric: mgmt
+          host: mmgt
+
   # Same `bench l2 --serve-metrics` endpoints on the MMG-400 rig, where the load
   # is driven from four initiator hosts instead of one. A separate job keeps the
   # mkp1 panels from summing mmg series into their aggregate: the mkp dashboard

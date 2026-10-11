@@ -224,7 +224,7 @@ class _BenchCollector:
             (
                 "Unix time this phase's sustained window opened (first "
                 "submit). 0 for a phase that has not opened one -- rounds "
-                "mode and mixed mode do not set this yet."
+                "mode does not set this."
             ),
             labels=["operation", "phase", "model", "num_workers", "page_size_bytes"],
         )

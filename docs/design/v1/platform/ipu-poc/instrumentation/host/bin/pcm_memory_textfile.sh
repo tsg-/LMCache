@@ -9,6 +9,8 @@ set -euo pipefail
 
 OUT_DIR="/var/lib/node_exporter/textfile"
 OUT_FILE="$OUT_DIR/pcm_memory.prom"
+find "$OUT_DIR" -maxdepth 1 -type f -name 'pcm_memory.prom.??????' \
+    -mmin +1 -delete
 TMP_FILE="$(mktemp "$OUT_DIR/pcm_memory.prom.XXXXXX")"
 CSV_FILE="$(mktemp /tmp/pcm_memory.XXXXXX.csv)"
 PCM_MEMORY_BIN="${PCM_MEMORY_BIN:-/usr/sbin/pcm-memory}"

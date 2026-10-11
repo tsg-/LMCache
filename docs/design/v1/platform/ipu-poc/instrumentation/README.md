@@ -1,511 +1,303 @@
-# LMCache telemetry — MMG-400 observability kit
+# MMG-400 telemetry
 
-The deployed monitoring host is `mmgi1` (POC-001), in
-`/root/lmcache-telemetry`. It
-scrapes the MMG-400 target and initiators: `mmgt` and `mmgi0`–`mmgi3`.
-Persistent Docker state is under `/home/docker/`, configured with Docker's
-`data-root`; do not place Prometheus data on `/`.
+Prometheus, Grafana, and host/device exporters for operators running `bench l2`
+on the five-node MMG-400 testbed. `mmgt` exports NVMe-oF storage through four
+ACCs; `mmgi0`–`mmgi3` generate load. `mmgi1` also runs the monitoring containers.
+The dashboard shows operational telemetry, not inference TTFT.
 
-Two halves:
+## Starting state
 
-- **`host/`** — runs *on each test host*: node_exporter + seven textfile
-  collectors, each driven by its own systemd timer.
-- **root of this dir** — runs *on the mmgi1 monitoring host*: SSH tunnels plus
-  Prometheus and Grafana in Docker.
+The quickstart assumes collectors are installed and the kit is available at
+`mmgi1:/root/lmcache-telemetry`. That deployment is an unmanaged copy: compare
+files and preserve a rollback copy before updating it. For collector installation,
+run the commands below from this repository's root with root SSH access.
 
-Two metrics flows, both loopback-bound and tunnelled:
+On `mmgi1`, provide Docker with Compose, `ssh`, `lsof`, `openssl`, `curl`, and
+Python 3. SSH forwarding must work to all five hosts, including `mmgi1` itself.
+Prometheus retains up to 30 days or 100 GB, whichever limit is reached first.
+Check `docker info --format '{{.DockerRootDir}}'` and available space there;
+use a capacity-checked data filesystem, such as `/home/docker`, rather than
+assuming the root filesystem can hold the telemetry history.
 
-- **host counters** — collector script → `.prom` file → node_exporter on
-  `127.0.0.1:9100` → SSH tunnel → Prometheus (4s scrape) → Grafana.
-- **`bench l2` counters** — the CLI's own `--serve-metrics` endpoint on
-  `127.0.0.1:9101+` → SSH tunnel → same Prometheus, job `lmcache_bench`. Short
-  lived: it exists only while a benchmark process runs.
+## Quickstart
 
-node_exporter binds to loopback only; the SSH tunnel is the sole exposure. No
-firewall changes are needed on the test hosts.
+### Start the stack
 
-## Deploy the MMG-400 stack
-
-### 1. Per test host
-
-```bash
-scp -r host <newhost>:/tmp/obs-kit
-ssh <newhost> '
-  RDMA_FABRIC_IFACE=<fabric-iface> \
-  ACC_TELEMETRY_ENDPOINT=<acc-ip>:50051 \
-  ACC_TELEMETRY_PROTO_DIR=<feature-pack>/ipu_client/config \
-  bash /tmp/obs-kit/install.sh'
-```
-
-`install.sh` installs deps (`nvme-cli`, `ethtool`, `jq`, Intel PCM), fetches node_exporter
-1.8.2 if absent, creates the `node_exporter` system user and
-`/var/lib/node_exporter/textfile`, installs the seven collectors and fifteen
-units, enables the timers, and verifies freshness plus series counts. It is
-idempotent. It also requires Python's `grpc` module and the generated
-`telemetry_pb2.py` and `telemetry_pb2_grpc.py` files in
-`ACC_TELEMETRY_PROTO_DIR`.
-
-**All three variables are required and any one missing aborts the script.**
-`SKIP_ACC_TELEMETRY=1` stands in for the two `ACC_TELEMETRY_` ones on a host with
-no accelerator to point them at, and installs six collectors and thirteen units
-instead. Skipping it gives up the authoritative payload-byte source — see
-[Load-bearing constraints](#load-bearing-constraints) on why the NIC counters are
-not a substitute.
-
-Four collectors are **not** wired by `install.sh` because they are rig-specific:
-`pcm_pcie_textfile.sh` and `mmgt_nic_textfile.sh` (with their units and the
-`pcm-memory` drop-in) are the MMG-400 target's set — `mmgt` runs no `rdma-nic` or
-`rdma-hwcounters` at all — and the ACC-over-SSH collector is separate again. See
-[ACC telemetry on the MMG-400 rig](#acc-telemetry-on-the-mmg-400-rig).
-
-`RDMA_FABRIC_IFACE` is **required** — it pins `rdma-nic.service` to the fabric
-NIC via a drop-in, leaving the collector script byte-identical fleet-wide (`md5sum`
-is then a useful drift check). Point it at the **RDMA fabric** interface, never
-the SSH management interface. On mkp1/mkp2 that is `ens2f0` (200.0.0.35 /
-200.0.0.37); management is `ens101f0` (10.166.97.x). The script refuses to run
-without it and prints the candidate interfaces.
-
-Verify:
-
-```bash
-ssh <newhost> 'systemctl list-timers --all | grep -E "rdma|nvme|pcm|numa"'
-ssh <newhost> 'curl -s localhost:9100/metrics | grep -c ^rdma_hw_counter{'
-```
-
-### 2. Monitoring host
+On `mmgi1`:
 
 ```bash
 ssh mmgi1
 cd /root/lmcache-telemetry
-COLLECTOR_CHECKS='' ./up.sh
+COLLECTOR_CHECKS='' MMG_BENCH_TUNNELS=1 ./up.sh
 ```
 
-The built-in target set is `mmgt:19106 mmgi0:19107 mmgi1:19108`. The
-node-exporter service listens on loopback only, so `up.sh` creates SSH forwards
-bound to Docker's local bridge gateway. They are reachable by Prometheus but not
-by the management network. `COLLECTOR_CHECKS=''` is required with the dedicated
-forwarding-only key because the optional freshness probe executes remote `stat`
-commands. `ensure_tunnel` uses `ExitOnForwardFailure` under `set -e`, so an
-unreachable host aborts rather than leaving a down target behind.
+- `MMG_BENCH_TUNNELS=1` opens the four benchmark tunnels. Omit it for host health only.
+- `COLLECTOR_CHECKS=''` skips remote freshness probes for a forwarding-only SSH
+  key. Omit this override with a key that permits remote commands; either way,
+  check collector freshness before a sweep.
+- Re-running `up.sh` reuses listening tunnel ports, starts Compose, and reloads
+  Prometheus. Apply config changes before a sweep; recreation can lose samples.
 
-`up.sh` opens the SSH tunnels (idempotent), brings up the compose stack, reloads
-Prometheus, and prints target health. Grafana provisions the datasource and
-dashboard automatically. For active geometry sweeps, add
-`MMG_BENCH_TUNNELS=1`; otherwise the benchmark endpoints correctly report as
-disabled.
+Tunnels do not start benchmark endpoints. Add `--serve-metrics 9101
+--metrics-bind-address 127.0.0.1` to the `bench l2` invocation on `mmgi0`, using
+ports `9102`, `9103`, and `9104` on the other initiators. Benchmark queries must
+filter `phase="measured"` to exclude warmup.
 
-## What's in the box
+### Open Grafana
 
-| Path | Runs on | Purpose |
+From your laptop, forward the Grafana port:
+
+```bash
+ssh -N -L 3000:127.0.0.1:3000 mmgi1
+```
+
+Open [the target dashboard](http://127.0.0.1:3000/d/mmgt-storage-target).
+Anonymous access is read-only. On first run, `up.sh` generates an admin password
+in `.env` if none exists; `GRAFANA_PASSWORD` supplies an alternative.
+
+To stop the containers on `mmgi1`, run `docker compose stop` in the kit directory.
+This preserves history and leaves SSH tunnels running. `up.sh` restarts the stack;
+do not use `docker compose down -v`, which deletes Prometheus and Grafana volumes.
+
+## Preflight health checks
+
+On `mmgi1`, open `http://127.0.0.1:9090/graph` or query its API. For laptop access,
+add `-L 9090:127.0.0.1:9090` to the Grafana SSH command. Verify:
+
+| Query | Expected Value | Meaning |
 |---|---|---|
-| `host/install.sh` | test host | Idempotent installer + verifier |
-| `host/bin/rdma_hwcounters_textfile.sh` | test host | irdma `hw_counters` — directional RDMA operation counters |
-| `host/bin/rdma_nic_textfile.sh` | test host | `ethtool -S` fabric-NIC counters — traffic-presence diagnostic only |
-| `host/bin/acc_telemetry_textfile.py` | test host | ACC gRPC RC byte counters — authoritative Falcon payload-byte source |
-| `host/bin/nvme_stats_textfile.sh` | test host | NVMe SMART per namespace |
-| `host/bin/nvmeof_qp_textfile.sh` | initiator | configured NVMe-oF I/O QPs per controller and initiator |
-| `host/bin/pcm_memory_textfile.sh` | test host | Intel PCM DRAM read/write bandwidth per socket |
-| `host/bin/numa_stats_textfile.sh` | test host | kernel node memory, allocation, and CPU-time counters |
-| `host/bin/pcm_pcie_textfile.sh` | mmgt only | Intel PCM PCIe/DDIO bandwidth per socket — feeds the LLC hit% and DDIO absorption panels |
-| `host/bin/mmgt_nic_textfile.sh` | mmgt only | `ethtool -S` on both fabric ports; replaces `rdma_nic` on the MMG-400 target |
-| `host/systemd/*.service`, `*.timer` | test host | node_exporter + one timer per collector |
-| `host/systemd/pcm-memory.service.d/pcm.conf` | mmgt only | Pins `PCM_MEMORY_BIN` to the dated PCM build |
-| `prometheus.yml` | mmgi1 | 4s scrape of node tunnels plus MMG bench ports |
-| `docker-compose.yml` | mmgi1 | Prometheus 2.55.1 + Grafana 11.3.0; volumes use Docker's `/home/docker/` data root |
-| `provisioning/` | mmgi1 | Grafana datasource (uid `PROM`) + dashboard provider |
-| `dashboards/lmcache-mkp.json` | mmgi1 | Legacy mkp1/mkp2 dashboard; provisioned but not applicable to this rig |
-| `dashboards/mmgt-storage-target.json` | mmgi1 | 63 panels incl. rows, uid `mmgt-storage-target` — MMG-400 target storage/DDIO/ACC dashboard |
-| `up.sh` | mmgi1 | Tunnels + stack + health check |
+| `up{job="node"}` | 5 series, each `1` | All 5 hosts (`mmgt`, `mmgi0`–`mmgi3`) reachable |
+| `up{job="acc_grpc",host="mmgt"}` | `1` | Target ACC HTTP exporter reachable |
+| `acc_telemetry_exporter_complete{job="acc_grpc",host="mmgt"}` | `1` | All four ACC reads succeeded |
+| `acc_telemetry_collector_success{job="acc_grpc",host="mmgt"}` | 4 series, each `1` | Each target ACC read succeeded |
+| `count by (acc) (acc_cpu_busy_percent{job="node",host="mmgt",core=~"cpu[0-9]+"})` | 4 series, each `4` | CPU telemetry covers four cores on each ACC |
+| `node_textfile_scrape_error{job="node"}` | 5 series, each `0` | Textfiles parse successfully |
+| `time() - node_textfile_mtime_seconds{job="node"}` | Check each file's age | Detect stopped collectors even when `up=1` |
 
-### The `lmcache_bench` job
+For the age check, require expected files to be present as well as fresh.
+Use the limits in [`up.sh`](up.sh): on `mmgt`, PCM memory/PCIe, NUMA, and NIC
+files should be no older than 15 s; NVMe SMART, 45 s; ACC CPU, 90 s.
+Initiator QP files should be no older than 90 s. Require
+`pcm_memory_collector_success` and `pcm_pcie_collector_success` to be `1`:
+fresh failure files are not valid samples.
 
-`bench l2 --serve-metrics <port> --metrics-bind-address 127.0.0.1` publishes
-live submit/success/bytes counters for the lifetime of one CLI process. The
-multi-initiator drivers assign `METRICS_BASE_PORT + id` (default base 9101), so
-`prometheus.yml` configures four targets and `up.sh` can open the matching
-tunnels:
+An ACC read failure reports `success=0` and omits that card's counters rather
+than replaying stale data. Aggregate RDMA panels are suppressed when the
+exporter is incomplete; per-card panels are gated by that card's success.
+Benchmark endpoints are process-local and report `up=0` between cells. During
+a cell, check all four targets; a dead tunnel is not an idle benchmark.
 
-```bash
-BENCH_TUNNELS=1 ./up.sh                      # initiators 0..3 -> :19102-19105
-BENCH_TUNNELS=1 BENCH_INITIATORS=2 ./up.sh   # just 0..1
-```
+## Interpreting the dashboard
 
-Off by default — with no benchmark running these are four permanently-down
-targets. Override `BENCH_HOST`, `BENCH_REMOTE_BASE`, `BENCH_LOCAL_BASE` to match
-a different rig, keeping them aligned with `prometheus.yml`.
+### Payload counters and direction
 
-`run_model_geometry.sh` accepts `METRICS_PORT` and forwards it to `bench l2`.
-The host-only geometry coordinator uses one endpoint per host; use a
-multi-initiator driver only when a host deliberately runs more than one
-benchmark process.
+Use ACC gRPC byte counters for Falcon payload telemetry. The dashboard selects
+`acc_tele_field{job="acc_grpc",host="mmgt",field="bytes_from_ulp_rc"}` and
+`field="bytes_to_ulp"`; the exporter also publishes them as
+`acc_telemetry_bytes_total` with a `counter` label.
 
-Two properties matter when reading the series:
+OS netdev statistics (`/sys/class/net/.../statistics/*`) do not account for
+Falcon offloaded RDMA payload on this rig. `ethtool -S` hardware counters are a
+different family: their coverage depends on the named counter and driver, and
+they are not the payload authority here. `irdma` RDMA operation counters count
+transactions, not bytes; there is no fixed Falcon bytes-per-operation conversion.
+In-capsule writes can carry data without a separate RDMA READ operation.
 
-- **The target is down between cells.** The endpoint lives only as long as one
-  `bench l2` invocation, so `up == 0` between sweep cells is expected, not a
-  scrape failure. A 120 s cell at the 4 s interval yields roughly 30 samples.
-- **`phase` separates `warmup` from `measured`**, which is what lets a
-  Prometheus-side rate be compared against the run's JSON independently. Rate
-  over the measured phase only; including warmup biases it.
+| NVMe-oF operation | Target action | Target ACC counter |
+|---|---|---|
+| READ | RDMA WRITE into initiator memory | `bytes_from_ulp_rc` |
+| WRITE | RDMA READ from initiator memory | `bytes_to_ulp` |
 
-### The `lmcache_bench_mmg` job
+Target and initiator counters are two views of the same transfer; do not add
+them. ACC payload bytes, successful application bytes, and physical NVMe bytes
+have different measurement boundaries and need not be equal.
 
-The MMG-400 load runs one benchmark process on each physical initiator
-(`mmgi0`–`mmgi3`) against target `mmgt`. It gets its own job rather than sharing
-`lmcache_bench`: the mkp dashboard filters on `job` alone, so a shared name would
-fold MMG series into the mkp aggregate.
+### Rate windows and benchmark results
 
-The benchmark port differs by host. Keep these endpoint pairs together in
-`up.sh` and `prometheus.yml`:
+Throughput summary tiles use `rate(...[30s])`, not phase-bracketed deltas.
+At transitions they can include prior-phase traffic; new series require at least
+two samples, and short phases need not reach a steady displayed value.
+Prometheus scrapes every 4 s; the HTTP ACC exporter reads all four cards on
+each request. The legacy gRPC shadow loops update every 2 s until retired.
 
-```text
-19110 -> mmgi0:9101
-19120 -> mmgi1:9102
-19130 -> mmgi2:9103
-19140 -> mmgi3:9104
-```
+Use CLI measured-phase JSON for application results and
+[`measure_mmg_fleet.py`](../../../../../../scripts/ipu-poc/measure_mmg_fleet.py)
+for common-window application, ACC, and NVMe snapshots. It divides each ACC
+delta by that card's read-timestamp span. Capture during the sustained overlap,
+require `valid=true`, and keep unrelated target I/O out of the snapshot window;
+end-of-run counters alone do not establish four-host phase alignment.
 
-Start the tunnels for an active run with:
+## Topology and ports
 
-```bash
-MMG_BENCH_TUNNELS=1 ./up.sh
-```
+Prometheus scrapes remote services through SSH forwards created by `up.sh`. On Linux, forwards bind to Docker's local bridge gateway to prevent exposure to the external management network.
 
-`phase` separates warmup from measured traffic. Dashboard goodput queries must
-filter `phase="measured"` so the live tile matches the JSON measurement window.
+### Node exporters and benchmark endpoints
 
-`--web.enable-lifecycle` is set on the Prometheus container so `curl -X POST
-http://127.0.0.1:9090/-/reload` picks up config edits. Reload (or recreate)
-**before** a sweep starts — a restart mid-sweep loses samples for the cell in
-flight.
+| Host | Role | Node Exporter Port | Benchmark Tunnel (Local → Remote) |
+|---|---|---:|---|
+| `mmgt` | Storage Target | `19106` | — |
+| `mmgi0` | Initiator 0 | `19107` | `19110 → 9101` |
+| `mmgi1` | Initiator 1 (Monitor) | `19108` | `19120 → 9102` |
+| `mmgi2` | Initiator 2 | `19109` | `19130 → 9103` |
+| `mmgi3` | Initiator 3 | `19100` | `19140 → 9104` |
 
-### Cheap intermediate (no Prometheus)
+The target ACC HTTP exporter uses `19111 → mmgt:9188`, job `acc_grpc`.
 
-For single-run correlation without standing up the stack:
+### Target ACC addresses
 
-```bash
-# on each host, timestamped CSV to a per-run dir
-dstat --output run.dstat.csv --cpu --mem --net -N ens2f0 --disk -D nvme0n1,nvme1n1 --nvme 1 &
-nvme iostat > run.nvme.csv &
-```
+| ACC Label | Target Netns | Fabric IP | Loopback Port |
+|---|---|---|---:|
+| `acc1` | `IPU2` | `200.0.6.3` | `15001` |
+| `acc2` | `IPU1` | `200.0.5.3` | `15002` |
+| `acc3` | `IPU3` | `200.0.7.3` | `15003` |
+| `acc4` | `IPU4` | `200.0.8.3` | `15004` |
 
-Aligned timestamps plus a single-node view is ~80% of the value. Upgrade to the
-full stack when you want live mid-run visibility or a second viewer.
+## Collector setup and maintenance
 
-Collector intervals: `rdma-hwcounters` 2s, `rdma-nic` 5s, `acc-telemetry` 5s,
-`pcm-memory` 5s, `numa-stats` 5s, `nvme-stats` 15s. PCM takes a one-second measurement inside
-each five-second cycle. SMART reads issue an admin command per namespace, hence
-the slower cadence; NIC, RDMA, and NUMA counters are cheap reads wanted at
-fabric resolution.
+### Base host collectors
 
-### Memory and NUMA telemetry
-
-`pcm-memory` exports socket-level DRAM controller bandwidth in PCM's reported
-MB/s. It measures all host memory traffic, including unrelated processes and
-kernel activity; it is not a substitute for application goodput or wire-byte
-measurement. The collector emits `pcm_memory_collector_success=0` if PCM is
-unavailable or its CSV output cannot be parsed, rather than presenting an old
-successful sample as current.
-
-The NUMA collector exports `MemTotal`, `MemFree`, and `MemUsed` from each
-node's kernel `meminfo`, plus per-node `numa_hit`, `numa_miss`,
-`numa_foreign`, `local_node`, and `other_node` counters. They are host-wide
-kernel counters. A change during a measured cell is useful diagnostic evidence;
-their absolute values do not belong to the benchmark process alone.
-
-## Falcon host bring-up is the platform team's step, not ours
-
-Loading `idpf`/`irdma` and configuring the fabric interfaces on `mmgt`, `mmgi0`
-and `mmgi1` belongs to the platform team. The benchmark side assumes RDMA is
-already up and starts at the NVMe-oF layer. This section records the as-built
-facts so they are not lost; it is not a procedure to run.
-
-There was a `falcon_host_setup.sh` here that reproduced the bring-up. It was
-removed, because owning another team's step is a trap in a specific way: the
-modules are insmod'd from build trees the platform team rebuilds on its own
-schedule, so any path we pin goes stale silently. It did — the pinned path had
-been superseded on all three hosts by a newer build of the same version, so
-running the script would have downgraded the driver without any error. Ask the
-platform team which build is current instead of pinning one here.
-
-### As-built fabric map
-
-MTU 9100 on every fabric interface. The 192.168.100-equivalent management path
-is not involved; only these addresses are fabric.
-
-| Host | Interface | Address | Routes |
-|---|---|---|---|
-| `mmgi0` | `ens7f0` | `200.0.4.2/24` | `200.0.3.0/24` and `200.0.6.0/24` via `200.0.4.1` |
-| `mmgi1` | `ens7f0` | `200.0.3.2/24` | `200.0.4.0/24` and `200.0.5.0/24` via `200.0.3.1` |
-| `mmgt` | `enp45s0f0` | `200.0.5.2/24` | `200.0.3.0/24` via `200.0.5.1` |
-| `mmgt` | `enp79s0f0` | `200.0.6.2/24` | `200.0.4.0/24` via `200.0.6.1` |
-
-Each initiator routes to exactly one target address, which is what fixes the
-port split in `setup_mmgt_nvmeof_target.sh`: **nvmet port 1 (`200.0.6.2`) serves
-`mmgi0`, port 2 (`200.0.5.2`) serves `mmgi1`.**
-
-### Ordering constraints worth knowing
-
-`idpf` loads first, the interfaces are configured on the `idpf` netdev, and
-`irdma` loads last. `ice` must not be resident when `irdma` loads — that
-combination has been observed to crash the host. IMC and ACC are a separate
-persistent domain and are untouched by a host reboot.
-
-### Assert bring-up, don't reproduce it
-
-The failure mode here is silent: on 2026-08-28 `rdma link show` reported
-`state ACTIVE physical_state LINK_UP` and `ibv_devinfo` reported
-`PORT_ACTIVE (4)` for a full day while memory-region registration was dead and
-every NVMe-oF controller had gone. **Never read fabric health off link state.**
-Two checks that do work:
-
-- `rdma resource show` — a healthy device has a nonzero `mr` count. `mr 0`
-  means registration is failing even though the link looks up.
-- A live NVMe-oF controller over `rdma` transport (`nvme list-subsys`) is
-  positive proof, since it cannot exist without successful MR registration.
-  This is what `run_geometry_inventory.sh preflight` gates on, and it is the
-  right gate — it fails before a sweep rather than midway through one.
-
-Module identity needs care too: three distinct `irdma` builds on this rig all
-report `version 0.0.129-hvl`. Only `/sys/module/irdma/srcversion` identifies
-what is loaded. `modinfo irdma` resolves by path and on `mmgi0` names a build
-that is not the running one.
-
-## ACC telemetry on the MMG-400 rig
-
-The MMG-400 hosts (`mmgt`, `mmgi0`, `mmgi1`) use `tele_cli` through the IMC for
-the deployed ACC panels. `mmgt` also has an optional gRPC shadow path. It keeps
-the IMC connection in each IPU namespace and binds the forwarded ACC gRPC port
-on host loopback. The dashboard stays on the deployed `tele_cli` counters until
-a fixed-cell comparison approves a cutover.
-
-| Path | Purpose |
-|---|---|
-| `scripts/ipu-poc/install_acc_stats.sh` | Installs the collector (and node_exporter if absent) on one host. Idempotent. |
-| `scripts/ipu-poc/acc_ssh_stats.py` | Samples ACC core usage and `tele_cli -t global` into separate textfiles |
-| `scripts/ipu-poc/acc-stats.service`, `.timer` | ACC core busy gauges, every 30 s |
-| `scripts/ipu-poc/acc-transport.service`, `.timer` | Falcon transport counters, every 10 s |
-| `scripts/ipu-poc/acc_grpc_tunnel.py` | Persistent target-only IMC → ACC gRPC tunnel and protobuf staging |
-| `scripts/ipu-poc/acc-grpc-*` units | Optional 5 s target-only gRPC shadow collector |
-| `scripts/ipu-poc/acc_capture_runbook.sh` | Serial-console capture plus periodic `tele_cli` injection, for crash forensics |
-| `scripts/ipu-poc/sync_capture_bundle.sh` | Pulls capture dirs back to the laptop |
-
-Install it per host, staging node_exporter from a host that already has the
-matching build:
+On each new host, install node_exporter and the base PCM, NUMA, NVMe SMART,
+QP, and NIC collectors. Replace `HOST` and `FABRIC_IFACE` before running:
 
 ```bash
-scp mmgt:/usr/local/bin/node_exporter /tmp/node_exporter
-cd scripts/ipu-poc
-IMC_PASSWORD=<imc-root-pw> NODE_EXPORTER_BIN=/tmp/node_exporter \
-  ./install_acc_stats.sh mmgi0 ':acc1:200.0.4.3'
-IMC_PASSWORD=<imc-root-pw> NODE_EXPORTER_BIN=/tmp/node_exporter \
-  ./install_acc_stats.sh mmgi1 ':acc1:200.0.3.3'
-IMC_PASSWORD=<imc-root-pw> ./install_acc_stats.sh mmgt      # two-card default
+scp -r docs/design/v1/platform/ipu-poc/instrumentation/host HOST:/tmp/obs-kit
+ssh HOST '
+  RDMA_FABRIC_IFACE=FABRIC_IFACE SKIP_ACC_TELEMETRY=1 \
+    bash /tmp/obs-kit/install.sh'
 ```
 
-Then add the node targets and tunnels — `mmgt:19106`, `mmgi0:19107`,
-`mmgi1:19108` are already in `up.sh`'s `HOSTS` default and `prometheus.yml`'s
-`node` job, so `./up.sh` picks them up.
+Use the fabric interface, never the SSH management interface. The installer
+requires root, installs package dependencies, enables timers, and prints health
+and freshness checks. `SKIP_ACC_TELEMETRY=1` omits the generic ACC collector;
+the rig-specific ACC setup is separate. Initiator CPU panels require
+[`install_acc_stats.sh`](../../../../../../scripts/ipu-poc/install_acc_stats.sh)
+with that host's ACC target specification, not the default target-host mapping.
 
-To install the target-only shadow path, use the same installer with
-`ACC_GRPC_SHADOW=1`:
+### Target collectors (`mmgt`)
+
+After the base installation, add the target PCM PCIe and four-port NIC collectors.
+Verify compatible PCM binaries first: the PCIe parser expects the CSV emitted by
+`/usr/local/bin/pcm-pcie-20260811`. The supplied memory drop-in selects
+`/usr/local/bin/pcm-memory-20260811`. Install those binaries or adapt their paths
+to validated equivalents. Replace the four interface placeholders with the
+target's current fabric interfaces; the shipped service's interface list can
+be stale after a board replacement.
 
 ```bash
-IMC_PASSWORD=<imc-root-pw> ACC_GRPC_SHADOW=1 \
-  ./install_acc_stats.sh mmgt
+KIT=docs/design/v1/platform/ipu-poc/instrumentation
+scp "$KIT/host/bin/"{pcm_pcie,mmgt_nic}_textfile.sh mmgt:/tmp/
+scp "$KIT/host/systemd/"{pcm-pcie,mmgt-nic-stats}.{service,timer} mmgt:/tmp/
+scp "$KIT/host/systemd/pcm-memory.service.d/pcm.conf" mmgt:/tmp/
+ssh mmgt 'bash -s' <<'REMOTE'
+set -euo pipefail
+test -x /usr/local/bin/pcm-pcie-20260811
+test -x /usr/local/bin/pcm-memory-20260811
+install -m 0755 /tmp/{pcm_pcie,mmgt_nic}_textfile.sh /usr/local/bin/
+install -m 0644 /tmp/{pcm-pcie,mmgt-nic-stats}.{service,timer} /etc/systemd/system/
+install -d /etc/systemd/system/{pcm-memory,mmgt-nic-stats}.service.d
+install -m 0644 /tmp/pcm.conf /etc/systemd/system/pcm-memory.service.d/
+printf '[Service]\nEnvironment="MMGT_NIC_IFACES=FABRIC_IFACE_1 FABRIC_IFACE_2 FABRIC_IFACE_3 FABRIC_IFACE_4"\n' \
+  > /etc/systemd/system/mmgt-nic-stats.service.d/ifaces.conf
+systemctl daemon-reload
+systemctl enable --now pcm-pcie.timer mmgt-nic-stats.timer
+systemctl start pcm-memory.service pcm-pcie.service mmgt-nic-stats.service
+REMOTE
 ```
 
-It creates `/opt/acc-grpc-telemetry/venv` if needed, installs `grpcio` and
-`protobuf`, and copies `telemetry_pb2.py` plus `telemetry_pb2_grpc.py` from the
-running ACC's
-`/opt/falcon/tools/controller/python_out`. The host needs package access on
-that first install. `ACC_GRPC_PYTHON`, `ACC_GRPC_PROTO_DIR`, and
-`ACC_GRPC_PROTO_SOURCE` override those paths when a controlled runtime or
-feature-pack location is required. On an offline target, pre-stage a compatible
-gRPC runtime and set `ACC_GRPC_PYTHON`; do not point the collector at a
-benchmark virtualenv.
+Bootstrap ACC CPU collection and gRPC shadow loops from the repository root.
+Export `IMC_PASSWORD` in the calling shell. The ACCs must already have working
+IMC access and feature-pack protobuf modules at
+`/opt/falcon/tools/controller/python_out`; `ACC_GRPC_PROTO_SOURCE` overrides that
+path on the ACC. The installer copies the modules through the tunnel services
+and creates the Python venv on `mmgt`.
 
-**The IMC hop is namespaced on the target but not on the initiators.** On `mmgt`
-each card's IMC management vport lives in its own netns (`IPU1`, `IPU2`), so the
-path is `ip netns exec <netns> ssh root@100.0.0.100`. On `mmgi0`/`mmgi1` the IMC
-link is a plain host interface holding `100.0.0.1/24` and there is no netns at
-all — an **empty netns field** in `ACC_TARGETS` selects the direct path. Getting
-this wrong is the difference between working telemetry and a silent timeout.
+```bash
+ACC_GRPC_SHADOW=1 scripts/ipu-poc/install_acc_stats.sh mmgt \
+  'IPU2:acc1:200.0.6.3,IPU1:acc2:200.0.5.3,IPU3:acc3:200.0.7.3,IPU4:acc4:200.0.8.3'
+scp "$KIT/host/bin/"acc_{grpc_exporter,telemetry_textfile}.py mmgt:/tmp/
+scp scripts/ipu-poc/acc-grpc-exporter.service mmgt:/tmp/
+ssh mmgt 'bash -s' <<'REMOTE'
+set -euo pipefail
+install -m 0755 /tmp/acc_{grpc_exporter,telemetry_textfile}.py /usr/local/bin/
+install -m 0644 /tmp/acc-grpc-exporter.service /etc/systemd/system/
+install -m 0644 /opt/acc-grpc-telemetry/proto/acc1/telemetry_pb2*.py /opt/acc-grpc-telemetry/proto/
+systemctl daemon-reload
+systemctl enable --now acc-grpc-exporter.service
+systemctl restart acc-grpc-exporter.service
+curl --noproxy '*' -fsS http://127.0.0.1:9188/metrics
+REMOTE
+```
 
-The ACC fabric IP is the host fabric address with the last octet set to `.3`:
-`mmgi0` is `200.0.4.2` → ACC `200.0.4.3`, `mmgi1` is `200.0.3.2` → ACC
-`200.0.3.3`, and `mmgt`'s two cards are `200.0.6.3` and `200.0.5.3`. Those do not
-answer ping from the host — the ACC is reached through the IMC, and the fabric IP
-is only `tele_cli`'s `-s` argument. **A failed ping proves nothing here.**
+Run the [preflight checks](#preflight-health-checks) before proceeding. The
+bootstrap re-enables `acc-transport.timer` and the gRPC shadow services;
+it is not a post-cutover maintenance command.
 
-**No credential is baked into the collector or the unit.** `IMC_PASSWORD` — and
-`ACC_TARGETS` on the initiators — are read from `/etc/default/acc-stats`, written
-mode 600 by the installer, which keeps the script and the unit byte-identical
-fleet-wide. The collector exits non-zero with a usage message if `IMC_PASSWORD` is
-unset rather than hanging on an unanswered prompt.
+### Exporter parity and retirement
 
-Core gauges and transport counters are separate to avoid duplicate Prometheus
-series: `acc_stats.prom` contains `acc_cpu_busy_percent`; `acc_transport.prom`
-contains `acc_tele_field`.
+During a sustained loaded window of at least ten minutes, compare the HTTP
+exporter with the four shadow files on `mmgt`. Stage and run the gate there:
 
-The optional gRPC shadow writes `acc_grpc_acc1.prom` and
-`acc_grpc_acc2.prom` with `acc_telemetry_bytes_total{acc=...,counter=...}`.
-It is intentionally not a dashboard input yet. Compare `increase()` for both
-sources over the exact benchmark interval; only then replace the polling
-series.
+```bash
+scp scripts/ipu-poc/check_acc_exporter_parity.py mmgt:/tmp/
+ssh mmgt 'python3 /tmp/check_acc_exporter_parity.py \
+  --textfile-dir /var/lib/node_exporter/textfile-shadow \
+  --duration 600 --output /tmp/acc-exporter-parity.json'
+scp mmgt:/tmp/acc-exporter-parity.json ./acc-exporter-parity.json
+```
 
-Two traps when reading the resulting series:
+Require exit status 0 and `passed=true` in the JSON, and retain it with the run
+artifacts. Then, outside an active benchmark, retire the legacy byte collectors:
 
-- **Transport counters update every 10 s but Prometheus scrapes at 4 s**, so
-  `acc_tele_field` remains a staircase. Use `rate(...[60s]) * 8` for the live
-  RDMA panels so their headline window matches NVMe and LMCache goodput.
-  For a completed benchmark cell, use `increase()` over its exact measured
-  interval rather than a dashboard trend window.
-- **The expected poll-mode floor is ~2.0 busy cores per reporting IPU.** An
-  initiator reading 2.0 is idle, not broken; `mmgt` reads ~4.0 because it has two
-  cards.
+```bash
+ssh mmgt 'bash -s' <<'REMOTE'
+set -euo pipefail
+systemctl disable --now acc-transport.timer acc-grpc-telemetry@{acc1,acc2,acc3,acc4}.service
+systemctl stop acc-transport.service
+if test -f /var/lib/node_exporter/textfile/acc_transport.prom; then
+  mv -n /var/lib/node_exporter/textfile/acc_transport.prom \
+    /var/lib/node_exporter/textfile/acc_transport.prom.retired
+  test ! -f /var/lib/node_exporter/textfile/acc_transport.prom
+fi
+REMOTE
+```
 
-Verify with `curl -s --noproxy '*' localhost:9100/metrics | grep -c
-'^acc_cpu_busy_percent'`. **`--noproxy` is required, not cosmetic** — `mmgi0`
-carries a curl proxy config that intercepts even `localhost` and answers
-`/metrics` with a `403`, which looks exactly like a broken exporter.
+Keep `acc-grpc-tunnel@*` and `acc-stats.timer` running: CPU telemetry still uses
+the SSH collector. If the move fails because a retirement backup already exists,
+preserve that backup separately before retrying. Recheck preflight after
+retirement. If the HTTP path fails, roll back collector retirement with:
 
-## Load-bearing constraints
+```bash
+ssh mmgt 'bash -s' <<'REMOTE'
+set -euo pipefail
+systemctl enable --now acc-transport.timer acc-grpc-telemetry@{acc1,acc2,acc3,acc4}.service
+systemctl start acc-transport.service
+REMOTE
+```
 
-Each of these was learned by getting it wrong first. Preserve them when adapting.
+This restores legacy collection, not the dashboard's `acc_grpc` scrape path.
+Repair that exporter or restore a known-good matching dashboard/config backup
+before trusting panels; preserved shadow files alone do not restore monitoring.
 
-**Timers, not cron.** The original deployment drove `nvme_stats` and `rdma_nic`
-from crontab. A later `sed -i "/rdma_hwcounters_textfile/d"` cleanup took the
-whole crontab with it, leaving both scripts executable with nothing invoking
-them. node_exporter kept serving the stale `.prom` files as if current — which
-renders in Grafana as a flat line, **indistinguishable from a quiet fabric**.
-Drift before repair: mkp1 ~3h, mkp2 ~12h, 254.3 GiB of unaccounted
-`port_rx_bytes`. `install.sh` warns if a cron entry still races the timers.
+### Utilities
 
-**Treat exporter freshness as a dashboard prerequisite.** Check `.prom` mtimes
-before trusting any side-by-side comparison.
+- [`check_mmg_long_range.py`](../../../../../../scripts/ipu-poc/check_mmg_long_range.py)
+  checks RDMA/NVMe metric continuity against local Prometheus on `mmgi1`.
+- [`annotate_mmg_phase.py`](../../../../../../scripts/ipu-poc/annotate_mmg_phase.py)
+  runs on `mmgi1` and annotates the measured overlap in Grafana from fleet result
+  JSON, using the local Docker listener and admin credential in the kit's `.env`.
+- [`probe_acc_collector_overhead.py`](../../../../../../scripts/ipu-poc/probe_acc_collector_overhead.py)
+  runs locally as root on an idle `mmgt`, with `acc_ssh_stats.py` alongside it and
+  `IMC_PASSWORD` exported. It stops/restarts the exporter and ACC CPU collector
+  during off/on/off windows, interrupting telemetry. Never run it during a
+  benchmark; it restores those services on exit from the sampling windows.
 
-**node_exporter's built-in `infiniband` collector does not work on irdma.** It
-reads `ports/<p>/counters/`; irdma exposes only `hw_counters/`. The collector
-hard-fails with `node_scrape_collector_success{collector="infiniband"} 0` and
-emits nothing. `rdma_hwcounters_textfile.sh` exists to replace it.
+## Troubleshooting
 
-**`ethtool -S` is diagnostic only on Falcon.** Its port-byte samples arrive
-through a textfile and can alias with Prometheus scrapes: a short rate window
-can enclose two collector updates or none. It is useful to establish that the
-port is active and to inspect pause or error counters, but it is not the
-payload-throughput authority.
-
-Driver spelling is inconsistent: `port-rx_bytes` but `port-tx-bytes`. The
-collector's `gsub` normalizes both to `port_rx_bytes` / `port_tx_bytes`.
-
-**Falcon is NOT RoCE: the byte-conversion rules below do not carry over.**
-Neither `rdma stat show link` nor `/sys/class/net/<iface>/statistics/rx_bytes`
-work on Falcon/MEV — measured, mkp1 sent 1.25 GiB of RDMA WRITE and netdev
-`tx_bytes` moved **140 bytes**. `hw_counters` *do* work, but as transaction
-counters only.
-
-**RDMA counter direction is asymmetric** (NVMe-oF over irdma, measured):
-
-| Operation | Wire mechanism | Counter | Interpretation |
-|---|---|---|---|
-| NVMe-oF READ | target RDMA-**writes** into initiator memory | `InRdmaWrites` | transaction count; **no valid fixed byte constant on Falcon** |
-| NVMe-oF WRITE | target RDMA-**reads** initiator memory | `InRdmaReads` | transaction count |
-
-`OutRdmaWrites` stays 0 on the initiator. Payloads ≤4 KiB ride in-capsule
-(`OutRdmaSends` only, zero RDMA r/w ops).
-
-On Falcon, bytes per `InRdmaWrite` is stable *within* a block size (±0.3% across
-reps) but varies **13× across** block sizes — measured over all 20 cells of the
-2026-08-12 `remote_xfs` read sweep:
-
-| block size | bytes per `InRdmaWrite` |
-|---|---|
-| 4k | 3,523 |
-| 16k | 14,004 |
-| 144k | 38,991 |
-| 256k | 45,073 |
-| 512k | 45,084 |
-
-It saturates near 45 KB, so the 52,428 B RoCE segment cap does **not** hold
-here. Treat `InRdmaWrites` as a traffic-shape gate and never compare its rate
-across block sizes. The per-cell counter/app-byte ratio used by
-`run_fio_capacity_sweep.sh` stays valid because it is computed at fixed block
-size — the only regime where the counter is stable.
-
-**ACC telemetry is the authoritative Falcon payload-throughput source.** `rtcmd`
-exposes a gRPC telemetry service on the ACC (`10.0.0.35:50051` for mkp1,
-`10.0.0.37:50051` for mkp2). The collector uses the feature-pack generated
-`telemetry_pb2_grpc.TelemetryStub` with `HOST0` and `ULP_RDMA`. `ULP_NVME` does
-not expose the live RC byte counters on this rig.
-
-The controlled 60-second, O_DIRECT Llama-3.1 405B read on 2026-08-12 moved
-715,399,888,896 application bytes. `mkp1 bytes_to_ulp` increased by
-725,366,413,360 bytes (1.0139x), while `mkp2 bytes_from_ulp_rc` increased by
-720,399,569,128 bytes (1.0070x). The primary dashboard panel displays those
-two host-local views of the **same NVMe-oF read payload**; never sum them.
-Both are within the runbook's +/-5% counter/app acceptance band. The other two
-counters moved only 0.03-0.04%, consistent with control traffic.
-
-This establishes the read direction only. Store and mixed-direction mappings
-remain unvalidated, so the dashboard must not infer them from counter names.
-
-**irdma refreshes `hw_counters` asynchronously (~1s).** A delta sampled
-immediately after a workload ends can read 0 — again indistinguishable from no
-traffic. Settle ≥1s; the ad-hoc probes use 2s.
-
-**Sampling aliasing is real.** irdma ~1s + textfile timer + 4s scrape + 15s rate
-window understates peaks: a 94.4 Gbps bench read rendered as a 75.6 Gbps peak.
-Rate panels need a **≥60s measurement window** to be meaningful.
-
-**Grafana datasource uid must be `PROM`.** The dashboard JSON pins it. Changing
-it in `provisioning/datasources/prometheus.yml` imports the dashboard with every
-panel broken.
-
-**The dashboard provider path must not nest inside the provisioning mount.**
-`/etc/grafana/provisioning/dashboards/json` fails at container init — you cannot
-bind-mount under an already read-only bind mount. The JSON lives at
-`/var/lib/grafana/dashboards` instead.
-
-**Every JSON under `dashboards/` is provisioned; there is no hand-import
-copy.** The provider (`provisioning/dashboards/lmcache.yml`) points at
-`/var/lib/grafana/dashboards`, which compose bind-mounts from `dashboards/`
-whole. `mmgt-storage-target.json` is the active MMG-400 dashboard.
-`lmcache-mkp.json` remains only as a legacy dashboard for its original
-mkp1/mkp2 topology; it is expected to show no data on this rig. An earlier
-redundant hand-import copy at the kit root was dropped; do not recreate one
-there.
-
-**The Grafana admin password is not committed.** `docker-compose.yml` declares
-`GRAFANA_PASSWORD` required with no default, so bringing the stack up without it
-fails fast rather than silently accepting a known credential. `up.sh` generates
-a local secret into `.env` (mode 600, gitignored) on first run; export
-`GRAFANA_PASSWORD` yourself to override.
-
-## Known gaps
-
-- **Store and mixed ACC direction mappings remain unvalidated.** The primary
-  panel is deliberately scoped to NVMe-oF reads; do not relabel the remaining
-  counters from their names alone.
-- **The host-only geometry sweep uses one process per host.** It publishes id 0
-  on each initiator; the remaining per-host ports are intentionally idle unless
-  a multi-process driver is selected.
-- **The legacy dashboard is hardcoded to `mkp1` and `mkp2`.** 23 of its 43 queries pin
-  one of those two host labels, and the Block I/O row additionally pins the role
-  split by device — `mkp1` to `md.+` (initiator RAID0), `mkp2` to `nvme.+`
-  (target SSDs). On a differently-named rig roughly half the panels render empty,
-  which reads as a broken stack rather than a naming mismatch. Relabelling the
-  two hosts to `mkp1`/`mkp2` in `prometheus.yml` is cheaper than editing the
-  queries and is what the panel titles assume.
-- **No NVMe IOPS or latency panels** — only throughput, queue depth, and SMART
-  temperature.
-- **No SMART temperature panel anymore.** The role-split Block I/O row replaced
-  the old NVMe row, which carried it.
-- **Prometheus does not replace in-process measurement for per-run figures.** A
-  1–15 s scrape is too coarse for host CPU per GB in particular; that stays
-  bracketed in-process around the measured window. The scrape is for live
-  mid-run visibility and an independent cross-check of the run's own JSON, not
-  for the headline numbers, which the `results/` docs take from the JSON.
-- SELinux is `Enforcing` on mkp1/mkp2 and needed no policy work, since
-  node_exporter reads only `/var/lib/node_exporter/textfile`. A different
-  textfile directory may need a label.
+| Symptom | Possible cause | Check or action |
+|---|---|---|
+| Fabric link is `LINK_UP` but I/O fails | Link state does not establish controller or RDMA health. | Check `nvme list-subsys` and driver/kernel connection errors. Zero visible MRs is not proof of registration failure; require an actual registration error before diagnosing it. |
+| Local `curl /metrics` returns 403 | Localhost traffic intercepted by environment proxy. | Use `curl --noproxy '*' localhost:<port>/metrics`. |
+| InfiniBand exporter shows no data | `irdma` exports `hw_counters/` instead of `ports/<p>/counters/`. | Use `rdma_hwcounters_textfile.sh` instead of node_exporter's built-in infiniband collector. |
+| Grafana panels break after reload | Datasource UID changed. | Ensure datasource UID remains `PROM` in `provisioning/datasources/prometheus.yml`. |
+| Targets wrong after config edit | Incorrect targets, failed reload, or a stale bind mount. | Check `prometheus.yml`, then re-run `up.sh` before the next sweep. It reloads config and recreates Prometheus if mounted content differs. |
+| Textfile metrics missing or frozen | Missing/failed timers, stale files, or permissions/SELinux errors. | Check per-file ages, `systemctl list-timers`, and the collector journal. Check SELinux denials before changing contexts. |

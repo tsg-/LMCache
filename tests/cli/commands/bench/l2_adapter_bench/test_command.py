@@ -907,6 +907,39 @@ def test_sustained_mode_records_per_submit_latencies(
     assert "submits in" in out
 
 
+def test_sustained_result_records_decimal_and_phase_units(tmp_path: Path) -> None:
+    """Host JSON identifies its bytes, time bounds, and throughput units."""
+    command = _MetricsCommand()
+    args = _parse(
+        "--duration-sec",
+        "0.2",
+        "--only",
+        "store",
+        "--key-prefix",
+        "unit-fields",
+        "--num-keys",
+        "2",
+        "--in-flight",
+        "2",
+        "--data-size-kb",
+        "4",
+        adapter_json=_fs_adapter_json(tmp_path),
+    )
+
+    run_l2_adapter_bench(command, args)
+
+    assert command.metrics is not None
+    operation = command.metrics.to_dict()["metrics"]["op_0"]
+    assert 0 < operation["phase_start_time_seconds"]
+    assert operation["phase_end_time_seconds"] >= operation["phase_start_time_seconds"]
+    assert operation["throughput_aggregate_mbps_unit"] == "MiB/s"
+    assert operation["throughput_aggregate_gbps_decimal"] == pytest.approx(
+        operation["throughput_aggregate_mbps"] * 1024**2 * 8 / 1e9,
+        abs=5e-5,
+    )
+    assert operation["throughput_success_gbps_decimal"] >= 0
+
+
 # ---------------------------------------------------------------------------
 # Cross-invocation store keyspace
 # ---------------------------------------------------------------------------

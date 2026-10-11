@@ -5,6 +5,8 @@ set -euo pipefail
 
 OUT_DIR="${OUT_DIR:-/var/lib/node_exporter/textfile}"
 OUT_FILE="$OUT_DIR/numa_stats.prom"
+find "$OUT_DIR" -maxdepth 1 -type f -name 'numa_stats.prom.??????' \
+    -mmin +1 -delete
 TMP_FILE="$(mktemp "$OUT_DIR/numa_stats.prom.XXXXXX")"
 BODY_FILE="$(mktemp /tmp/numa_stats.XXXXXX.prom)"
 SYS_NODE_DIR="${SYS_NODE_DIR:-/sys/devices/system/node}"

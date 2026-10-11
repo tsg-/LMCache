@@ -782,6 +782,23 @@ def test_mixed_window_holds_one_global_limit_and_hits_requested_ratio(
     )
 
 
+def test_mixed_window_records_shared_phase_timestamps() -> None:
+    """Both mixed directions must expose the same live measured window."""
+    adapter = _MixedFakeAdapter()
+    before = time.time()
+    try:
+        load_result, store_result, accepted = _run_mixed(adapter, duration_sec=0.5)
+    finally:
+        adapter.close()
+    after = time.time()
+
+    assert accepted
+    assert before <= load_result.phase_started_at <= after
+    assert load_result.phase_started_at == store_result.phase_started_at
+    assert load_result.phase_started_at < load_result.phase_ended_at <= after
+    assert load_result.phase_ended_at == store_result.phase_ended_at
+
+
 def test_mixed_window_accepts_overlapping_task_ids() -> None:
     """Task id zero is valid concurrently for one store and one load."""
     adapter = _MixedFakeAdapter()

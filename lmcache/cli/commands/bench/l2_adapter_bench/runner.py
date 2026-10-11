@@ -655,6 +655,9 @@ def run_sustained_mixed_window(
             next_store_index += 1
         pending[(operation, task_id)] = (submitted_at, slot)
 
+    phase_start = time.time()
+    load_result.phase_started_at = phase_start
+    store_result.phase_started_at = phase_start
     t_start = time.perf_counter()
     deadline = t_start + duration_sec
     for _ in range(load_result.in_flight):
@@ -725,6 +728,9 @@ def run_sustained_mixed_window(
         elif refill_end == 0.0:
             refill_end = deadline
 
+    phase_end = time.time()
+    load_result.phase_ended_at = phase_end
+    store_result.phase_ended_at = phase_end
     if verify_write_samples and not rejected and not pending:
         if not verify_mixed_write_samples(
             adapter,

@@ -1506,6 +1506,21 @@ def _emit_l2_adapter_metrics(
                 round(r.sustained_window_sec, 3),
             )
             section.add(
+                "phase_start_time_seconds",
+                "Phase start (Unix s)",
+                r.phase_started_at,
+            )
+            section.add(
+                "phase_end_time_seconds",
+                "Phase end after drain (Unix s)",
+                r.phase_ended_at,
+            )
+            section.add(
+                "total_success_bytes",
+                "Successful payload (B)",
+                r.total_success_bytes,
+            )
+            section.add(
                 "drain_tail_sec",
                 "Ramp-down tail (s)",
                 round(r.sustained_drain_sec, 3),
@@ -1597,8 +1612,23 @@ def _emit_l2_adapter_metrics(
         # rates and over-weights fast rounds.
         section.add(
             "throughput_aggregate_mbps",
-            "Throughput aggregate (MB/s)",
+            "Throughput aggregate (MiB/s)",
             round(r.aggregate_throughput_mbps, 2),
+        )
+        section.add(
+            "throughput_aggregate_mbps_unit",
+            "Aggregate unit",
+            "MiB/s",
+        )
+        section.add(
+            "throughput_aggregate_gbps_decimal",
+            "Requested payload (Gb/s decimal)",
+            round(r.aggregate_throughput_mbps * 1024 * 1024 * 8 / 1e9, 6),
+        )
+        section.add(
+            "throughput_success_gbps_decimal",
+            "Successful payload (Gb/s decimal)",
+            round(r.success_throughput_mbps * 1024 * 1024 * 8 / 1e9, 6),
         )
         # Successful-bytes throughput. Emitted whenever it diverges from
         # the requested figure, which means keys were missed or a store
@@ -1606,7 +1636,7 @@ def _emit_l2_adapter_metrics(
         if r.payload_bytes_per_submit > 0 and r.total_success != r.total_keys:
             section.add(
                 "throughput_success_mbps",
-                "Throughput successful (MB/s)",
+                "Throughput successful (MiB/s)",
                 round(r.success_throughput_mbps, 2),
             )
         if not sustained_result:

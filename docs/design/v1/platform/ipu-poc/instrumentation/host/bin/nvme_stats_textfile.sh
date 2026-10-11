@@ -7,6 +7,8 @@ set -euo pipefail
 
 OUT_DIR="/var/lib/node_exporter/textfile"
 OUT_FILE="$OUT_DIR/nvme_stats.prom"
+find "$OUT_DIR" -maxdepth 1 -type f -name 'nvme_stats.prom.??????' \
+    -mmin +1 -delete
 TMP_FILE="$(mktemp "$OUT_DIR/nvme_stats.prom.XXXXXX")"
 
 trap 'rm -f "$TMP_FILE"' EXIT

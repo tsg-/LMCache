@@ -1,6 +1,19 @@
 {
   "annotations": {
-    "list": []
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": false,
+        "iconColor": "rgba(255, 145, 0, 1)",
+        "name": "Measured phases",
+        "type": "dashboard"
+      }
+    ]
   },
   "editable": true,
   "graphTooltip": 1,
@@ -22,7 +35,7 @@
         "type": "prometheus",
         "uid": "PROM"
       },
-      "description": "Application payload throughput per operation, summed across mmgi0-mmgi3 and across warmup+measured. The short-lived benchmark endpoints and continuously sampled target counters can cover different phase windows; use the measured-only goodput panel or end-of-run JSON for a publishable throughput result. Read and write goodput are deliberately not added together.",
+      "description": "Measured-phase LMCache success bytes across four initiators. The first 30s of a measured phase can be low while the rate window fills. Live view only; do not report from tiles.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -30,7 +43,7 @@
             "mode": "fixed"
           },
           "mappings": [],
-          "noValue": "-",
+          "noValue": "no measured phase",
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -78,13 +91,14 @@
             "uid": "PROM"
           },
           "editorMode": "code",
-          "expr": "sum by (operation) (rate(lmcache_bench_l2_success_bytes_total{job=\"lmcache_bench_mmg\",host=~\"mmgi.*\",phase=\"measured\"}[60s])) * 8",
+          "expr": "sum by (operation) (rate(lmcache_bench_l2_success_bytes_total{job=\"lmcache_bench_mmg\",host=~\"mmgi.*\",phase=\"measured\"}[30s])) * 8 and on() (count(up{job=\"lmcache_bench_mmg\",host=~\"mmgi.*\"} == 1) == 4)",
           "legendFormat": "{{operation}}",
-          "range": true,
-          "refId": "A"
+          "range": false,
+          "refId": "A",
+          "instant": true
         }
       ],
-      "title": "LMCache",
+      "title": "LMCache (last 30s)",
       "type": "stat"
     },
     {
@@ -92,7 +106,7 @@
         "type": "prometheus",
         "uid": "PROM"
       },
-      "description": "Aggregate kernel read throughput from the 16 raw NVMe-oF target namespaces, in bits/s. Shares a hue with RDMA WR: the two ends of the read path. The storage stack section shows the same figure in bytes/s.",
+      "description": "Aggregate kernel read throughput from the 16 raw NVMe-oF target namespaces, in bits/s. Shares a hue with RDMA WR: the two ends of the read path. The storage stack section shows the same figure in bytes/s. Live view only; do not report from tiles.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -100,7 +114,7 @@
             "mode": "fixed"
           },
           "mappings": [],
-          "noValue": "-",
+          "noValue": "No data",
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -128,7 +142,7 @@
         "orientation": "horizontal",
         "reduceOptions": {
           "calcs": [
-            "lastNotNull"
+            "last"
           ],
           "fields": "",
           "values": false
@@ -148,13 +162,14 @@
             "uid": "PROM"
           },
           "editorMode": "code",
-          "expr": "sum(rate(node_disk_read_bytes_total{host=\"mmgt\",device=~\"$device\"}[60s])) * 8",
+          "expr": "sum(rate(node_disk_read_bytes_total{host=\"mmgt\",device=~\"$device\"}[30s])) * 8",
           "legendFormat": "NVMe read",
-          "range": true,
-          "refId": "A"
+          "range": false,
+          "refId": "A",
+          "instant": true
         }
       ],
-      "title": "NVMe RD",
+      "title": "NVMe RD (last 30s)",
       "type": "stat"
     },
     {
@@ -162,7 +177,7 @@
         "type": "prometheus",
         "uid": "PROM"
       },
-      "description": "Falcon tele_cli acc_tele_field bytes_from_ulp_rc, summed across all four IPUs on MMG Target: target-side ULP-to-fabric payload. The dashboard labels this target TX direction RDMA WR. The counter latches every 30s; rate() over 90s spans three latches for a live value without the startup dilution of a five-minute window.",
+      "description": "Falcon ACC payload read at Prometheus scrape time across all four target ACCs. The aggregate is hidden when any ACC RPC fails. Live view only; do not report from tiles.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -170,7 +185,7 @@
             "mode": "fixed"
           },
           "mappings": [],
-          "noValue": "-",
+          "noValue": "No data",
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -198,7 +213,7 @@
         "orientation": "horizontal",
         "reduceOptions": {
           "calcs": [
-            "lastNotNull"
+            "last"
           ],
           "fields": "",
           "values": false
@@ -218,13 +233,14 @@
             "uid": "PROM"
           },
           "editorMode": "code",
-          "expr": "sum(rate(acc_tele_field{host=\"mmgt\",field=\"bytes_from_ulp_rc\"}[90s])) * 8",
+          "expr": "sum(rate(acc_tele_field{job=\"acc_grpc\",host=\"mmgt\",field=\"bytes_from_ulp_rc\"}[30s])) * 8 and on() (acc_telemetry_exporter_complete{job=\"acc_grpc\",host=\"mmgt\"} == 1)",
           "legendFormat": "TX",
-          "range": true,
-          "refId": "A"
+          "range": false,
+          "refId": "A",
+          "instant": true
         }
       ],
-      "title": "RDMA WR",
+      "title": "RDMA WR (last 30s)",
       "type": "stat"
     },
     {
@@ -232,7 +248,7 @@
         "type": "prometheus",
         "uid": "PROM"
       },
-      "description": "Aggregate kernel write throughput to the 16 raw NVMe-oF target namespaces, in bits/s. Shares a hue with RDMA RD: the two ends of the write path. Reads 0 throughout a Load-only (retrieve) window, which is the expected result and not a dead query - check the operation names on LMCache to tell the two cases apart.",
+      "description": "Aggregate kernel write throughput to the 16 raw NVMe-oF target namespaces, in bits/s. Shares a hue with RDMA RD: the two ends of the write path. Reads 0 throughout a Load-only (retrieve) window, which is the expected result and not a dead query - check the operation names on LMCache to tell the two cases apart. Live view only; do not report from tiles.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -240,7 +256,7 @@
             "mode": "fixed"
           },
           "mappings": [],
-          "noValue": "-",
+          "noValue": "No data",
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -268,7 +284,7 @@
         "orientation": "horizontal",
         "reduceOptions": {
           "calcs": [
-            "lastNotNull"
+            "last"
           ],
           "fields": "",
           "values": false
@@ -288,13 +304,14 @@
             "uid": "PROM"
           },
           "editorMode": "code",
-          "expr": "sum(rate(node_disk_written_bytes_total{host=\"mmgt\",device=~\"$device\"}[60s])) * 8",
+          "expr": "sum(rate(node_disk_written_bytes_total{host=\"mmgt\",device=~\"$device\"}[30s])) * 8",
           "legendFormat": "NVMe write",
-          "range": true,
-          "refId": "A"
+          "range": false,
+          "refId": "A",
+          "instant": true
         }
       ],
-      "title": "NVMe WR",
+      "title": "NVMe WR (last 30s)",
       "type": "stat"
     },
     {
@@ -302,7 +319,7 @@
         "type": "prometheus",
         "uid": "PROM"
       },
-      "description": "Falcon tele_cli acc_tele_field bytes_to_ulp, summed across all four IPUs on MMG Target: target-side fabric-to-ULP payload. The dashboard labels this target RX direction RDMA RD. It sits near zero throughout a Load-only window by construction. The 90s rate spans three 30s latches.",
+      "description": "Falcon ACC payload read at Prometheus scrape time across all four target ACCs. The aggregate is hidden when any ACC RPC fails. Live view only; do not report from tiles.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -310,7 +327,7 @@
             "mode": "fixed"
           },
           "mappings": [],
-          "noValue": "-",
+          "noValue": "No data",
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -338,7 +355,7 @@
         "orientation": "horizontal",
         "reduceOptions": {
           "calcs": [
-            "lastNotNull"
+            "last"
           ],
           "fields": "",
           "values": false
@@ -358,13 +375,14 @@
             "uid": "PROM"
           },
           "editorMode": "code",
-          "expr": "sum(rate(acc_tele_field{host=\"mmgt\",field=\"bytes_to_ulp\"}[90s])) * 8",
+          "expr": "sum(rate(acc_tele_field{job=\"acc_grpc\",host=\"mmgt\",field=\"bytes_to_ulp\"}[30s])) * 8 and on() (acc_telemetry_exporter_complete{job=\"acc_grpc\",host=\"mmgt\"} == 1)",
           "legendFormat": "RX",
-          "range": true,
-          "refId": "A"
+          "range": false,
+          "refId": "A",
+          "instant": true
         }
       ],
-      "title": "RDMA RD",
+      "title": "RDMA RD (last 30s)",
       "type": "stat"
     },
     {
@@ -372,7 +390,7 @@
         "type": "prometheus",
         "uid": "PROM"
       },
-      "description": "Falcon payload handled in both target directions: ULP-to-fabric TX (RDMA WR) plus fabric-to-ULP RX (RDMA RD), summed across all four IPUs. This is bidirectional aggregate payload, not a single-direction link-rate measurement.",
+      "description": "Falcon ACC payload read at Prometheus scrape time across all four target ACCs. The aggregate is hidden when any ACC RPC fails. Live view only; do not report from tiles.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -380,7 +398,7 @@
             "mode": "fixed"
           },
           "mappings": [],
-          "noValue": "-",
+          "noValue": "No data",
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -408,7 +426,7 @@
         "orientation": "horizontal",
         "reduceOptions": {
           "calcs": [
-            "lastNotNull"
+            "last"
           ],
           "fields": "",
           "values": false
@@ -428,13 +446,14 @@
             "uid": "PROM"
           },
           "editorMode": "code",
-          "expr": "sum(rate(acc_tele_field{host=\"mmgt\",field=~\"bytes_from_ulp_rc|bytes_to_ulp\"}[90s])) * 8",
+          "expr": "sum(rate(acc_tele_field{job=\"acc_grpc\",host=\"mmgt\",field=~\"bytes_from_ulp_rc|bytes_to_ulp\"}[30s])) * 8 and on() (acc_telemetry_exporter_complete{job=\"acc_grpc\",host=\"mmgt\"} == 1)",
           "legendFormat": "TX + RX",
-          "range": true,
-          "refId": "A"
+          "range": false,
+          "refId": "A",
+          "instant": true
         }
       ],
-      "title": "Bidirectional RDMA Payload",
+      "title": "Bidirectional RDMA Payload (last 30s)",
       "type": "stat"
     },
     {
@@ -487,7 +506,7 @@
         "orientation": "horizontal",
         "reduceOptions": {
           "calcs": [
-            "lastNotNull"
+            "last"
           ],
           "fields": "",
           "values": false
@@ -509,8 +528,9 @@
           "editorMode": "code",
           "expr": "sum(rate(numa_node_cpu_seconds_total{host=\"mmgt\",mode!~\"idle|iowait|guest|guest_nice\"}[1m]))",
           "legendFormat": "cores",
-          "range": true,
-          "refId": "A"
+          "range": false,
+          "refId": "A",
+          "instant": true
         }
       ],
       "title": "Target CPU Busy",
@@ -566,7 +586,7 @@
         "orientation": "auto",
         "reduceOptions": {
           "calcs": [
-            "lastNotNull"
+            "last"
           ],
           "fields": "",
           "values": false
@@ -588,8 +608,9 @@
           "editorMode": "code",
           "expr": "sum(acc_cpu_busy_percent{host=\"mmgt\",acc=\"acc2\",core=~\"cpu[0-9]+\"}) / 100 or vector(NaN)",
           "legendFormat": "IPU1",
-          "range": true,
-          "refId": "A"
+          "range": false,
+          "refId": "A",
+          "instant": true
         },
         {
           "datasource": {
@@ -599,8 +620,9 @@
           "editorMode": "code",
           "expr": "sum(acc_cpu_busy_percent{host=\"mmgt\",acc=\"acc1\",core=~\"cpu[0-9]+\"}) / 100 or vector(NaN)",
           "legendFormat": "IPU2",
-          "range": true,
-          "refId": "B"
+          "range": false,
+          "refId": "B",
+          "instant": true
         },
         {
           "datasource": {
@@ -610,8 +632,9 @@
           "editorMode": "code",
           "expr": "sum(acc_cpu_busy_percent{host=\"mmgt\",acc=\"acc3\",core=~\"cpu[0-9]+\"}) / 100 or vector(NaN)",
           "legendFormat": "IPU3",
-          "range": true,
-          "refId": "C"
+          "range": false,
+          "refId": "C",
+          "instant": true
         },
         {
           "datasource": {
@@ -621,8 +644,9 @@
           "editorMode": "code",
           "expr": "sum(acc_cpu_busy_percent{host=\"mmgt\",acc=\"acc4\",core=~\"cpu[0-9]+\"}) / 100 or vector(NaN)",
           "legendFormat": "IPU4",
-          "range": true,
-          "refId": "D"
+          "range": false,
+          "refId": "D",
+          "instant": true
         }
       ],
       "title": "Target IPU Cores Busy",
@@ -669,7 +693,7 @@
         "orientation": "horizontal",
         "reduceOptions": {
           "calcs": [
-            "lastNotNull"
+            "last"
           ],
           "fields": "",
           "values": false
@@ -691,8 +715,9 @@
           "editorMode": "code",
           "expr": "sum(pcm_memory_bandwidth_megabytes_per_second{host=\"mmgt\"})",
           "legendFormat": "DRAM bandwidth",
-          "range": true,
-          "refId": "A"
+          "range": false,
+          "refId": "A",
+          "instant": true
         }
       ],
       "title": "Target DRAM BW",
@@ -748,7 +773,7 @@
         "orientation": "auto",
         "reduceOptions": {
           "calcs": [
-            "lastNotNull"
+            "last"
           ],
           "fields": "",
           "values": false
@@ -770,8 +795,9 @@
           "editorMode": "code",
           "expr": "sum(acc_cpu_busy_percent{host=\"mmgi0\",core=~\"cpu[0-9]+\"}) / 100 or vector(NaN)",
           "legendFormat": "I1",
-          "range": true,
-          "refId": "A"
+          "range": false,
+          "refId": "A",
+          "instant": true
         },
         {
           "datasource": {
@@ -781,8 +807,9 @@
           "editorMode": "code",
           "expr": "sum(acc_cpu_busy_percent{host=\"mmgi1\",core=~\"cpu[0-9]+\"}) / 100 or vector(NaN)",
           "legendFormat": "I2",
-          "range": true,
-          "refId": "B"
+          "range": false,
+          "refId": "B",
+          "instant": true
         },
         {
           "datasource": {
@@ -792,8 +819,9 @@
           "editorMode": "code",
           "expr": "sum(acc_cpu_busy_percent{host=\"mmgi2\",core=~\"cpu[0-9]+\"}) / 100 or vector(NaN)",
           "legendFormat": "I3",
-          "range": true,
-          "refId": "C"
+          "range": false,
+          "refId": "C",
+          "instant": true
         },
         {
           "datasource": {
@@ -803,8 +831,9 @@
           "editorMode": "code",
           "expr": "sum(acc_cpu_busy_percent{host=\"mmgi3\",core=~\"cpu[0-9]+\"}) / 100 or vector(NaN)",
           "legendFormat": "I4",
-          "range": true,
-          "refId": "D"
+          "range": false,
+          "refId": "D",
+          "instant": true
         }
       ],
       "title": "Initiator IPU Cores Busy",
@@ -842,7 +871,7 @@
         "orientation": "auto",
         "reduceOptions": {
           "calcs": [
-            "lastNotNull"
+            "last"
           ],
           "fields": "",
           "values": false
@@ -864,8 +893,9 @@
           "editorMode": "code",
           "expr": "sum(nvmeof_configured_io_qps_total{host=\"mmgi0\"}) or vector(NaN)",
           "legendFormat": "I1",
-          "range": true,
-          "refId": "A"
+          "range": false,
+          "refId": "A",
+          "instant": true
         },
         {
           "datasource": {
@@ -875,8 +905,9 @@
           "editorMode": "code",
           "expr": "sum(nvmeof_configured_io_qps_total{host=\"mmgi1\"}) or vector(NaN)",
           "legendFormat": "I2",
-          "range": true,
-          "refId": "B"
+          "range": false,
+          "refId": "B",
+          "instant": true
         },
         {
           "datasource": {
@@ -886,8 +917,9 @@
           "editorMode": "code",
           "expr": "sum(nvmeof_configured_io_qps_total{host=\"mmgi2\"}) or vector(NaN)",
           "legendFormat": "I3",
-          "range": true,
-          "refId": "C"
+          "range": false,
+          "refId": "C",
+          "instant": true
         },
         {
           "datasource": {
@@ -897,8 +929,9 @@
           "editorMode": "code",
           "expr": "sum(nvmeof_configured_io_qps_total{host=\"mmgi3\"}) or vector(NaN)",
           "legendFormat": "I4",
-          "range": true,
-          "refId": "D"
+          "range": false,
+          "refId": "D",
+          "instant": true
         }
       ],
       "title": "Initiator QPs Configured",
@@ -951,7 +984,7 @@
         "orientation": "horizontal",
         "reduceOptions": {
           "calcs": [
-            "lastNotNull"
+            "last"
           ],
           "fields": "",
           "values": false
@@ -973,8 +1006,9 @@
           "editorMode": "code",
           "expr": "(100 * (1 - (sum(pcm_memory_bandwidth_megabytes_per_second{host=\"mmgt\"}) * 1e6) / (sum(pcm_pcie_bandwidth_bytes_per_second{host=\"mmgt\",classification=\"total\"})))) >= 0",
           "legendFormat": "absorbed",
-          "range": true,
-          "refId": "A"
+          "range": false,
+          "refId": "A",
+          "instant": true
         }
       ],
       "title": "Target DDIO Absorption",
@@ -1027,7 +1061,7 @@
         "orientation": "vertical",
         "reduceOptions": {
           "calcs": [
-            "lastNotNull"
+            "last"
           ],
           "fields": "",
           "values": false
@@ -1049,8 +1083,9 @@
           "editorMode": "code",
           "expr": "(100 * sum by (direction, socket) (pcm_pcie_bandwidth_bytes_per_second{host=\"mmgt\",socket=\"1\",classification=\"hit\"}) / sum by (direction, socket) (pcm_pcie_bandwidth_bytes_per_second{host=\"mmgt\",socket=\"1\",classification=~\"hit|miss\"})) >= 0 and on (direction, socket) (pcm_pcie_bandwidth_bytes_per_second{host=\"mmgt\",socket=\"1\",classification=\"total\"} > 1e9)",
           "legendFormat": "{{direction}}",
-          "range": true,
-          "refId": "A"
+          "range": false,
+          "refId": "A",
+          "instant": true
         }
       ],
       "title": "Target LLC Hit% \u2014 socket 1",
@@ -1103,7 +1138,7 @@
         "orientation": "vertical",
         "reduceOptions": {
           "calcs": [
-            "lastNotNull"
+            "last"
           ],
           "fields": "",
           "values": false
@@ -1125,8 +1160,9 @@
           "editorMode": "code",
           "expr": "(100 * sum by (direction, socket) (pcm_pcie_bandwidth_bytes_per_second{host=\"mmgt\",socket=\"0\",classification=\"hit\"}) / sum by (direction, socket) (pcm_pcie_bandwidth_bytes_per_second{host=\"mmgt\",socket=\"0\",classification=~\"hit|miss\"})) >= 0 and on (direction, socket) (pcm_pcie_bandwidth_bytes_per_second{host=\"mmgt\",socket=\"0\",classification=\"total\"} > 1e9)",
           "legendFormat": "{{direction}}",
-          "range": true,
-          "refId": "A"
+          "range": false,
+          "refId": "A",
+          "instant": true
         }
       ],
       "title": "Target LLC Hit% \u2014 socket 0",
@@ -1420,7 +1456,7 @@
         "code": {
           "language": "plaintext"
         },
-        "content": "**`operation`** is the phase: `Load` is retrieve (reads), `Store` is insert (writes). The names appear on the **LMCache** tile above.\n\nIn a `Load`-only window **NVMe WR** and **RDMA RD** read ~0 by construction - that is the read path confirming itself, not a dead query. **LMCache**, **NVMe RD**, and **RDMA WR** carry the same read-response payload at successive stages; brief warmup-to-measured transitions can still differ.\n\n**RDMA WR = target-side ULP-to-fabric TX**, the target response path; **RDMA RD = target-side fabric-to-ULP RX**. Live tiles use a 90s rate across three Falcon latches. The Falcon history chart averages exact counter growth across the selected range.",
+        "content": "**`operation`** is the phase: `Load` is retrieve (reads), `Store` is insert (writes). The names appear on the **LMCache** tile above.\n\nIn a `Load`-only window **NVMe WR** and **RDMA RD** read ~0 by construction - that is the read path confirming itself, not a dead query. **LMCache**, **NVMe RD**, and **RDMA WR** carry the same read-response payload at successive stages; brief warmup-to-measured transitions can still differ.\n\n**RDMA WR = target-side ULP-to-fabric TX**, the target response path; **RDMA RD = target-side fabric-to-ULP RX**. Live tiles use a 30s rate from scrape-time gRPC reads; Prometheus scrapes every 4s. The Falcon history chart uses the Grafana rate window. A missing ACC hides fleet totals.",
         "mode": "markdown"
       },
       "title": "Reading this section",
@@ -1431,7 +1467,7 @@
         "type": "prometheus",
         "uid": "PROM"
       },
-      "description": "Application payload goodput reported by the running bench l2 processes on the mmg initiators. The Prometheus endpoint is short-lived and exists only while bench l2 is running. Use the end-of-run JSON and counter gate for publishable throughput; this panel aligns the workload with the target-side host and NVMe trends.",
+      "description": "Application payload goodput reported by the running bench l2 processes on the mmg initiators. The measured-phase series starts with the phase, so its rate reads low until the rate window fills; do not average the whole plotted curve for a 60s phase. Use the end-of-run JSON and counter gate for publishable throughput; this panel aligns the workload with the target-side host and NVMe trends.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -1507,7 +1543,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (operation) (rate(lmcache_bench_l2_success_bytes_total{job=\"lmcache_bench_mmg\",host=~\"mmgi.*\",phase=\"measured\"}[60s])) * 8",
+          "expr": "sum by (operation) (rate(lmcache_bench_l2_success_bytes_total{job=\"lmcache_bench_mmg\",host=~\"mmgi.*\",phase=\"measured\"}[$__rate_interval])) * 8",
           "legendFormat": "aggregate {{operation}}",
           "refId": "A"
         }
@@ -1520,7 +1556,7 @@
         "type": "prometheus",
         "uid": "PROM"
       },
-      "description": "Total application payload goodput per initiator process. The Prometheus endpoint is short-lived and exists only while bench l2 is running. Operations are summed here to expose imbalance across mmgi0-mmgi3 without combining the read and write aggregate lines.",
+      "description": "Total application payload goodput per initiator process. The Prometheus endpoint is short-lived and exists only while bench l2 is running. The measured-phase series starts with the phase, so its rate reads low until the rate window fills. Operations are summed here to expose imbalance across mmgi0-mmgi3 without combining the read and write aggregate lines.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -1686,7 +1722,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (host, initiator) (rate(lmcache_bench_l2_success_bytes_total{job=\"lmcache_bench_mmg\",host=~\"mmgi.*\",phase=\"measured\"}[60s])) * 8",
+          "expr": "sum by (host, initiator) (rate(lmcache_bench_l2_success_bytes_total{job=\"lmcache_bench_mmg\",host=~\"mmgi.*\",phase=\"measured\"}[$__rate_interval])) * 8",
           "legendFormat": "{{host}} init {{initiator}}",
           "refId": "A"
         }
@@ -1708,14 +1744,14 @@
             "type": "prometheus",
             "uid": "PROM"
           },
-          "description": "Current completed-submit rate from the short-lived bench l2 Prometheus endpoints. No active run means the endpoints are no longer being scraped.",
+          "description": "Current measured-phase completed-submit rate from the short-lived bench l2 Prometheus endpoints. The series is absent during warmup and after the run.",
           "fieldConfig": {
             "defaults": {
               "color": {
                 "fixedColor": "text",
                 "mode": "fixed"
               },
-              "noValue": "No active run",
+              "noValue": "no measured phase",
               "unit": "ops"
             }
           },
@@ -1747,14 +1783,14 @@
           },
           "targets": [
             {
-              "expr": "sum(rate(lmcache_bench_l2_completed_submits_total{job=\"lmcache_bench_mmg\",host=~\"mmgi.*\",phase=\"measured\"}[60s]) and on (host, initiator) (up{job=\"lmcache_bench_mmg\",host=~\"mmgi.*\"} == 1))",
+              "expr": "sum(rate(lmcache_bench_l2_completed_submits_total{job=\"lmcache_bench_mmg\",host=~\"mmgi.*\",phase=\"measured\"}[30s]) and on (host, initiator) (up{job=\"lmcache_bench_mmg\",host=~\"mmgi.*\"} == 1))",
               "instant": true,
               "legendFormat": "aggregate",
               "range": false,
               "refId": "A"
             }
           ],
-          "title": "LMCache completed submits/s",
+          "title": "LMCache completed submits/s (last 30s)",
           "type": "stat"
         },
         {
@@ -1762,14 +1798,14 @@
             "type": "prometheus",
             "uid": "PROM"
           },
-          "description": "Mean submit-to-completion latency over the query window from the short-lived bench l2 Prometheus endpoints. The endpoint intentionally does not expose live percentiles; use the final benchmark summary for p50/p99.",
+          "description": "Mean measured-phase submit-to-completion latency over the query window from the short-lived bench l2 Prometheus endpoints. The series is absent during warmup and after the run. The endpoint does not expose live percentiles; use the final benchmark summary for p50/p99.",
           "fieldConfig": {
             "defaults": {
               "color": {
                 "fixedColor": "text",
                 "mode": "fixed"
               },
-              "noValue": "No active run",
+              "noValue": "no measured phase",
               "unit": "s"
             }
           },
@@ -1801,14 +1837,14 @@
           },
           "targets": [
             {
-              "expr": "sum by (operation) (rate(lmcache_bench_l2_submit_latency_seconds_total{job=\"lmcache_bench_mmg\",host=~\"mmgi.*\",phase=\"measured\"}[60s]) and on (host, initiator) (up{job=\"lmcache_bench_mmg\",host=~\"mmgi.*\"} == 1)) / sum by (operation) (rate(lmcache_bench_l2_completed_submits_total{job=\"lmcache_bench_mmg\",host=~\"mmgi.*\",phase=\"measured\"}[60s]) and on (host, initiator) (up{job=\"lmcache_bench_mmg\",host=~\"mmgi.*\"} == 1))",
+              "expr": "sum by (operation) (rate(lmcache_bench_l2_submit_latency_seconds_total{job=\"lmcache_bench_mmg\",host=~\"mmgi.*\",phase=\"measured\"}[30s]) and on (host, initiator) (up{job=\"lmcache_bench_mmg\",host=~\"mmgi.*\"} == 1)) / sum by (operation) (rate(lmcache_bench_l2_completed_submits_total{job=\"lmcache_bench_mmg\",host=~\"mmgi.*\",phase=\"measured\"}[30s]) and on (host, initiator) (up{job=\"lmcache_bench_mmg\",host=~\"mmgi.*\"} == 1))",
               "instant": true,
               "legendFormat": "{{operation}}",
               "range": false,
               "refId": "A"
             }
           ],
-          "title": "LMCache mean submit latency by operation",
+          "title": "LMCache mean submit latency by operation (last 30s)",
           "type": "stat"
         },
         {
@@ -1824,7 +1860,7 @@
                 "mode": "fixed"
               },
               "min": 0,
-              "noValue": "No active run"
+              "noValue": "idle"
             }
           },
           "gridPos": {
@@ -1904,7 +1940,7 @@
             "showPoints": "never",
             "spanNulls": false
           },
-          "unit": "Bps"
+          "unit": "bps"
         },
         "overrides": []
       },
@@ -1929,12 +1965,12 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(node_disk_read_bytes_total{host=\"mmgt\",device=~\"$device\"}[60s]))",
+          "expr": "sum(rate(node_disk_read_bytes_total{host=\"mmgt\",device=~\"$device\"}[$__rate_interval])) * 8",
           "legendFormat": "aggregate",
           "refId": "A"
         }
       ],
-      "title": "NVMe read throughput (bytes/s)",
+      "title": "NVMe read throughput (bits/s)",
       "type": "timeseries"
     },
     {
@@ -1960,7 +1996,7 @@
             "showPoints": "never",
             "spanNulls": false
           },
-          "unit": "Bps"
+          "unit": "bps"
         },
         "overrides": []
       },
@@ -1985,12 +2021,12 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(node_disk_written_bytes_total{host=\"mmgt\",device=~\"$device\"}[60s]))",
+          "expr": "sum(rate(node_disk_written_bytes_total{host=\"mmgt\",device=~\"$device\"}[$__rate_interval])) * 8",
           "legendFormat": "aggregate",
           "refId": "A"
         }
       ],
-      "title": "NVMe write throughput (bytes/s)",
+      "title": "NVMe write throughput (bits/s)",
       "type": "timeseries"
     },
     {
@@ -2027,7 +2063,7 @@
             "showPoints": "never",
             "spanNulls": false
           },
-          "unit": "Bps"
+          "unit": "bps"
         },
         "overrides": []
       },
@@ -2052,12 +2088,12 @@
       },
       "targets": [
         {
-          "expr": "sum by (host) (rate(node_disk_read_bytes_total{host=~\"mmgi[0-3]\",device=\"md0\"}[60s]))",
+          "expr": "sum by (host) (rate(node_disk_read_bytes_total{host=~\"mmgi[0-3]\",device=\"md0\"}[$__rate_interval])) * 8",
           "legendFormat": "{{host}}",
           "refId": "A"
         }
       ],
-      "title": "Initiator md0 read throughput (bytes/s)",
+      "title": "Initiator md0 read throughput (bits/s)",
       "type": "timeseries"
     },
     {
@@ -2082,7 +2118,7 @@
             "showPoints": "never",
             "spanNulls": false
           },
-          "unit": "Bps"
+          "unit": "bps"
         },
         "overrides": []
       },
@@ -2107,12 +2143,12 @@
       },
       "targets": [
         {
-          "expr": "sum by (host) (rate(node_disk_written_bytes_total{host=~\"mmgi[0-3]\",device=\"md0\"}[60s]))",
+          "expr": "sum by (host) (rate(node_disk_written_bytes_total{host=~\"mmgi[0-3]\",device=\"md0\"}[$__rate_interval])) * 8",
           "legendFormat": "{{host}}",
           "refId": "A"
         }
       ],
-      "title": "Initiator md0 write throughput (bytes/s)",
+      "title": "Initiator md0 write throughput (bits/s)",
       "type": "timeseries"
     },
     {
@@ -2143,7 +2179,7 @@
                 "showPoints": "never",
                 "spanNulls": false
               },
-              "unit": "Bps"
+              "unit": "bps"
             },
             "overrides": [
               {
@@ -2295,12 +2331,12 @@
           },
           "targets": [
             {
-              "expr": "rate(node_disk_read_bytes_total{host=\"mmgt\",device=~\"$device\"}[30s])",
+              "expr": "rate(node_disk_read_bytes_total{host=\"mmgt\",device=~\"$device\"}[$__rate_interval]) * 8",
               "legendFormat": "{{device}}",
               "refId": "A"
             }
           ],
-          "title": "Per-drive read throughput (bytes/s)",
+          "title": "Per-drive read throughput (bits/s)",
           "type": "timeseries"
         },
         {
@@ -2322,7 +2358,7 @@
                 "showPoints": "never",
                 "spanNulls": false
               },
-              "unit": "Bps"
+              "unit": "bps"
             },
             "overrides": [
               {
@@ -2474,12 +2510,12 @@
           },
           "targets": [
             {
-              "expr": "rate(node_disk_written_bytes_total{host=\"mmgt\",device=~\"$device\"}[30s])",
+              "expr": "rate(node_disk_written_bytes_total{host=\"mmgt\",device=~\"$device\"}[$__rate_interval]) * 8",
               "legendFormat": "{{device}}",
               "refId": "A"
             }
           ],
-          "title": "Per-drive write throughput (bytes/s)",
+          "title": "Per-drive write throughput (bits/s)",
           "type": "timeseries"
         },
         {
@@ -3558,7 +3594,7 @@
         "type": "prometheus",
         "uid": "PROM"
       },
-      "description": "Four-IPU Falcon tele_cli payload trends. RDMA WR is target-side ULP-to-fabric TX; RDMA RD is target-side fabric-to-ULP RX. The chart averages counter growth across the selected range.",
+      "description": "Four target ACC payload trends read at Prometheus scrape time. A missing ACC hides the fleet total.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -3634,12 +3670,12 @@
       },
       "targets": [
         {
-          "expr": "sum(increase(acc_tele_field{host=\"mmgt\",field=\"bytes_to_ulp\"}[$__range])) / $__range_s * 8",
+          "expr": "sum(rate(acc_tele_field{job=\"acc_grpc\",host=\"mmgt\",field=\"bytes_to_ulp\"}[$__rate_interval])) * 8 and on() (acc_telemetry_exporter_complete{job=\"acc_grpc\",host=\"mmgt\"} == 1)",
           "legendFormat": "RDMA RD \u00b7 Fabric \u2192 ULP",
           "refId": "A"
         },
         {
-          "expr": "sum(increase(acc_tele_field{host=\"mmgt\",field=\"bytes_from_ulp_rc\"}[$__range])) / $__range_s * 8",
+          "expr": "sum(rate(acc_tele_field{job=\"acc_grpc\",host=\"mmgt\",field=\"bytes_from_ulp_rc\"}[$__rate_interval])) * 8 and on() (acc_telemetry_exporter_complete{job=\"acc_grpc\",host=\"mmgt\"} == 1)",
           "legendFormat": "RDMA WR \u00b7 ULP \u2192 Fabric",
           "refId": "B"
         }
@@ -3886,7 +3922,7 @@
             "orientation": "horizontal",
             "reduceOptions": {
               "calcs": [
-                "lastNotNull"
+                "last"
               ],
               "fields": "",
               "values": false
@@ -3908,8 +3944,9 @@
               "editorMode": "code",
               "expr": "sum(acc_cpu_busy_percent{host=\"mmgt\",acc=\"acc2\",core=~\"cpu[0-9]+\"}) / 100",
               "legendFormat": "ACC busy",
-              "range": true,
-              "refId": "A"
+              "range": false,
+              "refId": "A",
+              "instant": true
             }
           ],
           "title": "IPU1 \u00b7 ACC busy",
@@ -3920,7 +3957,7 @@
             "type": "prometheus",
             "uid": "PROM"
           },
-          "description": "Falcon payload delivered from the fabric to ULP.",
+          "description": "Falcon payload delivered from the fabric to ULP. Live view only; do not report from tiles.",
           "fieldConfig": {
             "defaults": {
               "color": {
@@ -3928,7 +3965,7 @@
                 "mode": "fixed"
               },
               "mappings": [],
-              "noValue": "-",
+              "noValue": "No data",
               "thresholds": {
                 "mode": "absolute",
                 "steps": [
@@ -3956,7 +3993,7 @@
             "orientation": "horizontal",
             "reduceOptions": {
               "calcs": [
-                "lastNotNull"
+                "last"
               ],
               "fields": "",
               "values": false
@@ -3976,13 +4013,14 @@
                 "uid": "PROM"
               },
               "editorMode": "code",
-              "expr": "sum(rate(acc_tele_field{host=\"mmgt\",acc=\"acc2\",field=\"bytes_to_ulp\"}[90s])) * 8",
+              "expr": "sum(rate(acc_tele_field{job=\"acc_grpc\",host=\"mmgt\",acc=\"acc2\",field=\"bytes_to_ulp\"}[30s])) * 8 and on() (acc_telemetry_collector_success{job=\"acc_grpc\",host=\"mmgt\",acc=\"acc2\"} == 1)",
               "legendFormat": "RDMA RX",
-              "range": true,
-              "refId": "A"
+              "range": false,
+              "refId": "A",
+              "instant": true
             }
           ],
-          "title": "IPU1 \u00b7 RDMA RD",
+          "title": "IPU1 \u00b7 RDMA RD (last 30s)",
           "type": "stat"
         },
         {
@@ -3990,7 +4028,7 @@
             "type": "prometheus",
             "uid": "PROM"
           },
-          "description": "Falcon RC payload accepted from ULP for the fabric.",
+          "description": "Falcon RC payload accepted from ULP for the fabric. Live view only; do not report from tiles.",
           "fieldConfig": {
             "defaults": {
               "color": {
@@ -3998,7 +4036,7 @@
                 "mode": "fixed"
               },
               "mappings": [],
-              "noValue": "-",
+              "noValue": "No data",
               "thresholds": {
                 "mode": "absolute",
                 "steps": [
@@ -4026,7 +4064,7 @@
             "orientation": "horizontal",
             "reduceOptions": {
               "calcs": [
-                "lastNotNull"
+                "last"
               ],
               "fields": "",
               "values": false
@@ -4046,13 +4084,14 @@
                 "uid": "PROM"
               },
               "editorMode": "code",
-              "expr": "sum(rate(acc_tele_field{host=\"mmgt\",acc=\"acc2\",field=\"bytes_from_ulp_rc\"}[90s])) * 8",
+              "expr": "sum(rate(acc_tele_field{job=\"acc_grpc\",host=\"mmgt\",acc=\"acc2\",field=\"bytes_from_ulp_rc\"}[30s])) * 8 and on() (acc_telemetry_collector_success{job=\"acc_grpc\",host=\"mmgt\",acc=\"acc2\"} == 1)",
               "legendFormat": "RDMA TX",
-              "range": true,
-              "refId": "A"
+              "range": false,
+              "refId": "A",
+              "instant": true
             }
           ],
-          "title": "IPU1 \u00b7 RDMA WR",
+          "title": "IPU1 \u00b7 RDMA WR (last 30s)",
           "type": "stat"
         },
         {
@@ -4105,7 +4144,7 @@
             "orientation": "horizontal",
             "reduceOptions": {
               "calcs": [
-                "lastNotNull"
+                "last"
               ],
               "fields": "",
               "values": false
@@ -4127,8 +4166,9 @@
               "editorMode": "code",
               "expr": "sum(acc_cpu_busy_percent{host=\"mmgt\",acc=\"acc1\",core=~\"cpu[0-9]+\"}) / 100",
               "legendFormat": "ACC busy",
-              "range": true,
-              "refId": "A"
+              "range": false,
+              "refId": "A",
+              "instant": true
             }
           ],
           "title": "IPU2 \u00b7 ACC busy",
@@ -4139,7 +4179,7 @@
             "type": "prometheus",
             "uid": "PROM"
           },
-          "description": "Falcon payload delivered from the fabric to ULP.",
+          "description": "Falcon payload delivered from the fabric to ULP. Live view only; do not report from tiles.",
           "fieldConfig": {
             "defaults": {
               "color": {
@@ -4147,7 +4187,7 @@
                 "mode": "fixed"
               },
               "mappings": [],
-              "noValue": "-",
+              "noValue": "No data",
               "thresholds": {
                 "mode": "absolute",
                 "steps": [
@@ -4175,7 +4215,7 @@
             "orientation": "horizontal",
             "reduceOptions": {
               "calcs": [
-                "lastNotNull"
+                "last"
               ],
               "fields": "",
               "values": false
@@ -4195,13 +4235,14 @@
                 "uid": "PROM"
               },
               "editorMode": "code",
-              "expr": "sum(rate(acc_tele_field{host=\"mmgt\",acc=\"acc1\",field=\"bytes_to_ulp\"}[90s])) * 8",
+              "expr": "sum(rate(acc_tele_field{job=\"acc_grpc\",host=\"mmgt\",acc=\"acc1\",field=\"bytes_to_ulp\"}[30s])) * 8 and on() (acc_telemetry_collector_success{job=\"acc_grpc\",host=\"mmgt\",acc=\"acc1\"} == 1)",
               "legendFormat": "RDMA RX",
-              "range": true,
-              "refId": "A"
+              "range": false,
+              "refId": "A",
+              "instant": true
             }
           ],
-          "title": "IPU2 \u00b7 RDMA RD",
+          "title": "IPU2 \u00b7 RDMA RD (last 30s)",
           "type": "stat"
         },
         {
@@ -4209,7 +4250,7 @@
             "type": "prometheus",
             "uid": "PROM"
           },
-          "description": "Falcon RC payload accepted from ULP for the fabric.",
+          "description": "Falcon RC payload accepted from ULP for the fabric. Live view only; do not report from tiles.",
           "fieldConfig": {
             "defaults": {
               "color": {
@@ -4217,7 +4258,7 @@
                 "mode": "fixed"
               },
               "mappings": [],
-              "noValue": "-",
+              "noValue": "No data",
               "thresholds": {
                 "mode": "absolute",
                 "steps": [
@@ -4245,7 +4286,7 @@
             "orientation": "horizontal",
             "reduceOptions": {
               "calcs": [
-                "lastNotNull"
+                "last"
               ],
               "fields": "",
               "values": false
@@ -4265,13 +4306,14 @@
                 "uid": "PROM"
               },
               "editorMode": "code",
-              "expr": "sum(rate(acc_tele_field{host=\"mmgt\",acc=\"acc1\",field=\"bytes_from_ulp_rc\"}[90s])) * 8",
+              "expr": "sum(rate(acc_tele_field{job=\"acc_grpc\",host=\"mmgt\",acc=\"acc1\",field=\"bytes_from_ulp_rc\"}[30s])) * 8 and on() (acc_telemetry_collector_success{job=\"acc_grpc\",host=\"mmgt\",acc=\"acc1\"} == 1)",
               "legendFormat": "RDMA TX",
-              "range": true,
-              "refId": "A"
+              "range": false,
+              "refId": "A",
+              "instant": true
             }
           ],
-          "title": "IPU2 \u00b7 RDMA WR",
+          "title": "IPU2 \u00b7 RDMA WR (last 30s)",
           "type": "stat"
         },
         {
@@ -4366,7 +4408,7 @@
             "orientation": "horizontal",
             "reduceOptions": {
               "calcs": [
-                "lastNotNull"
+                "last"
               ],
               "fields": "",
               "values": false
@@ -4388,8 +4430,9 @@
               "editorMode": "code",
               "expr": "sum(acc_cpu_busy_percent{host=\"mmgt\",acc=\"acc3\",core=~\"cpu[0-9]+\"}) / 100",
               "legendFormat": "ACC busy",
-              "range": true,
-              "refId": "A"
+              "range": false,
+              "refId": "A",
+              "instant": true
             }
           ],
           "title": "IPU3 \u00b7 ACC busy",
@@ -4400,7 +4443,7 @@
             "type": "prometheus",
             "uid": "PROM"
           },
-          "description": "Falcon payload delivered from the fabric to ULP.",
+          "description": "Falcon payload delivered from the fabric to ULP. Live view only; do not report from tiles.",
           "fieldConfig": {
             "defaults": {
               "color": {
@@ -4408,7 +4451,7 @@
                 "mode": "fixed"
               },
               "mappings": [],
-              "noValue": "-",
+              "noValue": "No data",
               "thresholds": {
                 "mode": "absolute",
                 "steps": [
@@ -4436,7 +4479,7 @@
             "orientation": "horizontal",
             "reduceOptions": {
               "calcs": [
-                "lastNotNull"
+                "last"
               ],
               "fields": "",
               "values": false
@@ -4456,13 +4499,14 @@
                 "uid": "PROM"
               },
               "editorMode": "code",
-              "expr": "sum(rate(acc_tele_field{host=\"mmgt\",acc=\"acc3\",field=\"bytes_to_ulp\"}[90s])) * 8",
+              "expr": "sum(rate(acc_tele_field{job=\"acc_grpc\",host=\"mmgt\",acc=\"acc3\",field=\"bytes_to_ulp\"}[30s])) * 8 and on() (acc_telemetry_collector_success{job=\"acc_grpc\",host=\"mmgt\",acc=\"acc3\"} == 1)",
               "legendFormat": "RDMA RX",
-              "range": true,
-              "refId": "A"
+              "range": false,
+              "refId": "A",
+              "instant": true
             }
           ],
-          "title": "IPU3 \u00b7 RDMA RD",
+          "title": "IPU3 \u00b7 RDMA RD (last 30s)",
           "type": "stat"
         },
         {
@@ -4470,7 +4514,7 @@
             "type": "prometheus",
             "uid": "PROM"
           },
-          "description": "Falcon RC payload accepted from ULP for the fabric.",
+          "description": "Falcon RC payload accepted from ULP for the fabric. Live view only; do not report from tiles.",
           "fieldConfig": {
             "defaults": {
               "color": {
@@ -4478,7 +4522,7 @@
                 "mode": "fixed"
               },
               "mappings": [],
-              "noValue": "-",
+              "noValue": "No data",
               "thresholds": {
                 "mode": "absolute",
                 "steps": [
@@ -4506,7 +4550,7 @@
             "orientation": "horizontal",
             "reduceOptions": {
               "calcs": [
-                "lastNotNull"
+                "last"
               ],
               "fields": "",
               "values": false
@@ -4526,13 +4570,14 @@
                 "uid": "PROM"
               },
               "editorMode": "code",
-              "expr": "sum(rate(acc_tele_field{host=\"mmgt\",acc=\"acc3\",field=\"bytes_from_ulp_rc\"}[90s])) * 8",
+              "expr": "sum(rate(acc_tele_field{job=\"acc_grpc\",host=\"mmgt\",acc=\"acc3\",field=\"bytes_from_ulp_rc\"}[30s])) * 8 and on() (acc_telemetry_collector_success{job=\"acc_grpc\",host=\"mmgt\",acc=\"acc3\"} == 1)",
               "legendFormat": "RDMA TX",
-              "range": true,
-              "refId": "A"
+              "range": false,
+              "refId": "A",
+              "instant": true
             }
           ],
-          "title": "IPU3 \u00b7 RDMA WR",
+          "title": "IPU3 \u00b7 RDMA WR (last 30s)",
           "type": "stat"
         },
         {
@@ -4585,7 +4630,7 @@
             "orientation": "horizontal",
             "reduceOptions": {
               "calcs": [
-                "lastNotNull"
+                "last"
               ],
               "fields": "",
               "values": false
@@ -4607,8 +4652,9 @@
               "editorMode": "code",
               "expr": "sum(acc_cpu_busy_percent{host=\"mmgt\",acc=\"acc4\",core=~\"cpu[0-9]+\"}) / 100",
               "legendFormat": "ACC busy",
-              "range": true,
-              "refId": "A"
+              "range": false,
+              "refId": "A",
+              "instant": true
             }
           ],
           "title": "IPU4 \u00b7 ACC busy",
@@ -4619,7 +4665,7 @@
             "type": "prometheus",
             "uid": "PROM"
           },
-          "description": "Falcon payload delivered from the fabric to ULP.",
+          "description": "Falcon payload delivered from the fabric to ULP. Live view only; do not report from tiles.",
           "fieldConfig": {
             "defaults": {
               "color": {
@@ -4627,7 +4673,7 @@
                 "mode": "fixed"
               },
               "mappings": [],
-              "noValue": "-",
+              "noValue": "No data",
               "thresholds": {
                 "mode": "absolute",
                 "steps": [
@@ -4655,7 +4701,7 @@
             "orientation": "horizontal",
             "reduceOptions": {
               "calcs": [
-                "lastNotNull"
+                "last"
               ],
               "fields": "",
               "values": false
@@ -4675,13 +4721,14 @@
                 "uid": "PROM"
               },
               "editorMode": "code",
-              "expr": "sum(rate(acc_tele_field{host=\"mmgt\",acc=\"acc4\",field=\"bytes_to_ulp\"}[90s])) * 8",
+              "expr": "sum(rate(acc_tele_field{job=\"acc_grpc\",host=\"mmgt\",acc=\"acc4\",field=\"bytes_to_ulp\"}[30s])) * 8 and on() (acc_telemetry_collector_success{job=\"acc_grpc\",host=\"mmgt\",acc=\"acc4\"} == 1)",
               "legendFormat": "RDMA RX",
-              "range": true,
-              "refId": "A"
+              "range": false,
+              "refId": "A",
+              "instant": true
             }
           ],
-          "title": "IPU4 \u00b7 RDMA RD",
+          "title": "IPU4 \u00b7 RDMA RD (last 30s)",
           "type": "stat"
         },
         {
@@ -4689,7 +4736,7 @@
             "type": "prometheus",
             "uid": "PROM"
           },
-          "description": "Falcon RC payload accepted from ULP for the fabric.",
+          "description": "Falcon RC payload accepted from ULP for the fabric. Live view only; do not report from tiles.",
           "fieldConfig": {
             "defaults": {
               "color": {
@@ -4697,7 +4744,7 @@
                 "mode": "fixed"
               },
               "mappings": [],
-              "noValue": "-",
+              "noValue": "No data",
               "thresholds": {
                 "mode": "absolute",
                 "steps": [
@@ -4725,7 +4772,7 @@
             "orientation": "horizontal",
             "reduceOptions": {
               "calcs": [
-                "lastNotNull"
+                "last"
               ],
               "fields": "",
               "values": false
@@ -4745,13 +4792,14 @@
                 "uid": "PROM"
               },
               "editorMode": "code",
-              "expr": "sum(rate(acc_tele_field{host=\"mmgt\",acc=\"acc4\",field=\"bytes_from_ulp_rc\"}[90s])) * 8",
+              "expr": "sum(rate(acc_tele_field{job=\"acc_grpc\",host=\"mmgt\",acc=\"acc4\",field=\"bytes_from_ulp_rc\"}[30s])) * 8 and on() (acc_telemetry_collector_success{job=\"acc_grpc\",host=\"mmgt\",acc=\"acc4\"} == 1)",
               "legendFormat": "RDMA TX",
-              "range": true,
-              "refId": "A"
+              "range": false,
+              "refId": "A",
+              "instant": true
             }
           ],
-          "title": "IPU4 \u00b7 RDMA WR",
+          "title": "IPU4 \u00b7 RDMA WR (last 30s)",
           "type": "stat"
         }
       ],

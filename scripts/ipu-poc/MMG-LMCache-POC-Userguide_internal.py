@@ -354,13 +354,13 @@ def build_document(output: Path) -> None:
     subtitle_run.font.color.rgb = RGBColor(0x59, 0x59, 0x59)
     add_bottom_rule(subtitle)
     doc.add_paragraph(
-        "This guide demonstrates the MMG-400 two-initiator setup (Initiator1 "
-        "and Initiator2) against one KV Cache Target. The inventory names "
-        "machines only. The "
+        "This guide demonstrates the MMG-400 four-initiator setup "
+        "(Initiator1 through Initiator4) against one KV Cache Target. The "
+        "inventory names machines only. The "
         "coordinator rejects an unmounted or local filesystem instead of "
-        "accepting a user-supplied storage path. The tooling accepts more "
-        "initiators, but this guide's topology, procedure, and results are "
-        "for two."
+        "accepting a user-supplied storage path. The one- and two-initiator "
+        "results in the reference section were measured before the "
+        "four-initiator cutover and are kept for comparison."
     )
     doc.add_heading("PoC Scope", level=1)
     for scope_item in (
@@ -374,8 +374,8 @@ def build_document(output: Path) -> None:
         doc.add_paragraph(scope_item, style="List Bullet")
     doc.add_heading("Test Setup", level=1)
     doc.add_paragraph(
-        "Traffic generators (1x 400 GbE each, 2x 400 GbE combined) and one "
-        "KV Cache Target, connected over a Falcon fabric. "
+        "Four traffic generators (1x 400 GbE each, 4x 400 GbE combined) and "
+        "one KV Cache Target, connected over a Falcon fabric. "
         "The target serves 16 1.92 TB Solidigm D7-PS1010 Gen5 x4 NVMe "
         "SSDs over 4x 400 GbE, as built."
     )
@@ -431,6 +431,15 @@ def build_document(output: Path) -> None:
         "throughput measurement."
     )
     doc.add_paragraph(
+        "Offered load is set by in-flight submits (IN_FLIGHT): each "
+        "initiator keeps that many submits outstanding and issues a new one "
+        "as each completes. num_workers only sets the fs_native I/O thread "
+        "count. The NVMe-oF I/O queue-pair count per controller matters much "
+        "less: for MiniMax-M3, every setting from 2 to 128 QPs reached the "
+        "same per-initiator throughput, and only a single QP per controller "
+        "fell short (Appendix H)."
+    )
+    doc.add_paragraph(
         "bench l2 also has a separate mixed mode. The 5:1 read/write "
         "characterization below illustrates that mode's millisecond-scale "
         "overlap and burst behavior; it is not the timed workload in Step 4."
@@ -441,8 +450,9 @@ def build_document(output: Path) -> None:
     ).bold = True
     doc.add_paragraph(
         "Path: mkp1 → fs_native → XFS on md0 RAID0 → Falcon-backed NVMe-oF "
-        "→ mkp2 physical NVMe SSDs. Result from E2E Falcon/NVMe-oF "
-        "measurement."
+        "→ mkp2 physical NVMe SSDs. Measured end to end over Falcon-backed "
+        "NVMe-oF on the earlier two-host mkp1/mkp2 rig, before the MMG-400 "
+        "build."
     )
     doc.add_paragraph(
         "Geometry: 256 KiB KV pages; 56 objects per submit; 14 MiB per "
@@ -533,12 +543,12 @@ BASE_PATH=/mnt/lmcache/bench-l2/example/$(hostname -s) \\
 
     doc.add_heading("Execution assumptions", level=1)
     doc.add_paragraph(
-        "Before beginning: the coordinator needs passwordless SSH to both "
-        "initiators and the target; every initiator needs an LMCache checkout "
+        "Before beginning: the coordinator needs passwordless SSH to every "
+        "initiator and the target; every initiator needs an LMCache checkout "
         "at $HOME/LMCache or /root/LMCache; and the NVMe-oF filesystem must "
         "be mounted at /mnt/lmcache unless BENCH_MOUNT is explicitly set. "
         "Run every coordinator command with "
-        "scripts/ipu-poc/inventories/mmg-two-initiator.env. No dedicated "
+        "scripts/ipu-poc/inventories/mmg-four-initiator.env. No dedicated "
         "controller host is required; preflight checks these conditions "
         "before the sweep writes data."
     )
@@ -567,25 +577,26 @@ git rev-parse HEAD""",
 
     doc.add_heading("1. Name your hosts in the inventory file", level=1)
     doc.add_paragraph(
-        "Env file scripts/ipu-poc/inventories/mmg-two-initiator.env defines "
+        "Env file scripts/ipu-poc/inventories/mmg-four-initiator.env defines "
         "host names for the test rig."
     )
     command(
         doc,
-        """# scripts/ipu-poc/inventories/mmg-two-initiator.env
-INITIATOR_HOSTS=(mmgi0 mmgi1)
+        """# scripts/ipu-poc/inventories/mmg-four-initiator.env
+INITIATOR_HOSTS=(mmgi0 mmgi1 mmgi2 mmgi3)
 TARGET_HOST=mmgt""",
     )
     doc.add_paragraph(
         "The coordinator runs the benchmark on each initiator. The target "
         "remains storage-only, contacted only to verify NVMe-oF export "
-        "addresses."
+        "addresses. For a two-initiator run, use mmg-two-initiator.env, "
+        "which lists mmgi0 and mmgi1."
     )
     doc.add_heading("2. Validate the environment (preflight)", level=1)
     command(
         doc,
         """bash scripts/ipu-poc/run_geometry_inventory.sh preflight \\
-    scripts/ipu-poc/inventories/mmg-two-initiator.env""",
+    scripts/ipu-poc/inventories/mmg-four-initiator.env""",
     )
     doc.add_paragraph(
         "Preflight checks the checkout, interpreter, mount, and NVMe-oF "
@@ -600,7 +611,7 @@ TARGET_HOST=mmgt""",
         doc,
         """RUN_ID=mmg-verify-$(date +%Y%m%d-%H%M%S) \\
     bash scripts/ipu-poc/run_geometry_inventory.sh verify \\
-    scripts/ipu-poc/inventories/mmg-two-initiator.env""",
+    scripts/ipu-poc/inventories/mmg-four-initiator.env""",
     )
     doc.add_paragraph(
         "The verification gate writes a small corpus, requires the storing "
@@ -620,7 +631,7 @@ nohup env \\
     DURATION_SEC=120 \\
     INCLUDE_MINIMAX=1 \\
     bash scripts/ipu-poc/run_geometry_inventory.sh sweep \\
-    scripts/ipu-poc/inventories/mmg-two-initiator.env \\
+    scripts/ipu-poc/inventories/mmg-four-initiator.env \\
   >"logs/$RUN_ID-sweep.log" 2>&1 &
 echo "coordinator pid=$!  log=logs/$RUN_ID-sweep.log"
 tail -f "logs/$RUN_ID-sweep.log" """,
@@ -628,7 +639,7 @@ tail -f "logs/$RUN_ID-sweep.log" """,
     doc.add_paragraph(
         "Each initiator runs the same sequence at 8, 16, and 24 in-flight "
         "submits. At each setting, it stores and then reads the page-burst "
-        "profiles in page-size order, followed by MiniMax-M3. The two "
+        "profiles in page-size order, followed by MiniMax-M3. The "
         "initiators run in parallel, but each initiator runs its cells "
         "serially."
     )
@@ -645,6 +656,12 @@ tail -f "logs/$RUN_ID-sweep.log" """,
         "Timed windows alone take at least 54 minutes per host, plus stores "
         "and setup."
     )
+    doc.add_paragraph(
+        "IN_FLIGHTS takes any space-separated list of values up to 1024. A "
+        "load curve needs a wider range, such as '1 2 4 8 16 32 64 128 256'. "
+        "The sweep runs every profile at every value, so the timed windows "
+        "grow in proportion."
+    )
 
     doc.add_heading("5. Review results", level=1)
     doc.add_paragraph(
@@ -657,14 +674,15 @@ tail -f "logs/$RUN_ID-sweep.log" """,
     doc.add_heading("Optional: archive result JSON on the coordinator", level=2)
     doc.add_paragraph(
         "Each initiator writes 18 JSON files to its LMCache results/ "
-        "directory, 36 total. Keep the exported RUN_ID from step 4. Use this "
-        "optional command only when a coordinator-side archive is needed; it "
-        "copies the files and aborts if either initiator did not produce 18."
+        "directory, 72 across four initiators. Keep the exported RUN_ID from "
+        "step 4. Use this optional command only when a coordinator-side "
+        "archive is needed; it copies the files and aborts if any initiator "
+        "did not produce 18."
     )
     command(
         doc,
         """set -euo pipefail
-source scripts/ipu-poc/inventories/mmg-two-initiator.env
+source scripts/ipu-poc/inventories/mmg-four-initiator.env
 mkdir -p "collected-results/$RUN_ID"
 for host in "${INITIATOR_HOSTS[@]}"; do
   mkdir -p "collected-results/$RUN_ID/$host"
@@ -913,7 +931,10 @@ done""",
 
     doc.add_heading("LMCache bench l2 results", level=2)
     doc.add_paragraph(
-        "All results below passed the corpus-verification check."
+        "All results below passed the corpus-verification check. The one- "
+        "and two-initiator tables were measured on the 8-drive setup, before "
+        "the four-initiator cutover; the four-initiator results and load "
+        "curves follow the two-initiator table."
     )
     doc.add_heading(
         "1x initiator, 1x 400 GbE — per-initiator results", level=2
@@ -968,7 +989,10 @@ done""",
     )
     doc.add_heading("Falcon telemetry captures", level=2)
     doc.add_paragraph(
-        "Target dashboard snapshots over the measured benchmark windows."
+        "Target dashboard snapshots over the measured benchmark windows. "
+        "They were taken with the dashboard panels in use before "
+        "2026-09-24, which could misread short windows. Read them for shape "
+        "and timing, and take numbers from the result JSON."
     )
     figure(
         doc,
@@ -1038,6 +1062,122 @@ done""",
         "per-object overhead, but MiniMax's 9.34 MiB object has no directly "
         "matching FIO row. Use FIO as a control and compare only like-sized, "
         "like-concurrency reruns taken on the same storage configuration."
+    )
+
+    doc.add_heading(
+        "4x initiators, 4x 400 GbE combined — results",
+        level=2,
+    )
+    doc.add_paragraph(
+        "Measured 2026-09-20 on all four initiators at once, 300 s "
+        "measurement windows, three repetitions. Throughput is bench l2's "
+        "MiB/s converted to decimal Gb/s."
+    )
+    data_table(
+        doc,
+        [
+            "Model",
+            "Workers × in-flight",
+            "Combined throughput (Gb/s), runs 1 / 2 / 3",
+            "Per initiator (Gb/s)",
+            "p50 / worst p99 (ms)",
+        ],
+        [
+            [
+                "MiniMax-M3",
+                "w=32 / if=8",
+                ("1472.0 / 1469.8 / 1472.6", "green"),
+                "359–379",
+                "13.2 / 19.5",
+            ],
+            [
+                "Mixtral 64 KiB",
+                "w=32 / if=8",
+                ("261.6 / 281.3 / 284.3", "green"),
+                "59–79",
+                "2.5 / 4.3",
+            ],
+        ],
+    )
+    doc.add_paragraph(
+        "MiniMax-M3 reaches 1472 Gb/s, 95.6% of the 1539 Gb/s the four RDMA "
+        "pairs reach with ib_write_bw, and the three runs agree within 0.2%. "
+        "Mixtral 64 KiB stays far below the link, at the same per-initiator "
+        "range as the two-initiator 64 KiB result. Larger objects are what "
+        "move throughput toward link rate, as the page-size table below "
+        "shows."
+    )
+    doc.add_heading(
+        "Page-size scaling — three initiators, w=16 / if=16", level=3
+    )
+    doc.add_paragraph(
+        "Measured 2026-09-09 with the sweep's page-burst profiles plus "
+        "MiniMax-M3. Result files exist for three of the four initiators, "
+        "and the run used 16 workers, so use it for the trend with object "
+        "size rather than comparing it row by row with the tables above."
+    )
+    data_table(
+        doc,
+        [
+            "Model",
+            "Object / page size",
+            "Per initiator (Gb/s, median)",
+            "Combined (Gb/s)",
+            "p50 / worst p99 (ms)",
+        ],
+        [
+            ["Mixtral 8x22B FP8", "64 KiB", "54.0", "162.8", "8.7 / 9.4"],
+            ["Mixtral 8x22B FP8", "128 KiB", "88.6", "263.6", "10.6 / 11.2"],
+            ["DeepSeek-V3 FP8", "144 KiB", "93.9", "280.2", "12.2 / 12.9"],
+            ["Mixtral 8x22B FP8", "256 KiB", "136.7", "410.3", "13.7 / 14.2"],
+            ["Mixtral 8x22B FP8", "512 KiB", "190.2", "570.1", "19.7 / 20.5"],
+            ["MiniMax-M3", "~9.34 MiB", "372.8", "1082.5", "26.4 / 36.4"],
+        ],
+    )
+
+    doc.add_heading(
+        "4x initiators — load curves (latency vs throughput)", level=2
+    )
+    doc.add_paragraph(
+        "A load curve raises the in-flight submits per initiator and plots "
+        "latency against the throughput that buys. Both curves were measured "
+        "with all four initiators together at 128 I/O QPs per controller. "
+        "Their lowest point is IF=2. bench l2 keeps its submit window full, "
+        "so it cannot offer less than one submit per initiator."
+    )
+    figure(
+        doc,
+        DIAGRAMS_DIR / "load-curve-minimax-m3-20260924.png",
+        "MiniMax-M3, 2026-09-24, 11 repetitions per point: goodput is "
+        "already 1.44 Tb/s at IF=2, and latency grows with IF from there.",
+        width_in=5.6,
+    )
+    doc.add_paragraph(
+        "MiniMax-M3 saturates almost immediately. Median goodput is 1.44 "
+        "Tb/s at IF=2 and stays between 1.44 and 1.51 Tb/s up to IF=256, "
+        "while median latency grows in step with IF, from 3.3 ms to 418 ms. "
+        "Each host completes about 600 submits per second of 78.35 MB each, "
+        "so median latency is close to IF divided by that rate: the extra "
+        "submits wait in line and move no more bytes."
+    )
+    figure(
+        doc,
+        DIAGRAMS_DIR / "load-curve-mixtral64k-20260924.png",
+        "Mixtral 8x22B FP8, 64 KiB pages, 2026-09-24, 6–7 repetitions per "
+        "point: target RDMA WR tracks application goodput at every point.",
+        width_in=5.6,
+    )
+    doc.add_paragraph(
+        "Mixtral 64 KiB has its knee between IF=2 and IF=4, where median "
+        "goodput rises from 233 to 282 Gb/s. Past that it stays between "
+        "about 275 and 295 Gb/s while latency keeps climbing. At under 20% "
+        "of link rate, this workload is limited by something other than the "
+        "fabric."
+    )
+    doc.add_paragraph(
+        "Latency in both charts is bench l2's submit latency, sampled at up "
+        "to 4,096 submits per host. It is a coarse stand-in for time to "
+        "first token (TTFT), not a TTFT measurement."
     )
 
     doc.add_heading("5:1 mixed bench l2 results (placeholder)", level=2)
@@ -1117,6 +1257,14 @@ done""",
         "label. Increase the corpus beyond host DRAM, or use a defined "
         "cache-drop procedure, before describing the result as storage "
         "performance."
+    )
+    doc.add_paragraph(
+        "When reading a load curve, look for the point where throughput "
+        "stops rising with IF; beyond it, extra submits only wait. The run's "
+        "own numbers give a quick check: median submit latency should be "
+        "close to IF divided by the host's completed submits per second. If "
+        "latency climbs faster than that, something besides queueing is "
+        "involved, and that cell deserves a closer look."
     )
 
     doc.add_heading("Appendix D — Optional SSD preconditioning", level=3)
@@ -1240,6 +1388,13 @@ COLLECTOR_CHECKS='' MMG_BENCH_TUNNELS=1 ./up.sh""",
         "validation path while the dashboard continues to use polling "
         "counters."
     )
+    doc.add_paragraph(
+        "On the MMG-400 rig as of 2026-09-24, the KV Cache Target no longer "
+        "runs the SSH tele_cli path. Persistent per-ACC gRPC collectors "
+        "publish the Falcon counters every 2 s, and the dashboard reads "
+        "those. The initiators still use the SSH path. The installer "
+        "commands above have not been updated to match yet."
+    )
 
     doc.add_heading("Appendix H — NVMe-oF queue-pair stability summary", level=3)
     doc.add_paragraph(
@@ -1304,9 +1459,19 @@ COLLECTOR_CHECKS='' MMG_BENCH_TUNNELS=1 ./up.sh""",
         ],
     )
     doc.add_paragraph(
-        "The controllers remain configured for 32 I/O QPs each "
-        "(queue_count=33, including the admin queue). Every FIO run in this "
-        "summary completed with zero reported I/O errors."
+        "Every FIO run in this summary completed with zero reported I/O "
+        "errors. The controllers are now configured for 128 I/O QPs each "
+        "(queue_count=129, including the admin queue). Asking nvme connect "
+        "-i for 512 still yields 128, so check queue_count after every "
+        "reconnect rather than trusting the requested value."
+    )
+    doc.add_paragraph(
+        "bench l2 is far less sensitive to the queue-pair count than this "
+        "FIO sweep. At IF=8, MiniMax-M3 reached 372–383 Gb/s on each of the "
+        "two initiators tested at every setting from 2 to 128 QPs. A single "
+        "QP per controller was the exception, at about 320 Gb/s. The two "
+        "sweeps drive different I/O patterns, and the difference is not "
+        "reconciled here."
     )
 
     output.parent.mkdir(parents=True, exist_ok=True)
