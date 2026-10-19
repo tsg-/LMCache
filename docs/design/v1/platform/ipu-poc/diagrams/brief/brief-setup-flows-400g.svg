@@ -1,0 +1,131 @@
+<svg width="624" height="552" viewBox="0 0 624 552" xmlns="http://www.w3.org/2000/svg" font-family="Helvetica, Arial, sans-serif">
+  <!--
+    As-built setup strip for the 400 GbE MMG-400 rig, 4-initiator cutover
+    (Initiator1-4, one dedicated target IPU each). Companion to
+    brief-setup-flows.svg, which shows the 100 GbE MEV-100 rig and must stay
+    as-is: the FIO and bench-l2 tables next to it in the brief are all
+    100 GbE measurements. Supersedes the earlier 2-initiator version of this
+    file (two initiators, two target cards, two 400 GbE links) for the
+    2026-09-06 4-initiator/1.6 Tbps cutover.
+
+    Same 624 px width as brief-setup-flows.svg, so at 96 dpi it is 6.5 in
+    (the document text column) and the 12 px labels land at 9 pt. Taller
+    (552 px, 5.75 in) to fit four initiator rows.
+
+    Structure carried over unchanged: the RAID0 and the filesystem live on
+    each INITIATOR (md0 across its four imported namespaces, XFS on top),
+    while the target exports raw namespaces with one subsystem per drive and
+    no filesystem. What changed from the 2-initiator version is the count:
+    four initiators, four target IPUs, four 400 GbE links, disjoint
+    namespace sets (4 each of 16 total).
+
+    STORE/RETRIEVE are drawn once off a shared bus rather than per
+    initiator: the direction mapping is identical on every path, and
+    duplicating it four times reads as four different protocols.
+
+    Target platform and media verified from the live rig: 2x Intel Xeon
+    6776P (2026-08-27), four MMG-400 cards and sixteen Solidigm drives
+    (2026-09-07), 1.92 TB each, linking at 32 GT/s x4 (Gen5 x4). Host names
+    (mmgi0-mmgi3/mmgt) are deliberately not shown; see
+    brief-mmg400-setup-asbuilt.svg if you need the alias-to-machine mapping.
+
+    Every string is budgeted to its box at 10.5 px Helvetica (about 5.4 px
+    per character); inner boxes are 156-172 px, so nothing here exceeds 31
+    characters. Widen a box before lengthening a label; SVG will not wrap.
+
+    Fills follow the shared role palette: green = DRAM, blue = media, orange
+    = network hardware, white = kernel software.
+  -->
+  <defs>
+    <marker id="arrowR" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="#222222" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="624" height="552" fill="#ffffff"/>
+
+  <!-- Initiator 1. Own md0 + XFS over its four imported namespaces. -->
+  <rect x="2" y="14" width="176" height="112" rx="5" fill="#fdf1e2" stroke="#222222" stroke-width="1"/>
+  <text x="90" y="32" text-anchor="middle" font-size="12" font-weight="bold" fill="#000000">Initiator1</text>
+  <text x="90" y="46" text-anchor="middle" font-size="10.5" fill="#333333">Dell R760 Xeon, 1x MMG-400</text>
+  <rect x="12" y="54" width="156" height="21" rx="3" fill="#e8f3e6" stroke="#222222" stroke-width="0.8"/>
+  <text x="90" y="68" text-anchor="middle" font-size="10.5" fill="#000000">LMCache client, host DRAM</text>
+  <rect x="12" y="78" width="156" height="21" rx="3" fill="#ffffff" stroke="#222222" stroke-width="0.8"/>
+  <text x="90" y="92" text-anchor="middle" font-size="10.5" fill="#000000">XFS on RAID0 md0 stripe</text>
+  <rect x="12" y="102" width="156" height="21" rx="3" fill="#ffffff" stroke="#222222" stroke-width="0.8"/>
+  <text x="90" y="116" text-anchor="middle" font-size="10.5" fill="#000000">nvme-rdma, O_DIRECT 4 KiB</text>
+
+  <!-- Initiator 2. Identical stack, disjoint namespace set. -->
+  <rect x="2" y="136" width="176" height="112" rx="5" fill="#fdf1e2" stroke="#222222" stroke-width="1"/>
+  <text x="90" y="154" text-anchor="middle" font-size="12" font-weight="bold" fill="#000000">Initiator2</text>
+  <text x="90" y="168" text-anchor="middle" font-size="10.5" fill="#333333">Dell R760 Xeon, 1x MMG-400</text>
+  <rect x="12" y="176" width="156" height="21" rx="3" fill="#e8f3e6" stroke="#222222" stroke-width="0.8"/>
+  <text x="90" y="190" text-anchor="middle" font-size="10.5" fill="#000000">LMCache client, host DRAM</text>
+  <rect x="12" y="200" width="156" height="21" rx="3" fill="#ffffff" stroke="#222222" stroke-width="0.8"/>
+  <text x="90" y="214" text-anchor="middle" font-size="10.5" fill="#000000">XFS on RAID0 md0 stripe</text>
+  <rect x="12" y="224" width="156" height="21" rx="3" fill="#ffffff" stroke="#222222" stroke-width="0.8"/>
+  <text x="90" y="238" text-anchor="middle" font-size="10.5" fill="#000000">nvme-rdma, O_DIRECT 4 KiB</text>
+
+  <!-- Initiator 3. Identical stack, disjoint namespace set. -->
+  <rect x="2" y="258" width="176" height="112" rx="5" fill="#fdf1e2" stroke="#222222" stroke-width="1"/>
+  <text x="90" y="276" text-anchor="middle" font-size="12" font-weight="bold" fill="#000000">Initiator3</text>
+  <text x="90" y="290" text-anchor="middle" font-size="10.5" fill="#333333">Dell R760 Xeon, 1x MMG-400</text>
+  <rect x="12" y="298" width="156" height="21" rx="3" fill="#e8f3e6" stroke="#222222" stroke-width="0.8"/>
+  <text x="90" y="312" text-anchor="middle" font-size="10.5" fill="#000000">LMCache client, host DRAM</text>
+  <rect x="12" y="322" width="156" height="21" rx="3" fill="#ffffff" stroke="#222222" stroke-width="0.8"/>
+  <text x="90" y="336" text-anchor="middle" font-size="10.5" fill="#000000">XFS on RAID0 md0 stripe</text>
+  <rect x="12" y="346" width="156" height="21" rx="3" fill="#ffffff" stroke="#222222" stroke-width="0.8"/>
+  <text x="90" y="360" text-anchor="middle" font-size="10.5" fill="#000000">nvme-rdma, O_DIRECT 4 KiB</text>
+
+  <!-- Initiator 4. Identical stack, disjoint namespace set. -->
+  <rect x="2" y="380" width="176" height="112" rx="5" fill="#fdf1e2" stroke="#222222" stroke-width="1"/>
+  <text x="90" y="398" text-anchor="middle" font-size="12" font-weight="bold" fill="#000000">Initiator4</text>
+  <text x="90" y="412" text-anchor="middle" font-size="10.5" fill="#333333">Dell R760 Xeon, 1x MMG-400</text>
+  <rect x="12" y="420" width="156" height="21" rx="3" fill="#e8f3e6" stroke="#222222" stroke-width="0.8"/>
+  <text x="90" y="434" text-anchor="middle" font-size="10.5" fill="#000000">LMCache client, host DRAM</text>
+  <rect x="12" y="444" width="156" height="21" rx="3" fill="#ffffff" stroke="#222222" stroke-width="0.8"/>
+  <text x="90" y="458" text-anchor="middle" font-size="10.5" fill="#000000">XFS on RAID0 md0 stripe</text>
+  <rect x="12" y="468" width="156" height="21" rx="3" fill="#ffffff" stroke="#222222" stroke-width="0.8"/>
+  <text x="90" y="482" text-anchor="middle" font-size="10.5" fill="#000000">nvme-rdma, O_DIRECT 4 KiB</text>
+
+  <!-- Shared bus: all four initiators drive the same two flow directions. -->
+  <line x1="178" y1="70" x2="196" y2="70" stroke="#222222" stroke-width="1.2"/>
+  <line x1="178" y1="192" x2="196" y2="192" stroke="#222222" stroke-width="1.2"/>
+  <line x1="178" y1="314" x2="196" y2="314" stroke="#222222" stroke-width="1.2"/>
+  <line x1="178" y1="436" x2="196" y2="436" stroke="#222222" stroke-width="1.2"/>
+  <line x1="196" y1="70" x2="196" y2="436" stroke="#222222" stroke-width="1.2"/>
+
+  <!-- STORE: bytes move initiator to target -->
+  <line x1="196" y1="140" x2="426" y2="140" stroke="#222222" stroke-width="1.2" marker-end="url(#arrowR)"/>
+  <text x="311" y="134" text-anchor="middle" font-size="11" font-weight="bold" fill="#000000">STORE</text>
+  <text x="311" y="154" text-anchor="middle" font-size="10" fill="#333333">NVMe-oF WRITE, target <tspan font-size="10" font-weight="bold" fill="#000000">RDMA-READs</tspan></text>
+
+  <!-- The links under test -->
+  <rect x="204" y="160" width="222" height="20" rx="3" fill="#fdf1e2" stroke="#222222" stroke-width="0.8"/>
+  <text x="315" y="174" text-anchor="middle" font-size="10" fill="#000000">Falcon RDMA offload, 4x 400 GbE, MTU 9100</text>
+
+  <!-- RETRIEVE: bytes move target to initiator -->
+  <line x1="426" y1="204" x2="196" y2="204" stroke="#222222" stroke-width="1.2" marker-end="url(#arrowR)"/>
+  <text x="311" y="198" text-anchor="middle" font-size="11" font-weight="bold" fill="#000000">RETRIEVE</text>
+  <text x="311" y="218" text-anchor="middle" font-size="10" fill="#333333">NVMe-oF READ, target <tspan font-size="10" font-weight="bold" fill="#000000">RDMA-WRITEs</tspan></text>
+
+  <!-- Target: raw namespaces, one nvmet port per card. -->
+  <rect x="430" y="64" width="192" height="194" rx="5" fill="#fdf1e2" stroke="#222222" stroke-width="1"/>
+  <text x="526" y="84" text-anchor="middle" font-size="12" font-weight="bold" fill="#000000">KV Cache Target</text>
+  <text x="526" y="98" text-anchor="middle" font-size="10.5" fill="#333333">2x Xeon 6776P, 4x MMG-400</text>
+  <rect x="440" y="106" width="172" height="21" rx="3" fill="#dceaf7" stroke="#222222" stroke-width="0.8"/>
+  <text x="526" y="120" text-anchor="middle" font-size="10.5" fill="#000000">16x Solidigm 1.92 TB, Gen5 x4</text>
+  <rect x="440" y="130" width="172" height="21" rx="3" fill="#ffffff" stroke="#222222" stroke-width="0.8"/>
+  <text x="526" y="144" text-anchor="middle" font-size="10.5" fill="#000000">nvmet-rdma, no filesystem</text>
+  <rect x="440" y="154" width="172" height="21" rx="3" fill="#ffffff" stroke="#222222" stroke-width="0.8"/>
+  <text x="526" y="168" text-anchor="middle" font-size="10.5" fill="#000000">200.0.5.2:4420 to Initiator1, 4 ns</text>
+  <rect x="440" y="178" width="172" height="21" rx="3" fill="#ffffff" stroke="#222222" stroke-width="0.8"/>
+  <text x="526" y="192" text-anchor="middle" font-size="10.5" fill="#000000">200.0.6.2:4420 to Initiator2, 4 ns</text>
+  <rect x="440" y="202" width="172" height="21" rx="3" fill="#ffffff" stroke="#222222" stroke-width="0.8"/>
+  <text x="526" y="216" text-anchor="middle" font-size="10.5" fill="#000000">200.0.7.2:4420 to Initiator3, 4 ns</text>
+  <rect x="440" y="226" width="172" height="21" rx="3" fill="#ffffff" stroke="#222222" stroke-width="0.8"/>
+  <text x="526" y="240" text-anchor="middle" font-size="10.5" fill="#000000">200.0.8.2:4420 to Initiator4, 4 ns</text>
+
+  <text x="312" y="510" text-anchor="middle" font-size="10" fill="#666666">No cache logic runs on the IPU</text>
+  <text x="312" y="524" text-anchor="middle" font-size="10" fill="#666666">Namespace sets are disjoint per initiator, so no cluster filesystem is needed</text>
+</svg>
