@@ -1,0 +1,28 @@
+[
+  {
+    "HostNQN": "nqn.2026-07.io.lmcache.alt:bmg0",
+    "HostID": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+    "Subsystems": [
+      {
+        "Name": "nvme-subsys0",
+        "NQN": "nqn.2026-07.io.lmcache.alt:bmg1",
+        "IOPolicy": "numa",
+        "Paths": [
+          {
+            "Name": "nvme0",
+            "Transport": "rdma",
+            "Address": "traddr=192.168.200.4,trsvcid=4420",
+            "State": "live"
+          }
+        ]
+      },
+      {
+        "Name": "nvme-subsys1",
+        "NQN": "nqn.local.pcie:something",
+        "Paths": [
+          {"Name": "nvme1", "Transport": "pcie", "State": "live"}
+        ]
+      }
+    ]
+  }
+]
