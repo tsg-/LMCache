@@ -1,0 +1,6 @@
+[Unit]
+Description=Refresh NVMe SMART textfile for node_exporter
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/nvme_stats_textfile.sh

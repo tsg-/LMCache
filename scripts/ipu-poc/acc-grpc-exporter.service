@@ -1,0 +1,13 @@
+[Unit]
+Description=Serve target ACC counters at Prometheus scrape time
+Requires=acc-grpc-tunnel@acc1.service acc-grpc-tunnel@acc2.service acc-grpc-tunnel@acc3.service acc-grpc-tunnel@acc4.service
+After=acc-grpc-tunnel@acc1.service acc-grpc-tunnel@acc2.service acc-grpc-tunnel@acc3.service acc-grpc-tunnel@acc4.service
+
+[Service]
+Type=simple
+ExecStart=/opt/acc-grpc-telemetry/venv/bin/python /usr/local/bin/acc_grpc_exporter.py --proto-dir /opt/acc-grpc-telemetry/proto
+Restart=always
+RestartSec=2s
+
+[Install]
+WantedBy=multi-user.target

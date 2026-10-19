@@ -1,0 +1,28 @@
+[Unit]
+Description=Prometheus Node Exporter (mkp1/mkp2 test hosts)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=node_exporter
+Group=node_exporter
+Environment=NE_LISTEN=127.0.0.1:9100
+ExecStart=/usr/local/bin/node_exporter \
+    --web.listen-address=${NE_LISTEN} \
+    --collector.textfile.directory=/var/lib/node_exporter/textfile \
+    --collector.processes \
+    --collector.systemd \
+    --no-collector.wifi \
+    --no-collector.bonding \
+    --no-collector.zfs
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/
+ReadWritePaths=/var/lib/node_exporter/textfile
+
+[Install]
+WantedBy=multi-user.target

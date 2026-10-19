@@ -1,0 +1,13 @@
+[Unit]
+Description=Refresh ACC core-usage textfile for node_exporter
+
+[Service]
+Type=oneshot
+# Carries the host-specific bits -- IMC_PASSWORD=<imc-root-password> and, on the
+# initiators, ACC_TARGETS=:acc1:<acc-fabric-ip> (empty netns = direct ssh to the
+# IMC; mmgt needs no override and uses the two-card netns default). Keeping them
+# here leaves this unit and the collector byte-identical fleet-wide. Leading `-`
+# so a missing file is a clear runtime error from the script rather than a unit
+# that refuses to start.
+EnvironmentFile=-/etc/default/lmcache-acc-stats-6x6
+ExecStart=/usr/bin/python3 /usr/local/lib/lmcache-6x2/acc_ssh_stats.py --core-textfile /var/lib/lmcache-6x2/textfile/acc_stats.prom

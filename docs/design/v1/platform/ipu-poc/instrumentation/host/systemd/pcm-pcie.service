@@ -1,0 +1,6 @@
+[Unit]
+Description=Refresh PCM PCIe/DDIO textfile for node_exporter
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/pcm_pcie_textfile.sh

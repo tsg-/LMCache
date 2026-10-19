@@ -1,0 +1,4713 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": false,
+        "iconColor": "rgba(255, 145, 0, 1)",
+        "name": "Measured phases",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "graphTooltip": 1,
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": [],
+      "title": "Summary \u2014 fabric, storage, host",
+      "type": "row",
+      "description": "",
+      "id": 101
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM6X2"
+      },
+      "description": "Measured-phase LMCache success bytes across four initiators. The first 30s of a measured phase can be low while the rate window fills. Live view only; do not report from tiles.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#3987e5",
+            "mode": "fixed"
+          },
+          "mappings": [],
+          "noValue": "no measured phase",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#3987e5",
+                "value": null
+              }
+            ]
+          },
+          "unit": "bps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 4,
+        "x": 0,
+        "y": 1
+      },
+      "id": 47,
+      "options": {
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "last"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "text": {
+          "titleSize": 14,
+          "valueSize": 26
+        },
+        "textMode": "value_and_name",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PROM6X2"
+          },
+          "editorMode": "code",
+          "expr": "sum by (operation) (rate(lmcache_bench_l2_success_bytes_total{job=\"lmcache_bench_6x2\",host=~\"mmgi.*\",phase=\"measured\"}[30s])) * 8 and on() (count(up{job=\"lmcache_bench_6x2\",host=~\"mmgi.*\"} == 1) == 6)",
+          "legendFormat": "{{operation}}",
+          "range": false,
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "title": "LMCache (last 30s)",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM6X2"
+      },
+      "description": "Aggregate kernel read throughput from the exported namespaces on the selected target(s), in bits/s. Shares a hue with RDMA WR: the two ends of the read path. The storage stack section shows the same figure in bits/s. Live view only; do not report from tiles.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#3987e5",
+            "mode": "fixed"
+          },
+          "mappings": [],
+          "noValue": "No data",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#3987e5",
+                "value": null
+              }
+            ]
+          },
+          "unit": "bps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 4,
+        "x": 4,
+        "y": 1
+      },
+      "id": 45,
+      "options": {
+        "colorMode": "none",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "last"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "text": {
+          "titleSize": 14,
+          "valueSize": 26
+        },
+        "textMode": "value_and_name",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PROM6X2"
+          },
+          "editorMode": "code",
+          "expr": "sum by (host) ((rate(node_disk_read_bytes_total{host=~\"${target:regex}\",device=~\"${device:regex}\"}[30s]) and on (host, device) label_replace(nvme_namespace_role{host=~\"${target:regex}\",role=\"exported\"}, \"device\", \"$1\", \"ns\", \"(.*)\"))) * 8",
+          "legendFormat": "${target:text}|{{host}} NVMe read",
+          "range": false,
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "title": "NVMe RD (last 30s)",
+      "type": "stat",
+      "transformations": [
+        {
+          "id": "renameByRegex",
+          "options": {
+            "regex": "^(?:([^|]+)\\|\\1\\s+|[^|]+\\|)(.*)$",
+            "renamePattern": "$2"
+          }
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM6X2"
+      },
+      "description": "Falcon ACC payload read at Prometheus scrape time across the selected target ACCs. The aggregate is hidden when any ACC RPC fails. Live view only; do not report from tiles.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#3987e5",
+            "mode": "fixed"
+          },
+          "mappings": [],
+          "noValue": "No data",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#3987e5",
+                "value": null
+              }
+            ]
+          },
+          "unit": "bps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 4,
+        "x": 8,
+        "y": 1
+      },
+      "id": 43,
+      "options": {
+        "colorMode": "none",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "last"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "text": {
+          "titleSize": 14,
+          "valueSize": 26
+        },
+        "textMode": "value_and_name",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PROM6X2"
+          },
+          "editorMode": "code",
+          "expr": "sum by (host) (rate(acc_tele_field{acc=~\"${acc:regex}\",job=\"acc_grpc_6x2\",host=~\"${target:regex}\",field=\"bytes_from_ulp_rc\"}[30s])) * 8 and on (host) (acc_telemetry_exporter_complete{job=\"acc_grpc_6x2\",host=~\"${target:regex}\"} == 1)",
+          "legendFormat": "${target:text}|{{host}} TX",
+          "range": false,
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "title": "RDMA WR (last 30s)",
+      "type": "stat",
+      "transformations": [
+        {
+          "id": "renameByRegex",
+          "options": {
+            "regex": "^(?:([^|]+)\\|\\1\\s+|[^|]+\\|)(.*)$",
+            "renamePattern": "$2"
+          }
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM6X2"
+      },
+      "description": "Aggregate kernel write throughput to the exported namespaces on the selected target(s), in bits/s. Shares a hue with RDMA RD: the two ends of the write path. Reads 0 throughout a Load-only (retrieve) window, which is the expected result and not a dead query - check the operation names on LMCache to tell the two cases apart. Live view only; do not report from tiles.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#3987e5",
+            "mode": "fixed"
+          },
+          "mappings": [],
+          "noValue": "No data",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#3987e5",
+                "value": null
+              }
+            ]
+          },
+          "unit": "bps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 4,
+        "x": 12,
+        "y": 1
+      },
+      "id": 46,
+      "options": {
+        "colorMode": "none",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "last"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "text": {
+          "titleSize": 14,
+          "valueSize": 26
+        },
+        "textMode": "value_and_name",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PROM6X2"
+          },
+          "editorMode": "code",
+          "expr": "sum by (host) ((rate(node_disk_written_bytes_total{host=~\"${target:regex}\",device=~\"${device:regex}\"}[30s]) and on (host, device) label_replace(nvme_namespace_role{host=~\"${target:regex}\",role=\"exported\"}, \"device\", \"$1\", \"ns\", \"(.*)\"))) * 8",
+          "legendFormat": "${target:text}|{{host}} NVMe write",
+          "range": false,
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "title": "NVMe WR (last 30s)",
+      "type": "stat",
+      "transformations": [
+        {
+          "id": "renameByRegex",
+          "options": {
+            "regex": "^(?:([^|]+)\\|\\1\\s+|[^|]+\\|)(.*)$",
+            "renamePattern": "$2"
+          }
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM6X2"
+      },
+      "description": "Falcon ACC payload read at Prometheus scrape time across the selected target ACCs. The aggregate is hidden when any ACC RPC fails. Live view only; do not report from tiles.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#3987e5",
+            "mode": "fixed"
+          },
+          "mappings": [],
+          "noValue": "No data",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#3987e5",
+                "value": null
+              }
+            ]
+          },
+          "unit": "bps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 4,
+        "x": 16,
+        "y": 1
+      },
+      "id": 42,
+      "options": {
+        "colorMode": "none",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "last"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "text": {
+          "titleSize": 14,
+          "valueSize": 26
+        },
+        "textMode": "value_and_name",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PROM6X2"
+          },
+          "editorMode": "code",
+          "expr": "sum by (host) (rate(acc_tele_field{acc=~\"${acc:regex}\",job=\"acc_grpc_6x2\",host=~\"${target:regex}\",field=\"bytes_to_ulp\"}[30s])) * 8 and on (host) (acc_telemetry_exporter_complete{job=\"acc_grpc_6x2\",host=~\"${target:regex}\"} == 1)",
+          "legendFormat": "${target:text}|{{host}} RX",
+          "range": false,
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "title": "RDMA RD (last 30s)",
+      "type": "stat",
+      "transformations": [
+        {
+          "id": "renameByRegex",
+          "options": {
+            "regex": "^(?:([^|]+)\\|\\1\\s+|[^|]+\\|)(.*)$",
+            "renamePattern": "$2"
+          }
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM6X2"
+      },
+      "description": "Falcon ACC payload read at Prometheus scrape time across the selected target ACCs. The aggregate is hidden when any ACC RPC fails. Live view only; do not report from tiles.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#8f3bb8",
+            "mode": "fixed"
+          },
+          "mappings": [],
+          "noValue": "No data",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#8f3bb8",
+                "value": null
+              }
+            ]
+          },
+          "unit": "bps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 4,
+        "x": 20,
+        "y": 1
+      },
+      "id": 58,
+      "options": {
+        "colorMode": "none",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "last"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "text": {
+          "titleSize": 14,
+          "valueSize": 26
+        },
+        "textMode": "value_and_name",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PROM6X2"
+          },
+          "editorMode": "code",
+          "expr": "sum by (host) (rate(acc_tele_field{acc=~\"${acc:regex}\",job=\"acc_grpc_6x2\",host=~\"${target:regex}\",field=~\"bytes_from_ulp_rc|bytes_to_ulp\"}[30s])) * 8 and on (host) (acc_telemetry_exporter_complete{job=\"acc_grpc_6x2\",host=~\"${target:regex}\"} == 1)",
+          "legendFormat": "${target:text}|{{host}} TX + RX",
+          "range": false,
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "title": "Bidirectional RDMA Payload (last 30s)",
+      "type": "stat",
+      "transformations": [
+        {
+          "id": "renameByRegex",
+          "options": {
+            "regex": "^(?:([^|]+)\\|\\1\\s+|[^|]+\\|)(.*)$",
+            "renamePattern": "$2"
+          }
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM6X2"
+      },
+      "description": "Non-idle CPU seconds per second, shown per selected target in cores-equivalent busy. Excludes iowait and guest time.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 1,
+          "max": 256,
+          "min": 0,
+          "noValue": "-",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#0ca30c",
+                "value": null
+              },
+              {
+                "color": "#fab219",
+                "value": 128
+              },
+              {
+                "color": "#d03b3b",
+                "value": 192
+              }
+            ]
+          },
+          "unit": "cores"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 3,
+        "x": 0,
+        "y": 4
+      },
+      "id": 22,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "last"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "text": {
+          "titleSize": 14,
+          "valueSize": 26
+        },
+        "textMode": "value_and_name",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PROM6X2"
+          },
+          "editorMode": "code",
+          "expr": "sum by (host) (rate(numa_node_cpu_seconds_total{host=~\"${target:regex}\",mode!~\"idle|iowait|guest|guest_nice\"}[1m]))",
+          "legendFormat": "${target:text}|{{host}} cores",
+          "range": false,
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "title": "Target CPU Busy",
+      "type": "stat",
+      "transformations": [
+        {
+          "id": "renameByRegex",
+          "options": {
+            "regex": "^(?:([^|]+)\\|\\1\\s+|[^|]+\\|)(.*)$",
+            "renamePattern": "$2"
+          }
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM6X2"
+      },
+      "description": "ACC cores-equivalent busy for the selected target and ACCs. MMGT has acc1-acc4; mmgt2 has acc5-acc6. The expected poll-mode floor is two cores per ACC.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 1,
+          "max": 24,
+          "min": 0,
+          "noValue": "-",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#0ca30c",
+                "value": null
+              },
+              {
+                "color": "#fab219",
+                "value": 12
+              },
+              {
+                "color": "#d03b3b",
+                "value": 20
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 7,
+        "x": 3,
+        "y": 4
+      },
+      "id": 23,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "last"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "text": {
+          "titleSize": 14,
+          "valueSize": 26
+        },
+        "textMode": "value_and_name",
+        "wideLayout": false
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (host, acc) (acc_cpu_busy_percent{host=~\"${target:regex}\",acc=~\"${acc:regex}\",core=~\"cpu[0-9]+\"}) / 100",
+          "instant": true,
+          "range": false,
+          "legendFormat": "${target:text}|{{host}} {{acc}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PROM6X2"
+          }
+        }
+      ],
+      "title": "Target IPU Cores Busy",
+      "type": "stat",
+      "transformations": [
+        {
+          "id": "renameByRegex",
+          "options": {
+            "regex": "^(?:([^|]+)\\|\\1\\s+|[^|]+\\|)(.*)$",
+            "renamePattern": "$2"
+          }
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM6X2"
+      },
+      "description": "Total PCM-measured DRAM bandwidth across sockets, shown per selected target. Host resource history splits it by direction and socket.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#3987e5",
+            "mode": "fixed"
+          },
+          "mappings": [],
+          "noValue": "-",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#3987e5",
+                "value": null
+              }
+            ]
+          },
+          "unit": "MBps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 6,
+        "x": 0,
+        "y": 7
+      },
+      "id": 41,
+      "options": {
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "last"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "text": {
+          "titleSize": 14,
+          "valueSize": 24
+        },
+        "textMode": "value_and_name",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PROM6X2"
+          },
+          "editorMode": "code",
+          "expr": "sum by (host) (pcm_memory_bandwidth_megabytes_per_second{host=~\"${target:regex}\"})",
+          "legendFormat": "${target:text}|{{host}} DRAM bandwidth",
+          "range": false,
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "title": "Target DRAM BW",
+      "type": "stat",
+      "transformations": [
+        {
+          "id": "renameByRegex",
+          "options": {
+            "regex": "^(?:([^|]+)\\|\\1\\s+|[^|]+\\|)(.*)$",
+            "renamePattern": "$2"
+          }
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM6X2"
+      },
+      "description": "ACC CPU cores-equivalent busy on the initiator IPUs (mmgi0-mmgi5), the counterpart to Target ACC Busy Cores. One MMG-400 per initiator, with ACC at 200.0.3.3, 200.0.4.3, 200.0.9.3, and 200.0.10.3 respectively, reached through each host's IMC at 100.0.0.1/24 -- no netns, unlike the target's namespaced cards. The expected poll-mode floor is 2.0 cores per IPU, so ~2.0 means idle, not broken.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 1,
+          "max": 24,
+          "min": 0,
+          "noValue": "-",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#0ca30c",
+                "value": null
+              },
+              {
+                "color": "#fab219",
+                "value": 12
+              },
+              {
+                "color": "#d03b3b",
+                "value": 20
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 7,
+        "x": 10,
+        "y": 4
+      },
+      "id": 51,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "last"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "text": {
+          "titleSize": 14,
+          "valueSize": 26
+        },
+        "textMode": "value_and_name",
+        "wideLayout": false
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PROM6X2"
+          },
+          "editorMode": "code",
+          "expr": "sum(acc_cpu_busy_percent{host=\"mmgi0\",core=~\"cpu[0-9]+\"}) / 100 or vector(NaN)",
+          "legendFormat": "I1",
+          "range": false,
+          "refId": "A",
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PROM6X2"
+          },
+          "editorMode": "code",
+          "expr": "sum(acc_cpu_busy_percent{host=\"mmgi1\",core=~\"cpu[0-9]+\"}) / 100 or vector(NaN)",
+          "legendFormat": "I2",
+          "range": false,
+          "refId": "B",
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PROM6X2"
+          },
+          "editorMode": "code",
+          "expr": "sum(acc_cpu_busy_percent{host=\"mmgi2\",core=~\"cpu[0-9]+\"}) / 100 or vector(NaN)",
+          "legendFormat": "I3",
+          "range": false,
+          "refId": "C",
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PROM6X2"
+          },
+          "editorMode": "code",
+          "expr": "sum(acc_cpu_busy_percent{host=\"mmgi3\",core=~\"cpu[0-9]+\"}) / 100 or vector(NaN)",
+          "legendFormat": "I4",
+          "range": false,
+          "refId": "D",
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PROM6X2"
+          },
+          "editorMode": "code",
+          "expr": "sum(acc_cpu_busy_percent{host=\"mmgi4\",core=~\"cpu[0-9]+\"}) / 100 or vector(NaN)",
+          "legendFormat": "I5",
+          "range": false,
+          "refId": "E",
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PROM6X2"
+          },
+          "editorMode": "code",
+          "expr": "sum(acc_cpu_busy_percent{host=\"mmgi5\",core=~\"cpu[0-9]+\"}) / 100 or vector(NaN)",
+          "legendFormat": "I6",
+          "range": false,
+          "refId": "F",
+          "instant": true
+        }
+      ],
+      "title": "Initiator IPU Cores Busy",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM6X2"
+      },
+      "description": "Configured NVMe-oF I/O queue pairs for each initiator. The collector excludes locally attached PCIe controllers and each controller admin queue, so a normal four-namespace initiator reports 512 for four controllers with 128 I/O QPs each. This is configuration, not a measure of currently active traffic QPs.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#3987e5",
+            "mode": "fixed"
+          },
+          "decimals": 0,
+          "noValue": "-",
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 7,
+        "x": 17,
+        "y": 4
+      },
+      "id": 57,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "last"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "text": {
+          "titleSize": 14,
+          "valueSize": 26
+        },
+        "textMode": "value_and_name",
+        "wideLayout": false
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PROM6X2"
+          },
+          "editorMode": "code",
+          "expr": "sum(nvmeof_configured_io_qps_total{host=\"mmgi0\"}) or vector(NaN)",
+          "legendFormat": "I1",
+          "range": false,
+          "refId": "A",
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PROM6X2"
+          },
+          "editorMode": "code",
+          "expr": "sum(nvmeof_configured_io_qps_total{host=\"mmgi1\"}) or vector(NaN)",
+          "legendFormat": "I2",
+          "range": false,
+          "refId": "B",
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PROM6X2"
+          },
+          "editorMode": "code",
+          "expr": "sum(nvmeof_configured_io_qps_total{host=\"mmgi2\"}) or vector(NaN)",
+          "legendFormat": "I3",
+          "range": false,
+          "refId": "C",
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PROM6X2"
+          },
+          "editorMode": "code",
+          "expr": "sum(nvmeof_configured_io_qps_total{host=\"mmgi3\"}) or vector(NaN)",
+          "legendFormat": "I4",
+          "range": false,
+          "refId": "D",
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PROM6X2"
+          },
+          "editorMode": "code",
+          "expr": "sum(nvmeof_configured_io_qps_total{host=\"mmgi4\"}) or vector(NaN)",
+          "legendFormat": "I5",
+          "range": false,
+          "refId": "E",
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PROM6X2"
+          },
+          "editorMode": "code",
+          "expr": "sum(nvmeof_configured_io_qps_total{host=\"mmgi5\"}) or vector(NaN)",
+          "legendFormat": "I6",
+          "range": false,
+          "refId": "F",
+          "instant": true
+        }
+      ],
+      "title": "Initiator QPs Configured",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM6X2"
+      },
+      "description": "Per-target lower bound: 1 - DRAM bandwidth / PCIe bandwidth. DRAM includes unrelated activity; this is not end-to-end DDIO proof.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 1,
+          "mappings": [],
+          "max": 100,
+          "min": 0,
+          "noValue": "-",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#fab219",
+                "value": null
+              },
+              {
+                "color": "#0ca30c",
+                "value": 70
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 6,
+        "x": 18,
+        "y": 7
+      },
+      "id": 49,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "last"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "text": {
+          "titleSize": 14,
+          "valueSize": 24
+        },
+        "textMode": "value_and_name",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PROM6X2"
+          },
+          "editorMode": "code",
+          "expr": "(100 * (1 - (sum by (host) (pcm_memory_bandwidth_megabytes_per_second{host=~\"${target:regex}\"}) * 1e6) / (sum by (host) (pcm_pcie_bandwidth_bytes_per_second{host=~\"${target:regex}\",classification=\"total\"})))) >= 0",
+          "legendFormat": "${target:text}|{{host}} absorbed",
+          "range": false,
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "title": "Target DDIO Absorption",
+      "type": "stat",
+      "transformations": [
+        {
+          "id": "renameByRegex",
+          "options": {
+            "regex": "^(?:([^|]+)\\|\\1\\s+|[^|]+\\|)(.*)$",
+            "renamePattern": "$2"
+          }
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM6X2"
+      },
+      "description": "% hit LLC vs miss to DRAM\n\nPCM PCIe cache classification: hit / (hit + miss) per direction. Read and write remain separate. Values are hidden below 1 GB/s PCIe traffic to avoid idle-noise ratios. Compare with DDIO absorption; neither is end-to-end DDIO proof.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 1,
+          "mappings": [],
+          "max": 100,
+          "min": 0,
+          "noValue": "-",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#fab219",
+                "value": null
+              },
+              {
+                "color": "#0ca30c",
+                "value": 70
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 6,
+        "x": 12,
+        "y": 7
+      },
+      "id": 50,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "vertical",
+        "reduceOptions": {
+          "calcs": [
+            "last"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "text": {
+          "titleSize": 14,
+          "valueSize": 24
+        },
+        "textMode": "value_and_name",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PROM6X2"
+          },
+          "editorMode": "code",
+          "expr": "(100 * sum by (host, direction, socket) (pcm_pcie_bandwidth_bytes_per_second{host=~\"${target:regex}\",socket=\"1\",classification=\"hit\"}) / sum by (host, direction, socket) (pcm_pcie_bandwidth_bytes_per_second{host=~\"${target:regex}\",socket=\"1\",classification=~\"hit|miss\"})) >= 0 and on (host, direction, socket) (pcm_pcie_bandwidth_bytes_per_second{host=~\"${target:regex}\",socket=\"1\",classification=\"total\"} > 1e9)",
+          "legendFormat": "${target:text}|{{host}} {{direction}}",
+          "range": false,
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "title": "Target LLC Hit% \u2014 socket 1",
+      "type": "stat",
+      "transformations": [
+        {
+          "id": "renameByRegex",
+          "options": {
+            "regex": "^(?:([^|]+)\\|\\1\\s+|[^|]+\\|)(.*)$",
+            "renamePattern": "$2"
+          }
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM6X2"
+      },
+      "description": "% hit LLC vs miss to DRAM\n\nPCM PCIe cache classification: hit / (hit + miss) per direction. Read and write remain separate. Values are hidden below 1 GB/s PCIe traffic to avoid idle-noise ratios. Compare with DDIO absorption; neither is end-to-end DDIO proof.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 1,
+          "mappings": [],
+          "max": 100,
+          "min": 0,
+          "noValue": "-",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#fab219",
+                "value": null
+              },
+              {
+                "color": "#0ca30c",
+                "value": 70
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 6,
+        "x": 6,
+        "y": 7
+      },
+      "id": 52,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "vertical",
+        "reduceOptions": {
+          "calcs": [
+            "last"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "text": {
+          "titleSize": 14,
+          "valueSize": 24
+        },
+        "textMode": "value_and_name",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PROM6X2"
+          },
+          "editorMode": "code",
+          "expr": "(100 * sum by (host, direction, socket) (pcm_pcie_bandwidth_bytes_per_second{host=~\"${target:regex}\",socket=\"0\",classification=\"hit\"}) / sum by (host, direction, socket) (pcm_pcie_bandwidth_bytes_per_second{host=~\"${target:regex}\",socket=\"0\",classification=~\"hit|miss\"})) >= 0 and on (host, direction, socket) (pcm_pcie_bandwidth_bytes_per_second{host=~\"${target:regex}\",socket=\"0\",classification=\"total\"} > 1e9)",
+          "legendFormat": "${target:text}|{{host}} {{direction}}",
+          "range": false,
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "title": "Target LLC Hit% \u2014 socket 0",
+      "type": "stat",
+      "transformations": [
+        {
+          "id": "renameByRegex",
+          "options": {
+            "regex": "^(?:([^|]+)\\|\\1\\s+|[^|]+\\|)(.*)$",
+            "renamePattern": "$2"
+          }
+        }
+      ]
+    },
+    {
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 10
+      },
+      "panels": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PROM6X2"
+          },
+          "description": "Sum of per-NUMA-node used bytes on MMG Target, over time. Near-static during a run; NUMA memory beside it breaks the same total out per node.",
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "axisBorderShow": false,
+                "drawStyle": "line",
+                "fillOpacity": 0,
+                "gradientMode": "none",
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "showPoints": "never",
+                "spanNulls": false
+              },
+              "unit": "bytes"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 8
+          },
+          "id": 40,
+          "options": {
+            "legend": {
+              "calcs": [
+                "mean",
+                "max",
+                "lastNotNull"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "sortBy": "Max",
+              "sortDesc": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "PROM6X2"
+              },
+              "editorMode": "code",
+              "expr": "sum by (host) (numa_node_memory_bytes{host=~\"${target:regex}\",state=\"used\"})",
+              "legendFormat": "${target:text}|{{host}} DRAM used",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "DRAM used (bytes)",
+          "type": "timeseries",
+          "transformations": [
+            {
+              "id": "renameByRegex",
+              "options": {
+                "regex": "^(?:([^|]+)\\|\\1\\s+|[^|]+\\|)(.*)$",
+                "renamePattern": "$2"
+              }
+            }
+          ]
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PROM6X2"
+          },
+          "description": "CPU busy fraction by the live NUMA CPU mapping. Each series is 1 - idle/total for the logical CPUs assigned to that NUMA node.",
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "axisBorderShow": false,
+                "drawStyle": "line",
+                "fillOpacity": 0,
+                "gradientMode": "none",
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "showPoints": "never",
+                "spanNulls": false
+              },
+              "max": 100,
+              "min": 0,
+              "unit": "percent"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 8
+          },
+          "id": 9,
+          "options": {
+            "legend": {
+              "calcs": [
+                "mean",
+                "max",
+                "lastNotNull"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "sortBy": "Max",
+              "sortDesc": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "100 * (1 - sum by (host) (rate(numa_node_cpu_seconds_total{host=~\"${target:regex}\",mode=\"idle\"}[$__rate_interval])) / sum by (host) (rate(numa_node_cpu_seconds_total{host=~\"${target:regex}\"}[$__rate_interval])))",
+              "legendFormat": "${target:text}|{{host}} aggregate",
+              "refId": "A"
+            },
+            {
+              "expr": "100 * (1 - sum by (host, node) (rate(numa_node_cpu_seconds_total{host=~\"${target:regex}\",mode=\"idle\"}[$__rate_interval])) / sum by (host, node) (rate(numa_node_cpu_seconds_total{host=~\"${target:regex}\"}[$__rate_interval])))",
+              "legendFormat": "${target:text}|{{host}} node {{node}}",
+              "refId": "B"
+            }
+          ],
+          "title": "CPU busy by NUMA node",
+          "type": "timeseries",
+          "transformations": [
+            {
+              "id": "renameByRegex",
+              "options": {
+                "regex": "^(?:([^|]+)\\|\\1\\s+|[^|]+\\|)(.*)$",
+                "renamePattern": "$2"
+              }
+            }
+          ]
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PROM6X2"
+          },
+          "description": "PCM-measured DRAM bandwidth by target, direction, and socket, in MB/s.",
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "axisBorderShow": false,
+                "drawStyle": "line",
+                "fillOpacity": 0,
+                "gradientMode": "none",
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "showPoints": "never",
+                "spanNulls": false
+              },
+              "unit": "MBps"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 16
+          },
+          "id": 10,
+          "options": {
+            "legend": {
+              "calcs": [
+                "mean",
+                "max",
+                "lastNotNull"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "sortBy": "Max",
+              "sortDesc": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "pcm_memory_bandwidth_megabytes_per_second{host=~\"${target:regex}\"}",
+              "legendFormat": "${target:text}|{{host}} {{direction}} socket {{socket}}",
+              "refId": "A"
+            }
+          ],
+          "title": "PCM DRAM bandwidth (MB/s)",
+          "type": "timeseries",
+          "transformations": [
+            {
+              "id": "renameByRegex",
+              "options": {
+                "regex": "^(?:([^|]+)\\|\\1\\s+|[^|]+\\|)(.*)$",
+                "renamePattern": "$2"
+              }
+            }
+          ]
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PROM6X2"
+          },
+          "description": "Free and used bytes per NUMA node. Page cache counts as used, so a high value during a read benchmark is expected, not pressure.",
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "axisBorderShow": false,
+                "drawStyle": "line",
+                "fillOpacity": 0,
+                "gradientMode": "none",
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "showPoints": "never",
+                "spanNulls": false
+              },
+              "unit": "bytes"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 16
+          },
+          "id": 11,
+          "options": {
+            "legend": {
+              "calcs": [
+                "mean",
+                "max",
+                "lastNotNull"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "sortBy": "Max",
+              "sortDesc": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "numa_node_memory_bytes{host=~\"${target:regex}\",state=\"free\"}",
+              "legendFormat": "${target:text}|{{host}} node {{node}} free",
+              "refId": "A"
+            },
+            {
+              "expr": "numa_node_memory_bytes{host=~\"${target:regex}\",state=\"used\"}",
+              "legendFormat": "${target:text}|{{host}} node {{node}} used",
+              "refId": "B"
+            }
+          ],
+          "title": "NUMA memory",
+          "type": "timeseries",
+          "transformations": [
+            {
+              "id": "renameByRegex",
+              "options": {
+                "regex": "^(?:([^|]+)\\|\\1\\s+|[^|]+\\|)(.*)$",
+                "renamePattern": "$2"
+              }
+            }
+          ]
+        }
+      ],
+      "title": "Host resource history",
+      "type": "row",
+      "description": "",
+      "id": 102
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 19
+      },
+      "panels": [],
+      "title": "LMCache bench l2 \u2014 measured window",
+      "type": "row",
+      "description": "",
+      "id": 103
+    },
+    {
+      "description": "Static note; carries no query.",
+      "gridPos": {
+        "h": 2,
+        "w": 24,
+        "x": 0,
+        "y": 20
+      },
+      "id": 48,
+      "options": {
+        "code": {
+          "language": "plaintext"
+        },
+        "content": "**Target** selects target storage, CPU, PCIe, and Falcon telemetry. Initiator and LMCache panels always show **mmgi0\u2013mmgi5**. **Exported namespaces** reports active kernel NVMe-oF exports; zero means this target has none. Device filters only exported namespaces.\n\n**`operation`** is the phase: `Load` is retrieve (reads), `Store` is insert (writes). The names appear on the **LMCache** tile above.\n\nIn a `Load`-only window **NVMe WR** and **RDMA RD** read ~0 by construction - that is the read path confirming itself, not a dead query. **LMCache**, **NVMe RD**, and **RDMA WR** carry the same read-response payload at successive stages; brief warmup-to-measured transitions can still differ.\n\n**RDMA WR = target-side ULP-to-fabric TX**, the target response path; **RDMA RD = target-side fabric-to-ULP RX**. Live tiles use a 30s rate from scrape-time gRPC reads; Prometheus scrapes every 4s. The Falcon history chart uses the Grafana rate window. A failed ACC collection hides the affected target payload total.",
+        "mode": "markdown"
+      },
+      "title": "Reading this section",
+      "type": "text"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM6X2"
+      },
+      "description": "Application payload goodput reported by the running bench l2 processes on the mmg initiators. The measured-phase series starts with the phase, so its rate reads low until the rate window fills; do not average the whole plotted curve for a 60s phase. Use the end-of-run JSON and counter gate for publishable throughput; this panel aligns the workload with the target-side host and NVMe trends.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "axisBorderShow": false,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "unit": "bps"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*Load$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#3987e5",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*Store$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#d95926",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 22
+      },
+      "id": 17,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (operation) (rate(lmcache_bench_l2_success_bytes_total{job=\"lmcache_bench_6x2\",host=~\"mmgi.*\",phase=\"measured\"}[$__rate_interval])) * 8",
+          "legendFormat": "aggregate {{operation}}",
+          "refId": "A"
+        }
+      ],
+      "title": "LMCache aggregate goodput (bits/s)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM6X2"
+      },
+      "description": "Total application payload goodput per initiator process. The Prometheus endpoint is short-lived and exists only while bench l2 is running. The measured-phase series starts with the phase, so its rate reads low until the rate window fills. Operations are summed here to expose imbalance across mmgi0-mmgi5 without combining the read and write aggregate lines.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "axisBorderShow": false,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "unit": "bps"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^mmgi0 init 0$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#3987e5",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^mmgi0 init 1$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#d95926",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^mmgi0 init 2$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#199e70",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^mmgi0 init 3$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#c98500",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^mmgi1 init 0$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#d55181",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^mmgi1 init 1$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#008300",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^mmgi1 init 2$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#9085e9",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^mmgi1 init 3$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#e66767",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 22
+      },
+      "id": 18,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (host, initiator) (rate(lmcache_bench_l2_success_bytes_total{job=\"lmcache_bench_6x2\",host=~\"mmgi.*\",phase=\"measured\"}[$__rate_interval])) * 8",
+          "legendFormat": "{{host}} init {{initiator}}",
+          "refId": "A"
+        }
+      ],
+      "title": "LMCache goodput by initiator (bits/s)",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 30
+      },
+      "panels": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PROM6X2"
+          },
+          "description": "Current measured-phase completed-submit rate from the short-lived bench l2 Prometheus endpoints. The series is absent during warmup and after the run.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "fixedColor": "text",
+                "mode": "fixed"
+              },
+              "noValue": "no measured phase",
+              "unit": "ops"
+            }
+          },
+          "gridPos": {
+            "h": 4,
+            "w": 8,
+            "x": 0,
+            "y": 31
+          },
+          "id": 19,
+          "options": {
+            "colorMode": "none",
+            "graphMode": "none",
+            "justifyMode": "center",
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "last"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "text": {
+              "titleSize": 14,
+              "valueSize": 26
+            },
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "sum(rate(lmcache_bench_l2_completed_submits_total{job=\"lmcache_bench_6x2\",host=~\"mmgi.*\",phase=\"measured\"}[30s]) and on (host, initiator) (up{job=\"lmcache_bench_6x2\",host=~\"mmgi.*\"} == 1))",
+              "instant": true,
+              "legendFormat": "aggregate",
+              "range": false,
+              "refId": "A"
+            }
+          ],
+          "title": "LMCache completed submits/s (last 30s)",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PROM6X2"
+          },
+          "description": "Mean measured-phase submit-to-completion latency over the query window from the short-lived bench l2 Prometheus endpoints. The series is absent during warmup and after the run. The endpoint does not expose live percentiles; use the final benchmark summary for p50/p99.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "fixedColor": "text",
+                "mode": "fixed"
+              },
+              "noValue": "no measured phase",
+              "unit": "s"
+            }
+          },
+          "gridPos": {
+            "h": 4,
+            "w": 8,
+            "x": 8,
+            "y": 31
+          },
+          "id": 20,
+          "options": {
+            "colorMode": "none",
+            "graphMode": "none",
+            "justifyMode": "center",
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "last"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "text": {
+              "titleSize": 14,
+              "valueSize": 26
+            },
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "sum by (operation) (rate(lmcache_bench_l2_submit_latency_seconds_total{job=\"lmcache_bench_6x2\",host=~\"mmgi.*\",phase=\"measured\"}[30s]) and on (host, initiator) (up{job=\"lmcache_bench_6x2\",host=~\"mmgi.*\"} == 1)) / sum by (operation) (rate(lmcache_bench_l2_completed_submits_total{job=\"lmcache_bench_6x2\",host=~\"mmgi.*\",phase=\"measured\"}[30s]) and on (host, initiator) (up{job=\"lmcache_bench_6x2\",host=~\"mmgi.*\"} == 1))",
+              "instant": true,
+              "legendFormat": "{{operation}}",
+              "range": false,
+              "refId": "A"
+            }
+          ],
+          "title": "LMCache mean submit latency by operation (last 30s)",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PROM6X2"
+          },
+          "description": "Configured in-flight target reported by each short-lived bench l2 Prometheus endpoint while the run is active.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "fixedColor": "text",
+                "mode": "fixed"
+              },
+              "min": 0,
+              "noValue": "idle"
+            }
+          },
+          "gridPos": {
+            "h": 4,
+            "w": 8,
+            "x": 16,
+            "y": 31
+          },
+          "id": 21,
+          "options": {
+            "colorMode": "none",
+            "graphMode": "none",
+            "justifyMode": "center",
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "last"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "text": {
+              "titleSize": 14,
+              "valueSize": 26
+            },
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "max by (host, initiator) (lmcache_bench_l2_in_flight_target{job=\"lmcache_bench_6x2\",host=~\"mmgi.*\",phase=\"measured\"} and on (host, initiator) (up{job=\"lmcache_bench_6x2\",host=~\"mmgi.*\"} == 1))",
+              "instant": true,
+              "legendFormat": "{{host}} i{{initiator}}",
+              "range": false,
+              "refId": "A"
+            }
+          ],
+          "title": "LMCache configured in-flight submits per initiator",
+          "type": "stat"
+        }
+      ],
+      "title": "LMCache run details \u2014 submits \u00b7 latency \u00b7 in-flight",
+      "type": "row",
+      "description": "",
+      "id": 104
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 35
+      },
+      "panels": [],
+      "title": "Target physical NVMe namespaces",
+      "type": "row",
+      "description": "",
+      "id": 105
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM6X2"
+      },
+      "description": "Number of active exported namespaces per selected target. Zero means this target has no active kernel NVMe-oF namespace exports.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 1,
+          "max": 256,
+          "min": 0,
+          "noValue": "-",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#0ca30c",
+                "value": null
+              },
+              {
+                "color": "#fab219",
+                "value": 128
+              },
+              {
+                "color": "#d03b3b",
+                "value": 192
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 36,
+        "w": 24,
+        "h": 3
+      },
+      "id": 100,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "last"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "text": {
+          "titleSize": 14,
+          "valueSize": 26
+        },
+        "textMode": "value_and_name",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PROM6X2"
+          },
+          "editorMode": "code",
+          "expr": "count by (host) (nvme_namespace_role{host=~\"${target:regex}\",role=\"exported\"}) or on (host) (0 * max by (host) (up{job=\"node_6x2\",host=~\"${target:regex}\"} == 1))",
+          "legendFormat": "${target:text}|{{host}} namespaces",
+          "range": false,
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "title": "Exported namespaces",
+      "type": "stat",
+      "transformations": [
+        {
+          "id": "renameByRegex",
+          "options": {
+            "regex": "^(?:([^|]+)\\|\\1\\s+|[^|]+\\|)(.*)$",
+            "renamePattern": "$2"
+          }
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM6X2"
+      },
+      "description": "Aggregate kernel read throughput across the target physical namespaces selected by $device, in bits/s. The summary row carries the same figure in bits/s for comparison against the fabric ceiling. Do not add this target-media view to initiator md0: they observe the same traffic at different layers.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#3987e5",
+            "mode": "fixed"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "unit": "bps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 39
+      },
+      "id": 1,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (host) ((rate(node_disk_read_bytes_total{host=~\"${target:regex}\",device=~\"${device:regex}\"}[$__rate_interval]) and on (host, device) label_replace(nvme_namespace_role{host=~\"${target:regex}\",role=\"exported\"}, \"device\", \"$1\", \"ns\", \"(.*)\"))) * 8",
+          "legendFormat": "${target:text}|{{host}} aggregate",
+          "refId": "A"
+        }
+      ],
+      "title": "NVMe read throughput (bits/s)",
+      "type": "timeseries",
+      "transformations": [
+        {
+          "id": "renameByRegex",
+          "options": {
+            "regex": "^(?:([^|]+)\\|\\1\\s+|[^|]+\\|)(.*)$",
+            "renamePattern": "$2"
+          }
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM6X2"
+      },
+      "description": "Aggregate kernel write throughput across the target physical namespaces selected by $device, in bits/s. The summary row carries the same figure in bits/s for comparison against the fabric ceiling. Do not add this target-media view to initiator md0: they observe the same traffic at different layers.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#d95926",
+            "mode": "fixed"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "unit": "bps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 39
+      },
+      "id": 2,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (host) ((rate(node_disk_written_bytes_total{host=~\"${target:regex}\",device=~\"${device:regex}\"}[$__rate_interval]) and on (host, device) label_replace(nvme_namespace_role{host=~\"${target:regex}\",role=\"exported\"}, \"device\", \"$1\", \"ns\", \"(.*)\"))) * 8",
+          "legendFormat": "${target:text}|{{host}} aggregate",
+          "refId": "A"
+        }
+      ],
+      "title": "NVMe write throughput (bits/s)",
+      "type": "timeseries",
+      "transformations": [
+        {
+          "id": "renameByRegex",
+          "options": {
+            "regex": "^(?:([^|]+)\\|\\1\\s+|[^|]+\\|)(.*)$",
+            "renamePattern": "$2"
+          }
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 47
+      },
+      "panels": [],
+      "title": "Initiator md0 / NVMe-oF",
+      "type": "row",
+      "description": "",
+      "id": 106
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM6X2"
+      },
+      "description": "Kernel read throughput of each initiator RAID0 md0 device, in bits/s. Each md0 stripes eight private NVMe-oF namespaces. This is an initiator-layer view of the same I/O as target physical NVMe, so compare it for reconciliation but do not add the two.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "unit": "bps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 48
+      },
+      "id": 107,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (host) (rate(node_disk_read_bytes_total{host=~\"mmgi[0-5]\",device=\"md0\"}[$__rate_interval])) * 8",
+          "legendFormat": "{{host}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Initiator md0 read throughput (bits/s)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM6X2"
+      },
+      "description": "Kernel write throughput of each initiator RAID0 md0 device, in bits/s. Each md0 stripes eight private NVMe-oF namespaces. This is an initiator-layer view of the same I/O as target physical NVMe, so compare it for reconciliation but do not add the two.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "unit": "bps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 48
+      },
+      "id": 108,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (host) (rate(node_disk_written_bytes_total{host=~\"mmgi[0-5]\",device=\"md0\"}[$__rate_interval])) * 8",
+          "legendFormat": "{{host}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Initiator md0 write throughput (bits/s)",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 56
+      },
+      "panels": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PROM6X2"
+          },
+          "description": "Kernel read throughput per drive, in bytes/s, on the same base as the aggregate above. Each drive keeps one colour across every per-drive and NVMe panel.",
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "axisBorderShow": false,
+                "drawStyle": "line",
+                "fillOpacity": 0,
+                "gradientMode": "none",
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "showPoints": "never",
+                "spanNulls": false
+              },
+              "unit": "bps"
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^(?:mmgt2?\\s+)?nvme1n1$"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#3987e5",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^(?:mmgt2?\\s+)?nvme3n1$"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#d95926",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^(?:mmgt2?\\s+)?nvme5n1$"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#199e70",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^(?:mmgt2?\\s+)?nvme7n1$"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#c98500",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^(?:mmgt2?\\s+)?nvme9n1$"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#d55181",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^(?:mmgt2?\\s+)?nvme11n1$"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#008300",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^(?:mmgt2?\\s+)?nvme13n1$"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#9085e9",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^(?:mmgt2?\\s+)?nvme15n1$"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#e66767",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 0,
+            "y": 57
+          },
+          "id": 3,
+          "options": {
+            "legend": {
+              "calcs": [
+                "mean",
+                "max",
+                "lastNotNull"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "sortBy": "Max",
+              "sortDesc": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "(rate(node_disk_read_bytes_total{host=~\"${target:regex}\",device=~\"${device:regex}\"}[$__rate_interval]) and on (host, device) label_replace(nvme_namespace_role{host=~\"${target:regex}\",role=\"exported\"}, \"device\", \"$1\", \"ns\", \"(.*)\")) * 8",
+              "legendFormat": "${target:text}|{{host}} {{device}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Per-drive read throughput (bits/s)",
+          "type": "timeseries",
+          "transformations": [
+            {
+              "id": "renameByRegex",
+              "options": {
+                "regex": "^(?:([^|]+)\\|\\1\\s+|[^|]+\\|)(.*)$",
+                "renamePattern": "$2"
+              }
+            }
+          ]
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PROM6X2"
+          },
+          "description": "Kernel write throughput per drive, in bytes/s, on the same base as the aggregate above. Each drive keeps one colour across every per-drive and NVMe panel.",
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "axisBorderShow": false,
+                "drawStyle": "line",
+                "fillOpacity": 0,
+                "gradientMode": "none",
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "showPoints": "never",
+                "spanNulls": false
+              },
+              "unit": "bps"
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^(?:mmgt2?\\s+)?nvme1n1$"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#3987e5",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^(?:mmgt2?\\s+)?nvme3n1$"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#d95926",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^(?:mmgt2?\\s+)?nvme5n1$"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#199e70",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^(?:mmgt2?\\s+)?nvme7n1$"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#c98500",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^(?:mmgt2?\\s+)?nvme9n1$"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#d55181",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^(?:mmgt2?\\s+)?nvme11n1$"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#008300",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^(?:mmgt2?\\s+)?nvme13n1$"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#9085e9",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^(?:mmgt2?\\s+)?nvme15n1$"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#e66767",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 8,
+            "y": 57
+          },
+          "id": 4,
+          "options": {
+            "legend": {
+              "calcs": [
+                "mean",
+                "max",
+                "lastNotNull"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "sortBy": "Max",
+              "sortDesc": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "(rate(node_disk_written_bytes_total{host=~\"${target:regex}\",device=~\"${device:regex}\"}[$__rate_interval]) and on (host, device) label_replace(nvme_namespace_role{host=~\"${target:regex}\",role=\"exported\"}, \"device\", \"$1\", \"ns\", \"(.*)\")) * 8",
+              "legendFormat": "${target:text}|{{host}} {{device}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Per-drive write throughput (bits/s)",
+          "type": "timeseries",
+          "transformations": [
+            {
+              "id": "renameByRegex",
+              "options": {
+                "regex": "^(?:([^|]+)\\|\\1\\s+|[^|]+\\|)(.*)$",
+                "renamePattern": "$2"
+              }
+            }
+          ]
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PROM6X2"
+          },
+          "description": "Kernel disk I/O active fraction. A value of 1.0 does not prove NVMe throughput saturation on a multi-queue device.",
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "axisBorderShow": false,
+                "drawStyle": "line",
+                "fillOpacity": 0,
+                "gradientMode": "none",
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "showPoints": "never",
+                "spanNulls": false
+              },
+              "min": 0,
+              "unit": "percentunit"
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^(?:mmgt2?\\s+)?nvme1n1$"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#3987e5",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^(?:mmgt2?\\s+)?nvme3n1$"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#d95926",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^(?:mmgt2?\\s+)?nvme5n1$"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#199e70",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^(?:mmgt2?\\s+)?nvme7n1$"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#c98500",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^(?:mmgt2?\\s+)?nvme9n1$"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#d55181",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^(?:mmgt2?\\s+)?nvme11n1$"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#008300",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^(?:mmgt2?\\s+)?nvme13n1$"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#9085e9",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^(?:mmgt2?\\s+)?nvme15n1$"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#e66767",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 16,
+            "y": 57
+          },
+          "id": 5,
+          "options": {
+            "legend": {
+              "calcs": [
+                "mean",
+                "max",
+                "lastNotNull"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "sortBy": "Max",
+              "sortDesc": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "(rate(node_disk_io_time_seconds_total{host=~\"${target:regex}\",device=~\"${device:regex}\"}[30s]) and on (host, device) label_replace(nvme_namespace_role{host=~\"${target:regex}\",role=\"exported\"}, \"device\", \"$1\", \"ns\", \"(.*)\"))",
+              "legendFormat": "${target:text}|{{host}} {{device}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Per-drive I/O active fraction",
+          "type": "timeseries",
+          "transformations": [
+            {
+              "id": "renameByRegex",
+              "options": {
+                "regex": "^(?:([^|]+)\\|\\1\\s+|[^|]+\\|)(.*)$",
+                "renamePattern": "$2"
+              }
+            }
+          ]
+        }
+      ],
+      "title": "Per-drive statistics",
+      "type": "row",
+      "description": "",
+      "id": 109
+    },
+    {
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 65
+      },
+      "panels": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PROM6X2"
+          },
+          "description": "Fraction of wall-clock time the controller reported itself busy, from SMART controller_busy_time. The counter has minute-level granularity, so short bursts are smeared.",
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "axisBorderShow": false,
+                "drawStyle": "line",
+                "fillOpacity": 0,
+                "gradientMode": "none",
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "showPoints": "never",
+                "spanNulls": false
+              },
+              "min": 0,
+              "unit": "percentunit"
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^(?:mmgt2?\\s+)?nvme1n1$"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#3987e5",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^(?:mmgt2?\\s+)?nvme3n1$"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#d95926",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^(?:mmgt2?\\s+)?nvme5n1$"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#199e70",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^(?:mmgt2?\\s+)?nvme7n1$"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#c98500",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^(?:mmgt2?\\s+)?nvme9n1$"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#d55181",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^(?:mmgt2?\\s+)?nvme11n1$"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#008300",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^(?:mmgt2?\\s+)?nvme13n1$"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#9085e9",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^(?:mmgt2?\\s+)?nvme15n1$"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#e66767",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 0,
+            "y": 66
+          },
+          "id": 13,
+          "options": {
+            "legend": {
+              "calcs": [
+                "mean",
+                "max",
+                "lastNotNull"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "sortBy": "Max",
+              "sortDesc": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "(rate(nvme_smart_field{host=~\"${target:regex}\",ns=~\"${device:regex}\",field=\"controller_busy_time\"}[1m]) and on (host, ns) nvme_namespace_role{host=~\"${target:regex}\",role=\"exported\"}) * 60",
+              "legendFormat": "${target:text}|{{host}} {{ns}}",
+              "refId": "A"
+            }
+          ],
+          "title": "NVMe controller busy fraction",
+          "type": "timeseries",
+          "transformations": [
+            {
+              "id": "renameByRegex",
+              "options": {
+                "regex": "^(?:([^|]+)\\|\\1\\s+|[^|]+\\|)(.*)$",
+                "renamePattern": "$2"
+              }
+            }
+          ]
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PROM6X2"
+          },
+          "description": "Composite temperature from SMART, converted from Kelvin. Read it for throttling correlation rather than for absolute values.",
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "axisBorderShow": false,
+                "drawStyle": "line",
+                "fillOpacity": 0,
+                "gradientMode": "none",
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "showPoints": "never",
+                "spanNulls": false
+              },
+              "unit": "celsius"
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^(?:mmgt2?\\s+)?nvme1n1$"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#3987e5",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^(?:mmgt2?\\s+)?nvme3n1$"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#d95926",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^(?:mmgt2?\\s+)?nvme5n1$"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#199e70",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^(?:mmgt2?\\s+)?nvme7n1$"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#c98500",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^(?:mmgt2?\\s+)?nvme9n1$"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#d55181",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^(?:mmgt2?\\s+)?nvme11n1$"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#008300",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^(?:mmgt2?\\s+)?nvme13n1$"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#9085e9",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^(?:mmgt2?\\s+)?nvme15n1$"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#e66767",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 8,
+            "y": 66
+          },
+          "id": 12,
+          "options": {
+            "legend": {
+              "calcs": [
+                "mean",
+                "max",
+                "lastNotNull"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "sortBy": "Max",
+              "sortDesc": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "(nvme_smart_field{host=~\"${target:regex}\",ns=~\"${device:regex}\",field=\"temperature\"} and on (host, ns) nvme_namespace_role{host=~\"${target:regex}\",role=\"exported\"}) - 273.15",
+              "legendFormat": "${target:text}|{{host}} {{ns}}",
+              "refId": "A"
+            }
+          ],
+          "title": "NVMe temperature",
+          "type": "timeseries",
+          "transformations": [
+            {
+              "id": "renameByRegex",
+              "options": {
+                "regex": "^(?:([^|]+)\\|\\1\\s+|[^|]+\\|)(.*)$",
+                "renamePattern": "$2"
+              }
+            }
+          ]
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PROM6X2"
+          },
+          "description": "SMART media_errors and num_err_log_entries, cumulative since power-on. A non-zero slope during a run is worth investigating; a flat non-zero value is history.",
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "axisBorderShow": false,
+                "drawStyle": "line",
+                "fillOpacity": 0,
+                "gradientMode": "none",
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "showPoints": "never",
+                "spanNulls": false
+              },
+              "min": 0,
+              "unit": "short"
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^(?:mmgt2?\\s+)?nvme1n1 .*"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#3987e5",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^(?:mmgt2?\\s+)?nvme3n1 .*"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#d95926",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^(?:mmgt2?\\s+)?nvme5n1 .*"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#199e70",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^(?:mmgt2?\\s+)?nvme7n1 .*"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#c98500",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^(?:mmgt2?\\s+)?nvme9n1 .*"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#d55181",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^(?:mmgt2?\\s+)?nvme11n1 .*"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#008300",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^(?:mmgt2?\\s+)?nvme13n1 .*"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#9085e9",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "^(?:mmgt2?\\s+)?nvme15n1 .*"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#e66767",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 16,
+            "y": 66
+          },
+          "id": 14,
+          "options": {
+            "legend": {
+              "calcs": [
+                "mean",
+                "max",
+                "lastNotNull"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "sortBy": "Max",
+              "sortDesc": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "(nvme_smart_field{host=~\"${target:regex}\",ns=~\"${device:regex}\",field=~\"media_errors|num_err_log_entries\"} and on (host, ns) nvme_namespace_role{host=~\"${target:regex}\",role=\"exported\"})",
+              "legendFormat": "${target:text}|{{host}} {{ns}} {{field}}",
+              "refId": "A"
+            }
+          ],
+          "title": "NVMe error counters",
+          "type": "timeseries",
+          "transformations": [
+            {
+              "id": "renameByRegex",
+              "options": {
+                "regex": "^(?:([^|]+)\\|\\1\\s+|[^|]+\\|)(.*)$",
+                "renamePattern": "$2"
+              }
+            }
+          ]
+        }
+      ],
+      "title": "Advanced NVMe statistics",
+      "type": "row",
+      "description": "",
+      "id": 110
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 74
+      },
+      "panels": [],
+      "title": "Fabric and platform",
+      "type": "row",
+      "description": "",
+      "id": 111
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM6X2"
+      },
+      "description": "PCM event classification per direction and socket, on the same >1 GB/s traffic gate as the hit % panel beside it. Log y-axis because the miss series runs two to three orders of magnitude below the hit series and is invisible on a linear scale. Not an end-to-end DDIO proof.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "axisBorderShow": false,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "log": 10,
+              "type": "log"
+            },
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "unit": "Bps"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(?:mmgt2?\\s+)?read .* hit$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#3987e5",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(?:mmgt2?\\s+)?read .* miss$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#9085e9",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "dash": [
+                    8,
+                    4
+                  ],
+                  "fill": "dash"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(?:mmgt2?\\s+)?write .* hit$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#d95926",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(?:mmgt2?\\s+)?write .* miss$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#c98500",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "dash": [
+                    8,
+                    4
+                  ],
+                  "fill": "dash"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 75
+      },
+      "id": 8,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "pcm_pcie_bandwidth_bytes_per_second{host=~\"${target:regex}\",classification=~\"hit|miss\"} and on (host, direction, socket) (pcm_pcie_bandwidth_bytes_per_second{host=~\"${target:regex}\",classification=\"total\"} > 1e9)",
+          "legendFormat": "${target:text}|{{host}} {{direction}} socket {{socket}} {{classification}}",
+          "refId": "A"
+        }
+      ],
+      "title": "PCIe LLC hit/miss \u2014 all sockets (bytes/s, log)",
+      "type": "timeseries",
+      "transformations": [
+        {
+          "id": "renameByRegex",
+          "options": {
+            "regex": "^(?:([^|]+)\\|\\1\\s+|[^|]+\\|)(.*)$",
+            "renamePattern": "$2"
+          }
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM6X2"
+      },
+      "description": "PCM hit / (hit + miss) per selected target, direction, and socket. Hidden below 1 GB/s of PCIe traffic to avoid idle-noise ratios. PCM cache classification is not end-to-end DDIO proof.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "axisBorderShow": false,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "max": 100,
+          "min": 0,
+          "unit": "percent"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(?:mmgt2?\\s+)?read .*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#3987e5",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(?:mmgt2?\\s+)?write .*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#d95926",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 75
+      },
+      "id": 44,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "100 * sum by (host, direction, socket) (pcm_pcie_bandwidth_bytes_per_second{host=~\"${target:regex}\",classification=\"hit\"}) / sum by (host, direction, socket) (pcm_pcie_bandwidth_bytes_per_second{host=~\"${target:regex}\",classification=~\"hit|miss\"}) and on (host, direction, socket) (pcm_pcie_bandwidth_bytes_per_second{host=~\"${target:regex}\",classification=\"total\"} > 1e9)",
+          "legendFormat": "${target:text}|{{host}} {{direction}} socket {{socket}} LLC hit %",
+          "refId": "A"
+        }
+      ],
+      "title": "PCIe LLC hit % \u2014 all sockets",
+      "type": "timeseries",
+      "transformations": [
+        {
+          "id": "renameByRegex",
+          "options": {
+            "regex": "^(?:([^|]+)\\|\\1\\s+|[^|]+\\|)(.*)$",
+            "renamePattern": "$2"
+          }
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM6X2"
+      },
+      "description": "PCM total PCIe bandwidth by selected target, direction, and socket. Includes traffic this benchmark does not originate.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "axisBorderShow": false,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "unit": "Bps"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(?:mmgt2?\\s+)?read .*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#3987e5",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(?:mmgt2?\\s+)?write .*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#d95926",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 83
+      },
+      "id": 7,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "pcm_pcie_bandwidth_bytes_per_second{host=~\"${target:regex}\",classification=\"total\"}",
+          "legendFormat": "${target:text}|{{host}} {{direction}} socket {{socket}}",
+          "refId": "A"
+        }
+      ],
+      "title": "PCIe traffic by socket (bytes/s)",
+      "type": "timeseries",
+      "transformations": [
+        {
+          "id": "renameByRegex",
+          "options": {
+            "regex": "^(?:([^|]+)\\|\\1\\s+|[^|]+\\|)(.*)$",
+            "renamePattern": "$2"
+          }
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM6X2"
+      },
+      "description": "Four target ACC payload trends read at Prometheus scrape time. A missing ACC hides the fleet total.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "axisBorderShow": false,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "unit": "bps"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(?:mmgt2?\\s+)?RDMA WR.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#3987e5",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(?:mmgt2?\\s+)?RDMA RD.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#d95926",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 83
+      },
+      "id": 6,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (host) (rate(acc_tele_field{acc=~\"${acc:regex}\",job=\"acc_grpc_6x2\",host=~\"${target:regex}\",field=\"bytes_to_ulp\"}[$__rate_interval])) * 8 and on (host) (acc_telemetry_exporter_complete{job=\"acc_grpc_6x2\",host=~\"${target:regex}\"} == 1)",
+          "legendFormat": "${target:text}|{{host}} RDMA RD \u00b7 Fabric \u2192 ULP",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (host) (rate(acc_tele_field{acc=~\"${acc:regex}\",job=\"acc_grpc_6x2\",host=~\"${target:regex}\",field=\"bytes_from_ulp_rc\"}[$__rate_interval])) * 8 and on (host) (acc_telemetry_exporter_complete{job=\"acc_grpc_6x2\",host=~\"${target:regex}\"} == 1)",
+          "legendFormat": "${target:text}|{{host}} RDMA WR \u00b7 ULP \u2192 Fabric",
+          "refId": "B"
+        }
+      ],
+      "title": "Falcon RDMA payload (bits/s)",
+      "type": "timeseries",
+      "transformations": [
+        {
+          "id": "renameByRegex",
+          "options": {
+            "regex": "^(?:([^|]+)\\|\\1\\s+|[^|]+\\|)(.*)$",
+            "renamePattern": "$2"
+          }
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 91
+      },
+      "panels": [],
+      "title": "ACC / IPU \u2014 Falcon cores",
+      "type": "row",
+      "description": "",
+      "id": 112
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM6X2"
+      },
+      "description": "Aggregate ACC CPU busy percentage per IPU. Two poll-mode threads are pinned at 100%, so the expected idle floor is about 8.3% across 24 cores. Treat changes above that floor as ACC CPU activity, not transport throughput.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "axisBorderShow": false,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "max": 100,
+          "min": 0,
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 92
+      },
+      "id": 16,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "acc_cpu_busy_percent{acc=~\"${acc:regex}\",host=~\"${target:regex}\",core=\"cpu\"}",
+          "legendFormat": "${target:text}|{{host}} {{acc}} aggregate",
+          "refId": "A"
+        }
+      ],
+      "title": "ACC aggregate busy % by IPU",
+      "type": "timeseries",
+      "transformations": [
+        {
+          "id": "renameByRegex",
+          "options": {
+            "regex": "^(?:([^|]+)\\|\\1\\s+|[^|]+\\|)(.*)$",
+            "renamePattern": "$2"
+          }
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM6X2"
+      },
+      "description": "Per-core ACC CPU busy percentage from two /proc/stat reads one second apart, sampled every 30 seconds over the netns -> IMC -> ACC SSH path. Poll-mode cores cpu5 and cpu8 are expected to remain near 100%. Shown as last-value bars because 24 cores per IPU cannot be told apart as lines; ACC aggregate busy % above carries the history.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#3987e5",
+            "mode": "fixed"
+          },
+          "decimals": 0,
+          "max": 100,
+          "min": 0,
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 0,
+        "y": 100
+      },
+      "id": 15,
+      "options": {
+        "displayMode": "basic",
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "maxVizHeight": 20,
+        "minVizHeight": 12,
+        "minVizWidth": 8,
+        "namePlacement": "left",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": true,
+        "sizing": "auto",
+        "text": {
+          "titleSize": 12,
+          "valueSize": 12
+        },
+        "valueMode": "text"
+      },
+      "repeat": "acc",
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "acc_cpu_busy_percent{host=~\"${target:regex}\",acc=~\"${acc:regex}\",core!=\"cpu\"}",
+          "legendFormat": "${target:text}|{{host}} {{acc}} {{core}}",
+          "refId": "A"
+        }
+      ],
+      "title": "ACC per-core busy % \u2014 $acc",
+      "type": "bargauge",
+      "transformations": [
+        {
+          "id": "renameByRegex",
+          "options": {
+            "regex": "^(?:([^|]+)\\|\\1\\s+|[^|]+\\|)(.*)$",
+            "renamePattern": "$2"
+          }
+        }
+      ]
+    },
+    {
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 110
+      },
+      "panels": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PROM6X2"
+          },
+          "description": "Per-ACC telemetry for the selected target and ACCs.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [],
+              "max": 24,
+              "min": 0,
+              "noValue": "-",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "#0ca30c",
+                    "value": null
+                  },
+                  {
+                    "color": "#fab219",
+                    "value": 12
+                  },
+                  {
+                    "color": "#d03b3b",
+                    "value": 20
+                  }
+                ]
+              },
+              "unit": "none"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 111,
+            "w": 8,
+            "h": 4
+          },
+          "id": 25,
+          "options": {
+            "colorMode": "value",
+            "graphMode": "none",
+            "justifyMode": "center",
+            "orientation": "horizontal",
+            "reduceOptions": {
+              "calcs": [
+                "last"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "text": {
+              "titleSize": 14,
+              "valueSize": 26
+            },
+            "textMode": "value_and_name",
+            "wideLayout": true
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "PROM6X2"
+              },
+              "editorMode": "code",
+              "expr": "sum by (host, acc) (acc_cpu_busy_percent{host=~\"${target:regex}\",acc=~\"${acc:regex}\",core=~\"cpu[0-9]+\"}) / 100",
+              "legendFormat": "${target:text}|{{host}} {{acc}}",
+              "range": false,
+              "refId": "A",
+              "instant": true
+            }
+          ],
+          "title": "ACC cores busy",
+          "type": "stat",
+          "transformations": [
+            {
+              "id": "renameByRegex",
+              "options": {
+                "regex": "^(?:([^|]+)\\|\\1\\s+|[^|]+\\|)(.*)$",
+                "renamePattern": "$2"
+              }
+            }
+          ]
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PROM6X2"
+          },
+          "description": "Per-ACC telemetry for the selected target and ACCs.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "fixedColor": "#d95926",
+                "mode": "fixed"
+              },
+              "mappings": [],
+              "noValue": "No data",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "#d95926",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "bps"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "x": 8,
+            "y": 111,
+            "w": 8,
+            "h": 4
+          },
+          "id": 26,
+          "options": {
+            "colorMode": "value",
+            "graphMode": "none",
+            "justifyMode": "center",
+            "orientation": "horizontal",
+            "reduceOptions": {
+              "calcs": [
+                "last"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "text": {
+              "titleSize": 14,
+              "valueSize": 26
+            },
+            "textMode": "value_and_name",
+            "wideLayout": true
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "PROM6X2"
+              },
+              "editorMode": "code",
+              "expr": "sum by (host, acc) (rate(acc_tele_field{job=\"acc_grpc_6x2\",host=~\"${target:regex}\",acc=~\"${acc:regex}\",field=\"bytes_to_ulp\"}[30s])) * 8 and on (host, acc) (acc_telemetry_collector_success{job=\"acc_grpc_6x2\",host=~\"${target:regex}\",acc=~\"${acc:regex}\"} == 1)",
+              "legendFormat": "${target:text}|{{host}} {{acc}}",
+              "range": false,
+              "refId": "A",
+              "instant": true
+            }
+          ],
+          "title": "RDMA RD by ACC (last 30s)",
+          "type": "stat",
+          "transformations": [
+            {
+              "id": "renameByRegex",
+              "options": {
+                "regex": "^(?:([^|]+)\\|\\1\\s+|[^|]+\\|)(.*)$",
+                "renamePattern": "$2"
+              }
+            }
+          ]
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PROM6X2"
+          },
+          "description": "Per-ACC telemetry for the selected target and ACCs.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "fixedColor": "#3987e5",
+                "mode": "fixed"
+              },
+              "mappings": [],
+              "noValue": "No data",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "#3987e5",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "bps"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "x": 16,
+            "y": 111,
+            "w": 8,
+            "h": 4
+          },
+          "id": 27,
+          "options": {
+            "colorMode": "value",
+            "graphMode": "none",
+            "justifyMode": "center",
+            "orientation": "horizontal",
+            "reduceOptions": {
+              "calcs": [
+                "last"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "text": {
+              "titleSize": 14,
+              "valueSize": 26
+            },
+            "textMode": "value_and_name",
+            "wideLayout": true
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "PROM6X2"
+              },
+              "editorMode": "code",
+              "expr": "sum by (host, acc) (rate(acc_tele_field{job=\"acc_grpc_6x2\",host=~\"${target:regex}\",acc=~\"${acc:regex}\",field=\"bytes_from_ulp_rc\"}[30s])) * 8 and on (host, acc) (acc_telemetry_collector_success{job=\"acc_grpc_6x2\",host=~\"${target:regex}\",acc=~\"${acc:regex}\"} == 1)",
+              "legendFormat": "${target:text}|{{host}} {{acc}}",
+              "range": false,
+              "refId": "A",
+              "instant": true
+            }
+          ],
+          "title": "RDMA WR by ACC (last 30s)",
+          "type": "stat",
+          "transformations": [
+            {
+              "id": "renameByRegex",
+              "options": {
+                "regex": "^(?:([^|]+)\\|\\1\\s+|[^|]+\\|)(.*)$",
+                "renamePattern": "$2"
+              }
+            }
+          ]
+        }
+      ],
+      "title": "IPU adapter details \u2014 selected target / ACCs",
+      "type": "row",
+      "description": "",
+      "id": 113
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM6X2"
+      },
+      "description": "Aggregate ACC CPU busy percentage on mmgi0-mmgi5. The aggregate includes the expected polling floor.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "axisBorderShow": false,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "max": 100,
+          "min": 0,
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 92
+      },
+      "id": 53,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "acc_cpu_busy_percent{host=~\"mmgi.*\",core=\"cpu\"}",
+          "legendFormat": "{{host}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Initiator ACC aggregate busy % by host",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 120
+      },
+      "panels": [],
+      "title": "Sanity checks",
+      "type": "row",
+      "description": "",
+      "id": 114
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM6X2"
+      },
+      "description": "What each initiator is actually running, for correlating a number elsewhere on this dashboard with the run that produced it. `model` is the --kvcache-shape-profile file's stem (e.g. mixtral_8x22b_fp8_64k), the same identifier result JSON filenames and the sweep tables in README-model-geometry.md use -- or the resolved geometry's own model name when no profile file was given. Scrub the dashboard's time picker and this table follows: it shows whatever was last true within the selected window, same as any other panel here.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 121
+      },
+      "id": 56,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PROM6X2"
+          },
+          "editorMode": "code",
+          "expr": "last_over_time(lmcache_bench_l2_in_flight_target{job=\"lmcache_bench_6x2\",host=~\"mmgi.*\"}[$__range])",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "__auto",
+          "refId": "A"
+        }
+      ],
+      "title": "Runs in selected range \u2014 model, operation, phase, in-flight",
+      "type": "table"
+    }
+  ],
+  "refresh": "4s",
+  "schemaVersion": 39,
+  "tags": [
+    "6x2",
+    "fio",
+    "lmcache",
+    "mmgt",
+    "storage"
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "target",
+        "label": "Target",
+        "type": "custom",
+        "query": "mmgt,mmgt2",
+        "includeAll": true,
+        "allValue": "mmgt|mmgt2",
+        "multi": false,
+        "current": {
+          "text": "mmgt",
+          "value": "mmgt",
+          "selected": true
+        },
+        "options": [
+          {
+            "text": "All",
+            "value": "$__all",
+            "selected": false
+          },
+          {
+            "text": "mmgt",
+            "value": "mmgt",
+            "selected": true
+          },
+          {
+            "text": "mmgt2",
+            "value": "mmgt2",
+            "selected": false
+          }
+        ],
+        "description": "Select target telemetry. Initiator and LMCache panels continue to show all six initiators."
+      },
+      {
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "PROM6X2"
+        },
+        "description": "Exported namespaces on the selected target(s).",
+        "includeAll": true,
+        "label": "Device",
+        "multi": true,
+        "name": "device",
+        "query": "label_values(nvme_namespace_role{host=~\"${target:regex}\",role=\"exported\"}, ns)",
+        "type": "query",
+        "refresh": 1,
+        "allValue": ".*"
+      },
+      {
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "PROM6X2"
+        },
+        "includeAll": true,
+        "label": "IPU / ACC",
+        "multi": true,
+        "name": "acc",
+        "query": "label_values(acc_cpu_busy_percent{host=~\"${target:regex}\"}, acc)",
+        "refresh": 1,
+        "type": "query",
+        "allValue": ".*",
+        "description": "ACCs on the selected target(s)."
+      }
+    ]
+  },
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": [
+      "4s",
+      "5s",
+      "10s",
+      "30s",
+      "1m",
+      "5m",
+      "15m",
+      "30m",
+      "1h",
+      "2h",
+      "1d"
+    ]
+  },
+  "title": "MMG Target - Storage (6x2)",
+  "uid": "lmcache-6x2",
+  "version": 8,
+  "id": null,
+  "description": "Six initiators with selectable target telemetry: mmgt, mmgt2, or both. Target selection applies to target panels; initiator and LMCache panels always show all six initiators."
+}
