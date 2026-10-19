@@ -1,0 +1,18 @@
+[Unit]
+Description=Restore private LMCache native namespace exports
+Wants=network-online.target
+Requires=sys-kernel-config.mount
+After=sys-kernel-config.mount network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=/usr/sbin/modprobe nvmet-rdma
+ExecStart=/usr/bin/python3 /etc/nvmet/lmcache-ns6x8/setup_mmgt_namespace_6x8.py export --manifest /etc/nvmet/lmcache-ns6x8/manifest.json
+Restart=on-failure
+RestartSec=20
+TimeoutStartSec=180
+
+[Install]
+WantedBy=multi-user.target
