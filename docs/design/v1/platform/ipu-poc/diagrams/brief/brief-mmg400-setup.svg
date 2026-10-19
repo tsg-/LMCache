@@ -1,0 +1,113 @@
+<svg width="624" height="286" viewBox="0 0 624 286" xmlns="http://www.w3.org/2000/svg" font-family="Calibri, Carlito, Helvetica, Arial, sans-serif">
+  <!--
+    MMG-400 next-step rig for the mkp brief, page 3. Authored at 624x286 px so
+    that at 96 dpi it is exactly 6.5 x 2.98 in (the document text column) and
+    the 10.5 px labels land at about 8 pt on the page. Rendered to PNG at 300
+    dpi with: rsvg-convert -w 1950 brief-mmg400-setup.svg -o brief-mmg400-setup.png
+
+    Content follows the reviewed MMG-400 setup sketch: N independent Xeon
+    initiators running unmodified LMCache over kernel nvme_rdma with disjoint
+    namespaces; a Falcon fabric of 4x 400 GbE links with one active in phase 1;
+    a dual-socket Xeon target carrying 16 Gen5 NVMe x4 SSDs and 4 MMG-400 IPUs,
+    eight drives and two IPUs per socket. The IPUs do Falcon transport offload
+    only, matching the 100 GbE rig in brief-setup-flows.svg.
+
+    Fills follow the shared role palette used across the ipu-poc diagram set:
+    blue = NVMe media, purple = compute, green = DRAM, amber = IPU and fabric.
+
+    Every string is budgeted to its box at 10.5 px (about 5.4 px per character);
+    the socket group boxes are 268 px, the IPU boxes 128 px. Widen a box before
+    lengthening a label; SVG does not wrap text.
+  -->
+  <rect x="0" y="0" width="624" height="286" fill="#ffffff"/>
+
+  <!-- Initiators: N independent hosts, drawn as a shingled stack -->
+  <rect x="10" y="66" width="132" height="86" rx="5" fill="#ffffff" stroke="#bbbbbb" stroke-width="1"/>
+  <rect x="6" y="62" width="132" height="86" rx="5" fill="#ffffff" stroke="#bbbbbb" stroke-width="1"/>
+  <rect x="2" y="58" width="132" height="86" rx="5" fill="#fcfcfb" stroke="#222222" stroke-width="1" stroke-dasharray="4 3"/>
+  <text x="68" y="76" text-anchor="middle" font-size="11.5" font-weight="bold" fill="#000000">Initiators (x N)</text>
+  <text x="12" y="92" font-size="10" fill="#333333">Xeon hosts, independent</text>
+  <text x="12" y="105" font-size="10" fill="#333333">unmodified LMCache</text>
+  <text x="12" y="118" font-size="10" fill="#333333">kernel nvme_rdma</text>
+  <text x="12" y="131" font-size="10" fill="#333333">disjoint namespaces each</text>
+
+  <!-- Falcon fabric -->
+  <line x1="138" y1="101" x2="168" y2="101" stroke="#222222" stroke-width="1.2"/>
+  <rect x="168" y="72" width="96" height="58" rx="5" fill="#fdf1e2" stroke="#222222" stroke-width="1"/>
+  <text x="216" y="90" text-anchor="middle" font-size="11" font-weight="bold" fill="#000000">Falcon fabric</text>
+  <text x="216" y="105" text-anchor="middle" font-size="10" fill="#333333">4x 400 GbE links</text>
+  <text x="216" y="118" text-anchor="middle" font-size="10" fill="#333333">MTU 4096</text>
+  <line x1="264" y1="101" x2="292" y2="101" stroke="#222222" stroke-width="1.2"/>
+
+  <!-- KV cache node: dual-socket target -->
+  <rect x="292" y="10" width="328" height="230" rx="6" fill="#fcfcfb" stroke="#222222" stroke-width="1" stroke-dasharray="4 3"/>
+  <text x="456" y="27" text-anchor="middle" font-size="11.5" font-weight="bold" fill="#000000">KV cache node (NVMe-oF target)</text>
+  <text x="456" y="41" text-anchor="middle" font-size="9.5" fill="#555555">dual-socket Xeon, nvmet-rdma; IPUs do transport offload only</text>
+
+  <!-- Media, one bank per socket -->
+  <rect x="302" y="50" width="150" height="30" rx="4" fill="#dceaf7" stroke="#222222" stroke-width="0.8"/>
+  <text x="377" y="63" text-anchor="middle" font-size="10.5" font-weight="bold" fill="#000000">8x Gen5 NVMe x4</text>
+  <text x="377" y="75" text-anchor="middle" font-size="9.5" fill="#333333">ns 1 - ns 8</text>
+  <rect x="460" y="50" width="150" height="30" rx="4" fill="#dceaf7" stroke="#222222" stroke-width="0.8"/>
+  <text x="535" y="63" text-anchor="middle" font-size="10.5" font-weight="bold" fill="#000000">8x Gen5 NVMe x4</text>
+  <text x="535" y="75" text-anchor="middle" font-size="9.5" fill="#333333">ns 9 - ns 16</text>
+
+  <line x1="377" y1="80" x2="377" y2="104" stroke="#222222" stroke-width="1"/>
+  <line x1="535" y1="80" x2="535" y2="104" stroke="#222222" stroke-width="1"/>
+
+  <!-- Sockets, with DRAM alongside each -->
+  <rect x="302" y="104" width="150" height="38" rx="4" fill="#e6e2f5" stroke="#222222" stroke-width="0.8"/>
+  <text x="377" y="120" text-anchor="middle" font-size="10.5" font-weight="bold" fill="#000000">Xeon socket 0</text>
+  <text x="377" y="133" text-anchor="middle" font-size="9.5" fill="#333333">PCIe root complex</text>
+  <rect x="460" y="104" width="150" height="38" rx="4" fill="#e6e2f5" stroke="#222222" stroke-width="0.8"/>
+  <text x="535" y="120" text-anchor="middle" font-size="10.5" font-weight="bold" fill="#000000">Xeon socket 1</text>
+  <text x="535" y="133" text-anchor="middle" font-size="9.5" fill="#333333">PCIe root complex</text>
+
+  <line x1="452" y1="123" x2="460" y2="123" stroke="#222222" stroke-width="1" stroke-dasharray="3 2"/>
+  <text x="456" y="99" text-anchor="middle" font-size="9" fill="#666666">UPI</text>
+
+  <!-- DRAM outboard of each socket, IPUs inboard: two per socket, so the pair
+       under each socket box is that socket's own PCIe attachment. -->
+  <line x1="337" y1="142" x2="337" y2="166" stroke="#222222" stroke-width="1"/>
+  <line x1="417" y1="142" x2="417" y2="166" stroke="#222222" stroke-width="1"/>
+  <line x1="495" y1="142" x2="495" y2="166" stroke="#222222" stroke-width="1"/>
+  <line x1="575" y1="142" x2="575" y2="166" stroke="#222222" stroke-width="1"/>
+  <text x="456" y="252" text-anchor="middle" font-size="9" fill="#666666">2x PCIe Gen5 x16 per socket</text>
+
+  <rect x="302" y="166" width="70" height="26" rx="4" fill="#e8f3e6" stroke="#222222" stroke-width="0.8"/>
+  <text x="337" y="177" text-anchor="middle" font-size="10" font-weight="bold" fill="#000000">DRAM</text>
+  <text x="337" y="188" text-anchor="middle" font-size="9" fill="#333333">staging</text>
+  <rect x="540" y="166" width="70" height="26" rx="4" fill="#e8f3e6" stroke="#222222" stroke-width="0.8"/>
+  <text x="575" y="177" text-anchor="middle" font-size="10" font-weight="bold" fill="#000000">DRAM</text>
+  <text x="575" y="188" text-anchor="middle" font-size="9" fill="#333333">staging</text>
+
+  <rect x="382" y="166" width="70" height="26" rx="4" fill="#fdf1e2" stroke="#222222" stroke-width="0.8"/>
+  <text x="417" y="177" text-anchor="middle" font-size="9.5" font-weight="bold" fill="#000000">MMG-400</text>
+  <text x="417" y="188" text-anchor="middle" font-size="9" fill="#333333">IPU 0</text>
+  <rect x="382" y="198" width="70" height="26" rx="4" fill="#fdf1e2" stroke="#222222" stroke-width="0.8"/>
+  <text x="417" y="209" text-anchor="middle" font-size="9.5" font-weight="bold" fill="#000000">MMG-400</text>
+  <text x="417" y="220" text-anchor="middle" font-size="9" fill="#333333">IPU 1</text>
+  <rect x="460" y="166" width="70" height="26" rx="4" fill="#fdf1e2" stroke="#222222" stroke-width="0.8"/>
+  <text x="495" y="177" text-anchor="middle" font-size="9.5" font-weight="bold" fill="#000000">MMG-400</text>
+  <text x="495" y="188" text-anchor="middle" font-size="9" fill="#333333">IPU 2</text>
+  <rect x="460" y="198" width="70" height="26" rx="4" fill="#fdf1e2" stroke="#222222" stroke-width="0.8"/>
+  <text x="495" y="209" text-anchor="middle" font-size="9.5" font-weight="bold" fill="#000000">MMG-400</text>
+  <text x="495" y="220" text-anchor="middle" font-size="9" fill="#333333">IPU 3</text>
+  <line x1="417" y1="192" x2="417" y2="198" stroke="#222222" stroke-width="1"/>
+  <line x1="495" y1="192" x2="495" y2="198" stroke="#222222" stroke-width="1"/>
+  <text x="456" y="236" text-anchor="middle" font-size="9" fill="#333333">1x 400 GbE each</text>
+
+  <!-- Phase note -->
+  <text x="292" y="266" font-size="9.5" fill="#666666">Phase 1: initiator traffic terminates on IPU 0's 400 GbE link only; IPUs 1-3 idle.</text>
+  <text x="292" y="279" font-size="9.5" fill="#666666">Follow-on scales across all four links (4x 400 GbE aggregate).</text>
+
+  <!-- Legend -->
+  <rect x="2" y="176" width="10" height="10" rx="2" fill="#dceaf7" stroke="#222222" stroke-width="0.8"/>
+  <text x="18" y="185" font-size="9" fill="#333333">NVMe media</text>
+  <rect x="2" y="192" width="10" height="10" rx="2" fill="#e6e2f5" stroke="#222222" stroke-width="0.8"/>
+  <text x="18" y="201" font-size="9" fill="#333333">Compute</text>
+  <rect x="2" y="208" width="10" height="10" rx="2" fill="#e8f3e6" stroke="#222222" stroke-width="0.8"/>
+  <text x="18" y="217" font-size="9" fill="#333333">DRAM</text>
+  <rect x="2" y="224" width="10" height="10" rx="2" fill="#fdf1e2" stroke="#222222" stroke-width="0.8"/>
+  <text x="18" y="233" font-size="9" fill="#333333">IPU / fabric</text>
+</svg>

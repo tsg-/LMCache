@@ -1,0 +1,80 @@
+<svg width="700" height="400" viewBox="0 0 700 400" xmlns="http://www.w3.org/2000/svg" font-family="Calibri, Carlito, Helvetica, Arial, sans-serif">
+  <!--
+    Memory/storage tiering pyramid for the "KV Caching, LMCache and the
+    Storage (L2) Tier" section: NVIDIA's G1-G4 memory-tier nomenclature on
+    the left, mapped to LMCache's own Tier.L1/Tier.L2 on the right via
+    brackets. Rendered to PNG at 300 dpi with:
+    rsvg-convert -w 2187 brief-kv-tiering-pyramid.svg -o brief-kv-tiering-pyramid.png
+
+    G1-G4 defs per NVIDIA's memory-tier nomenclature (as used in NVIDIA
+    Dynamo docs): G1 = GPU HBM, G2 = CPU/host DRAM, G3 = local NVMe,
+    G4 = remote/networked storage.
+
+    LMCache side verified directly against lmcache/v1/mp_coordinator/api.py
+    and cache_engine.py: Tier.L1 is the CPU-DRAM fast local tier; Tier.L2 is
+    the backing tier fetched on a miss. LMCache does not manage G1 (GPU
+    HBM) at all; it sits between the inference engine and GPU memory,
+    offloading what doesn't fit in HBM. L2 is generic over G3/G4: this
+    rig's L2 adapter (fs_native over NVMe-oF) is locally-attached storage
+    reached over a network fabric, straddling the G3/local vs G4/remote
+    line rather than sitting cleanly in either.
+
+    Pyramid bands taper linearly from a 40 px apex to a 300 px base over
+    four equal-height bands; this is a capacity/latency schematic, not a
+    scaled measurement; do not read relative band area as a ratio.
+
+    Fills follow the shared role palette: green = DRAM (L1), blue = storage
+    media (L2). G1 is out of LMCache's scope, so it drops the fill and
+    takes a grey dashed stroke with grey text, matching the "not asserted /
+    not in scope" convention used elsewhere in this diagram set.
+  -->
+  <rect x="0" y="0" width="700" height="400" fill="#ffffff"/>
+
+  <!-- G1: GPU HBM. Out of LMCache's scope, dashed/grey per convention. -->
+  <polygon points="230,20 270,20 302.5,85 197.5,85" fill="#ffffff" stroke="#999999" stroke-width="1" stroke-dasharray="4 3"/>
+  <text x="250" y="56" text-anchor="middle" font-size="11" font-weight="bold" fill="#666666">GPU HBM</text>
+
+  <!-- G2: CPU / host DRAM. LMCache Tier.L1. -->
+  <polygon points="197.5,85 302.5,85 335,150 165,150" fill="#e8f3e6" stroke="#222222" stroke-width="1"/>
+  <text x="250" y="121" text-anchor="middle" font-size="11" font-weight="bold" fill="#000000">CPU / Host DRAM</text>
+
+  <!-- G3: Local NVMe. LMCache Tier.L2. -->
+  <polygon points="165,150 335,150 367.5,215 132.5,215" fill="#dceaf7" stroke="#222222" stroke-width="1"/>
+  <text x="250" y="186" text-anchor="middle" font-size="11" font-weight="bold" fill="#000000">Local NVMe</text>
+
+  <!-- G4: Remote / networked storage. LMCache Tier.L2 (same tier, different substrate). -->
+  <polygon points="132.5,215 367.5,215 400,280 100,280" fill="#dceaf7" stroke="#222222" stroke-width="1"/>
+  <text x="250" y="251" text-anchor="middle" font-size="11" font-weight="bold" fill="#000000">Remote / networked storage</text>
+
+  <!-- NVIDIA G1-G4 labels, left column -->
+  <text x="60" y="57" text-anchor="middle" font-size="12" font-weight="bold" fill="#333333">G1</text>
+  <text x="60" y="122" text-anchor="middle" font-size="12" font-weight="bold" fill="#333333">G2</text>
+  <text x="60" y="187" text-anchor="middle" font-size="12" font-weight="bold" fill="#333333">G3</text>
+  <text x="60" y="252" text-anchor="middle" font-size="12" font-weight="bold" fill="#333333">G4</text>
+
+  <!-- LMCache bracket + labels, right column -->
+  <path d="M404,20 L410,20 L410,85 L404,85" fill="none" stroke="#999999" stroke-width="1" stroke-dasharray="4 3"/>
+  <text x="418" y="47" font-size="9.5" fill="#666666">Not LMCache-managed --</text>
+  <text x="418" y="60" font-size="9.5" fill="#666666">native GPU memory</text>
+
+  <path d="M404,85 L410,85 L410,150 L404,150" fill="none" stroke="#222222" stroke-width="1"/>
+  <text x="418" y="112" font-size="9.5" font-weight="bold" fill="#000000">LMCache Tier.L1</text>
+  <text x="418" y="125" font-size="9.5" fill="#333333">fast local tier</text>
+
+  <path d="M404,150 L410,150 L410,280 L404,280" fill="none" stroke="#222222" stroke-width="1"/>
+  <text x="418" y="205" font-size="9.5" font-weight="bold" fill="#000000">LMCache Tier.L2</text>
+  <text x="418" y="218" font-size="9.5" fill="#333333">backing tier -- this</text>
+  <text x="418" y="231" font-size="9.5" fill="#333333">guide's bench l2</text>
+
+  <!-- Footnote -->
+  <text x="20" y="318" font-size="9.5" fill="#666666">This rig's L2 adapter (fs_native over NVMe-oF) is locally-attached storage reached over a</text>
+  <text x="20" y="331" font-size="9.5" fill="#666666">network fabric -- it straddles the G3/local vs G4/remote line rather than sitting in either.</text>
+
+  <!-- Legend -->
+  <rect x="20" y="352" width="10" height="10" rx="2" fill="#e8f3e6" stroke="#222222" stroke-width="0.8"/>
+  <text x="36" y="361" font-size="9" fill="#333333">LMCache L1 (fast local tier)</text>
+  <rect x="220" y="352" width="10" height="10" rx="2" fill="#dceaf7" stroke="#222222" stroke-width="0.8"/>
+  <text x="236" y="361" font-size="9" fill="#333333">LMCache L2 (backing tier)</text>
+  <rect x="420" y="352" width="10" height="10" rx="2" fill="#ffffff" stroke="#999999" stroke-width="0.8" stroke-dasharray="3 2"/>
+  <text x="436" y="361" font-size="9" fill="#333333">Not LMCache-managed</text>
+</svg>

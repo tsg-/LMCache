@@ -1,0 +1,68 @@
+@startuml
+' Rendered with: plantuml -tsvg <file>.puml
+' Fonts: Carlito is metric-compatible with Calibri, so it lays the diagram out
+' at Calibri's advance widths even on hosts without Calibri installed. After
+' rendering, the SVG font-family is widened to a fallback stack:
+'   sed -i '' 's/font-family="Carlito"/font-family="Calibri, Carlito, Trebuchet MS, sans-serif"/g' <file>.svg
+' PlantUML cannot emit that stack itself -- it single-quotes a comma-separated
+' skinparam value, which SVG then reads as one bogus family name.
+skinparam defaultFontName Carlito
+skinparam TitleFontSize 24
+title NVMe/Falcon — STORE (Write) Flow
+
+' ─── TPU/GPU HOST (initiator side) ──────────────────────────────
+box "<size:20><b>TPU/GPU Host (initiator)</b></size>" #F0F6FF
+participant "Application\n(LMCache)" as APP
+participant "NVMe-oF Initiator\n(nvme_rdma on Xeon)" as INIT
+participant "Initiator IPU\n(Falcon / irdma verbs)" as IFAL
+end box
+
+' ─── KV Cache node (target side) ────────────────────────────────
+box "<size:20><b>KV Cache node (target)</b></size>" #FFF8E8
+participant "Target IPU\n(Falcon / irdma verbs)" as TFAL
+participant "Target Xeon\n(nvmet-rdma + block layer)" as CPU
+participant "Target DRAM" as TDDR
+participant "NVMe SSD\n(namespace)" as SSD
+end box
+
+APP -> INIT: store(tokens, kv_tensor)
+INIT -> INIT: Register TX MR containing payload;\nbuild SGL for target RDMA READ
+INIT -> IFAL: SEND (NVMe-oF WRITE command capsule + SGL)
+IFAL -> TFAL: Falcon reliable transport\n(wire)
+TFAL -> CPU: Deliver NVMe-oF command\n(nvmet-rdma dispatch)
+
+CPU -> CPU: Allocate request data buffers\n(nvmet_req_alloc_sgls)
+CPU -> TFAL: Post RDMA READ\n(initiator TX MR → target DRAM)
+TFAL -> IFAL: Falcon reliable transport\n(wire, RDMA READ pull)
+IFAL -> INIT: Read from initiator TX MR
+INIT --> IFAL: Payload
+IFAL --> TFAL: Falcon reliable transport\n(wire)
+TFAL --> TDDR: Payload lands in target DRAM
+TFAL --> CPU: RDMA READ completion
+
+CPU -> SSD: NVMe WRITE (FUA)
+SSD --> TDDR: DMA payload from target DRAM
+SSD --> CPU: Completion
+CPU -> CPU: Free request data buffers\n(nvmet_req_free_sgls)
+
+CPU -> TFAL: SEND (NVMe-oF completion capsule)
+TFAL -> IFAL: Falcon reliable transport\n(wire, SEND)
+IFAL --> INIT: Completion capsule received
+
+INIT -> APP: NVMe-oF command complete
+
+note over IFAL, TFAL
+  Boundary: Falcon RDMA link (400-1600Gbps, MTU 4096).
+  Both IPUs do fabric offload only — no NVMe logic.
+end note
+
+note over CPU, INIT
+  Pull model: the initiator sends an NVMe-oF WRITE command capsule;
+  the target (stock nvmet-rdma) posts an RDMA READ to pull the payload
+  from the initiator's registered buffer, then commits to NVMe (FUA).
+  No admission control — the pull is paced by ordinary flow control:
+  negotiated SQ depth, per-QP RDMA-read credits (IRD/ORD), and
+  landing-buffer availability. A busy SSD back-pressures only
+  indirectly, by slowing buffer recycling.
+end note
+@enduml

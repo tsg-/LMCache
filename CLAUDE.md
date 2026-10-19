@@ -38,21 +38,5 @@ not relocate them.
 
 ## PR Review Instructions
 
-When asked to review a PR, use the `/pr-review` skill which implements the full review
-process from `docs/coding_standards.md` Section 9.
-
-The review covers:
-
-1. **Design doc compliance** -- check implementation against documented contracts (table format).
-2. **Coding quality** -- typing, docstrings, naming, interface design per Sections 2-4.
-3. **Correctness** -- logic bugs, error handling paths, resource management.
-4. **Thread safety** -- shared state, lock protocols, concurrent access patterns.
-5. **Test coverage** -- especially failure paths and concurrent access.
-6. **PR structure** -- is the scope appropriate, or should it be broken down?
-
-Issues are grouped by severity:
-- **error**: Must fix before merge (missing types/docstrings, no tests, architectural problems).
-- **warning**: Should fix (naming, modularity, test quality).
-- **info**: Suggestion only, non-blocking.
-
-See `docs/coding_standards.md` Section 9 for the full severity calibration and reviewer guidelines.
+When asked to review a PR, use the `/pr-review` skill. It carries the review dimensions
+and the severity calibration from `docs/coding_standards.md` Section 9.

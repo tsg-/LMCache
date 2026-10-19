@@ -162,6 +162,8 @@ LMCache has three documentation surfaces:
 When writing or updating documentation, follow these principles:
 
 - **Be concrete and concise.** State exactly what something does and why — avoid vague, hand-wavy descriptions. One precise sentence beats a paragraph of generalities.
+- **Use qualifiers only when they add meaning.** Avoid empty adjectives such as
+  “exact”; keep them only when they establish a material distinction.
 - **Include examples.** Show concrete code snippets, command invocations, or data formats so the reader can immediately see how things work in practice.
 - **Explain the _why_, not just the _what_.** Briefly state the design motivation or trade-off behind a decision so readers understand the reasoning.
 - **Use diagrams or short flows for complex interactions.** When multiple components interact (e.g., the multiprocess pipeline), a short step-by-step flow or ASCII diagram is far clearer than prose alone.

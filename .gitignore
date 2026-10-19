@@ -56,6 +56,9 @@ durations/
 # Jupyter Notebook
 .ipynb_checkpoints
 
+# Claude Code session checkpoint scratch file
+.checkpoint.md
+
 # Vim temporary files
 .*.sw*
 
@@ -160,3 +163,12 @@ docs/source/locale/**/*.mo
 
 # CodeBuddy
 .codebuddy
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/
+
+# Local issue tracking — this repo's origin is the public LMCache/LMCache
+.beads/
