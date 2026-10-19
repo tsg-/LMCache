@@ -1,0 +1,61 @@
+# Model: Llama-3.1 405B — FP8 quantized KV cache
+#
+# Largest model in test matrix. 126 layers gives extreme burst depth.
+# Tests IPU DMA scheduler with very long burst sequences and validates
+# that queue depth management works at scale.
+
+model:
+  name: "meta-llama/Llama-3.1-405B-Instruct"
+  family: llama3
+
+architecture:
+  num_layers: 126
+  num_kv_heads: 8
+  head_size: 128
+  kv_size: 2
+
+quantization:
+  dtype: float8_e4m3fn
+  dtype_bytes: 1
+
+chunking:
+  tokens_per_chunk: 128
+
+# Derived page sizing
+page:
+  # kv_size(2) × num_kv_heads(8) × head_size(128) × dtype_bytes(1) × tokens(128)
+  # = 262,144 = 256 KB (same as 70B FP8)
+  page_size_bytes: 262144
+
+# Full-prefix retrieval
+burst:
+  layers_per_burst: 126
+  burst_bytes: 33030144     # 126 × 256KB = ~31.5 MB per request
+
+# Benchmark parameters
+benchmark_params:
+  object_size: 262144
+  page_size: 262144
+  num_objects: 126          # 126 layers per burst — longest burst sequence
+  buffer_size: "64GB"
+  num_source_objects: 4000
+
+# Working set analysis
+capacity:
+  pages_per_gib: 4096
+  pages_in_64gib: 262144
+  requests_in_64gib: 2080   # 262144 / 126 = fewer full requests fit
+  tokens_cached_64gib: 266240
+
+# Traffic characteristics
+traffic:
+  max_pages_per_sec: 200000
+  max_bursts_per_sec: 1587        # 200000 / 126 — fewer requests/sec than 70B
+  # Longer bursts mean each request holds the DMA path longer
+  burst_duration_us: 630          # 126 × 5us per page ≈ 630us per request burst
+
+# IPU considerations:
+# - 126 sequential DMA reads per burst (vs 80 for 70B)
+# - Burst duration > 600us — long enough to overlap with next request arrival
+# - Tests whether IPU can pipeline across request boundaries
+# - Queue depth more critical: multiple requests' bursts may overlap
