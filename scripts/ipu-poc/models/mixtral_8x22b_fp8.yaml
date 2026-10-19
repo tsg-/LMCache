@@ -1,0 +1,59 @@
+# Model: Mixtral 8x22B — FP8 quantized KV cache
+#
+# Mixture-of-experts model. Different architecture from Llama (more KV heads,
+# different layer count). Tests that benchmark configs are not Llama-specific.
+
+model:
+  name: "mistralai/Mixtral-8x22B-Instruct-v0.1"
+  family: mixtral
+
+architecture:
+  num_layers: 56
+  num_kv_heads: 8       # GQA with 8 KV heads
+  head_size: 128
+  kv_size: 2
+
+quantization:
+  dtype: float8_e4m3fn
+  dtype_bytes: 1
+
+chunking:
+  tokens_per_chunk: 128
+
+# Derived page sizing
+page:
+  # kv_size(2) × num_kv_heads(8) × head_size(128) × dtype_bytes(1) × tokens(128)
+  # = 262,144 = 256 KB (same per-layer size as Llama — same head config)
+  page_size_bytes: 262144
+
+# Full-prefix retrieval
+burst:
+  layers_per_burst: 56
+  burst_bytes: 14680064     # 56 × 256KB = 14 MB per request
+
+# Benchmark parameters
+benchmark_params:
+  object_size: 262144
+  page_size: 262144
+  num_objects: 56           # shorter burst than Llama 70B
+  buffer_size: "64GB"
+  num_source_objects: 4000
+
+# Working set analysis
+capacity:
+  pages_per_gib: 4096
+  pages_in_64gib: 262144
+  requests_in_64gib: 4681   # more requests fit than 70B (fewer layers)
+  tokens_cached_64gib: 599168
+
+# Traffic characteristics
+traffic:
+  max_pages_per_sec: 200000
+  max_bursts_per_sec: 3571        # 200000 / 56 — highest request rate
+  # MoE note: only ~2 of 8 experts active per token, but KV cache is shared
+  # across all experts (attention is not part of MoE), so layer count is fixed.
+
+# IPU considerations:
+# - Shorter bursts (56 vs 80/126) — more frequent burst boundaries
+# - Higher request throughput ceiling — IPU must handle more burst starts/sec
+# - Same per-page size, so DMA behavior is identical per-page

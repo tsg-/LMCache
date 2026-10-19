@@ -1,0 +1,62 @@
+# Model: Llama-3.1 70B — FP8 quantized KV cache
+#
+# Primary benchmark model. 80 layers gives realistic burst depth (80 reads
+# per cache hit). FP8 yields 256KB per-layer pages — optimal for IPU DMA.
+
+model:
+  name: "meta-llama/Llama-3.1-70B-Instruct"
+  family: llama3
+
+architecture:
+  num_layers: 80
+  num_kv_heads: 8       # GQA: 8 KV heads
+  head_size: 128
+  kv_size: 2            # key + value
+
+quantization:
+  dtype: float8_e4m3fn
+  dtype_bytes: 1
+
+chunking:
+  tokens_per_chunk: 256   # 256 tokens per KV page (project requirement)
+  tokens_per_chunk_ipu_alt: 128  # IPU-optimized alternative (256KB pages)
+
+# Derived page sizing (default: 256 tokens)
+page:
+  # kv_size(2) × num_kv_heads(8) × head_size(128) × dtype_bytes(1) × tokens(256)
+  # = 2 × 8 × 128 × 1 × 256 = 524,288 = 512 KB
+  page_size_bytes: 524288
+  page_size_bytes_ipu_alt: 262144  # with tokens_per_chunk=128 → 256 KB
+
+# Full-prefix retrieval
+burst:
+  layers_per_burst: 80
+  burst_bytes: 41943040     # 80 × 512KB = 40 MB per request
+  burst_bytes_ipu_alt: 20971520  # 80 × 256KB = 20 MB (128-token variant)
+
+# Benchmark parameters for transfer_channel_benchmark
+benchmark_params:
+  object_size: 524288       # 512KB per-layer chunk (256 tokens, FP8)
+  page_size: 524288
+  num_objects: 80           # one burst = 80 layer reads
+  buffer_size: "64GB"       # production target DRAM budget
+  num_source_objects: 2000  # working set diversity
+
+# Working set analysis
+capacity:
+  pages_per_gib: 2048       # 1 GiB / 512KB
+  pages_in_64gib: 131072    # 64 GiB budget
+  requests_in_64gib: 1638   # 131072 / 80 layers = 1638 full requests cached
+  tokens_cached_64gib: 419328  # 1638 × 256 tokens = ~420K tokens
+
+# Traffic characteristics (derived)
+traffic:
+  # At 400Gb/s (50 GB/s) serving 512KB pages:
+  max_pages_per_sec: 100000       # 50 GB/s ÷ 512KB
+  max_bursts_per_sec: 1250        # 100000 ÷ 80 layers
+  # This is ~1250 inference requests/sec served from cache (reads only)
+
+  # At 5:1 read:write ratio:
+  read_pages_per_sec: 83333
+  write_pages_per_sec: 16666
+  eviction_required_per_sec: 16666  # must evict this many to make room

@@ -1,0 +1,39 @@
+# Test fixture — not a model to benchmark.
+#
+# A byte-different copy of ../mixtral_8x22b_fp8.yaml with identical resolved
+# geometry: 56 objects/submit at a 262144 B page. verify_geometry_corpus.sh and
+# tests/scripts/test_model_geometry_scripts.py store a corpus with the real
+# profile and then read it with this one, which must return zero hits.
+#
+# Identical geometry is what makes it a gate. Two profiles that differ in page
+# size or burst depth miss on length alone, so they would pass even if key
+# scoping regressed. Here only the SHA-256 differs, so a zero can come from
+# nothing but the namespace.
+#
+# It lives outside models/ so `run_model_geometry.sh profiles` and the README's
+# models/*.yaml sweep do not offer it as a model.
+
+model:
+  name: "mistralai/Mixtral-8x22B-Instruct-v0.1 (page-scope test fixture)"
+  family: mixtral
+
+architecture:
+  num_layers: 56
+  num_kv_heads: 8
+  head_size: 128
+  kv_size: 2
+
+quantization:
+  dtype: float8_e4m3fn
+  dtype_bytes: 1
+
+chunking:
+  tokens_per_chunk: 128
+
+page:
+  # kv_size(2) × num_kv_heads(8) × head_size(128) × dtype_bytes(1) × tokens(128)
+  page_size_bytes: 262144
+
+burst:
+  layers_per_burst: 56
+  burst_bytes: 14680064
