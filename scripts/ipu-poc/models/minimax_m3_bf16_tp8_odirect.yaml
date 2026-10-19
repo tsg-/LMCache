@@ -1,0 +1,103 @@
+# Model: MiniMax-M3 — bf16 main KV plus a key-only DSA indexer, TP=8,
+# PADDED FOR O_DIRECT
+#
+# WHAT THIS PROFILE IS FOR: the O_DIRECT-capable twin of
+# minimax_m3_bf16_tp8.yaml. That file's packed object is 9,790,464 B, which
+# is not a multiple of 4096, so `bench l2` rejects it against the default
+# fs_native O_DIRECT adapter (--l1-align-bytes 4096). This file adds one
+# synthetic padding component so the packed object lands on a 4096 boundary,
+# at the cost of 3,072 B/object (~0.031%) that carries no KV content.
+#
+# WHY PADDING AND NOT A SMALLER --l1-align-bytes: 9,790,464 is a multiple of
+# 512, so the benchmark harness's own alignment check (command.py) would
+# accept --l1-align-bytes 512. That does not reach the real constraint:
+# local_disk_backend.py checks size against stat.f_bsize, the filesystem
+# block size, which XFS reports as 4096 regardless of the device's logical
+# sector size. A 512-aligned object still fails O_DIRECT at the storage
+# backend. Padding to a 4096 multiple is the only fix that clears both
+# checks.
+#
+# WHY THIS IS NOT CHEATING THE BENCHMARK: any real O_DIRECT store of a
+# 9,790,464 B object would need this same tail padding on disk -- O_DIRECT
+# requires the write length to be a block-size multiple regardless of how
+# the harness models it. This profile makes that padding explicit instead
+# of leaving the shape unmeasurable under O_DIRECT.
+#
+# UNCONFIRMED, same caveat as the parent file: the indexer dtype. Sized
+# here at the repo's fp8 DSA layout (132 B/token). If M3 registers it as
+# bf16 (256 B/token), the unpadded object is already 4096-aligned
+# (11,599,872 = 4096 x 2832) and this padded variant becomes unnecessary --
+# use minimax_m3_bf16_tp8.yaml directly. Confirm against a captured vLLM
+# registration dump before quoting an M3 number externally.
+#
+# O_DIRECT: 7,864,320 + 1,926,144 + 3,072 = 9,793,536 = 4096 x 2391, so
+# --l1-align-bytes 4096 is accepted.
+
+model:
+  name: "MiniMaxAI/MiniMax-M3"
+  family: minimax
+
+runtime:
+  lmcache_tokens_per_chunk: 256
+  task_archetype: lookup_load
+  chunks_per_submit: 1
+  kv_ranks_per_chunk: 8
+  separate_object_groups: false
+  full_sw_kv: false
+
+object_groups:
+  - object_group_id: 0
+    name: full_attention
+    sw_size_chunks: -1          # full attention: no cross-chunk window
+    components:
+      # 60 layers x kv_size(2) x num_kv_heads(1) x head_size(128)
+      #   x dtype_bytes(2) x slots_per_object(256) = 7,864,320 B
+      - name: main_kv
+        role: key_value
+        cache_owning_layers: 60
+        architecture:
+          attention: gqa
+          kv_size: 2
+          num_kv_heads: 1       # 4 heads REPLICATED across TP=8
+          head_size: 128
+        quantization:
+          dtype: bfloat16
+          dtype_bytes: 2
+        block_geometry:
+          tokens_per_block: 128
+          slots_per_block: 128
+          transfer_tokens_per_chunk: 256
+        component_size_bytes: 7864320
+
+      # Key-only DSA indexer, present on the 57 sparse layers only.
+      #   57 layers x 132 B/token x 256 tokens = 1,926,144 B
+      - name: dsa_indexer
+        role: key_only
+        cache_owning_layers: 57
+        architecture:
+          attention: opaque
+        quantization:
+          dtype: float8_e4m3fn
+          dtype_bytes: 1
+        component_size_bytes: 1926144
+
+      # Synthetic tail padding. Carries no KV content; its only job is to
+      # round the packed object up to the next 4096-byte boundary so the
+      # O_DIRECT fs_native adapter accepts it.
+      - name: align_pad
+        role: padding
+        cache_owning_layers: 1
+        architecture:
+          attention: opaque
+        quantization:
+          dtype: uint8
+          dtype_bytes: 1
+        component_size_bytes: 3072
+
+    # 7,864,320 + 1,926,144 + 3,072
+    object_size_bytes: 9793536
+
+# Redundant cross-check: 1 chunk x 1 group x 8 ranks = 8 objects.
+burst:
+  objects_per_submit: 8
+  burst_bytes: 78348288         # 8 x 9,793,536 ≈ 74.7 MiB per submit

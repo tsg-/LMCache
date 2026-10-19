@@ -1,0 +1,93 @@
+# Model: DeepSeek-V3 — FP8 quantized KV cache, MLA attention
+#
+# Proxy reference workload for this project (README.md "Traffic
+# Characteristics"). Uses Multi-head Latent Attention (MLA): the KV cache
+# stores a compressed latent vector shared across all heads, not a
+# per-head key/value pair. This makes the per-layer page ~3.6x smaller
+# than a GQA-8 model with the same head_size would produce — see
+# `architecture.attention` below.
+
+model:
+  name: "deepseek-ai/DeepSeek-V3"
+  family: deepseek
+
+architecture:
+  num_layers: 61
+  attention: mla             # Multi-head Latent Attention (not GQA)
+  # MLA caches one compressed latent per token per layer, shared across all
+  # attention heads — NOT a per-head KV pair. Cached elements per token:
+  #   kv_lora_rank(512) + qk_rope_head_dim(64) = 576
+  # (num_attention_heads=128 does NOT multiply into the cached size — that
+  # is the whole point of MLA compression.)
+  kv_lora_rank: 512          # compressed KV latent dimension
+  qk_rope_head_dim: 64       # decoupled RoPE key dimension (shared, not per-head)
+  cached_elems_per_token: 576  # kv_lora_rank + qk_rope_head_dim
+
+quantization:
+  dtype: float8_e4m3fn
+  dtype_bytes: 1
+
+chunking:
+  tokens_per_chunk: 256      # 256 tokens per KV page (project requirement)
+  tokens_per_chunk_ipu_alt: 128  # IPU-optimized alternative
+
+# Derived page sizing — MLA actual (this model's real cached representation)
+page:
+  # cached_elems_per_token(576) × dtype_bytes(1) × tokens(256) = 147,456 = 144 KB
+  page_size_bytes: 147456
+  # cached_elems_per_token(576) × dtype_bytes(1) × tokens(128) = 73,728 = 72 KB
+  page_size_bytes_ipu_alt: 73728
+
+# Derived page sizing — GQA-8 equivalent (comparability baseline used in
+# README.md's model table and the architecture doc's appendix; NOT what
+# DeepSeek-V3 actually caches, since it uses MLA, not GQA)
+page_gqa8_equivalent_reference_only:
+  # kv_size(2) × num_kv_heads(8) × head_size(128) × dtype_bytes(1) × tokens(256)
+  page_size_bytes: 524288
+  page_size_bytes_ipu_alt: 262144
+
+# Full-prefix retrieval (MLA actual sizing)
+burst:
+  layers_per_burst: 61
+  burst_bytes: 8994816        # 61 × 144KB ≈ 8.6 MB per request
+  burst_bytes_ipu_alt: 4497408  # 61 × 72KB ≈ 4.3 MB
+
+# Benchmark parameters for transfer_channel_benchmark (MLA actual sizing)
+benchmark_params:
+  object_size: 147456        # 144KB per-layer chunk (256 tokens, FP8, MLA)
+  page_size: 147456
+  num_objects: 61             # one burst = 61 layer reads
+  buffer_size: "64GB"          # production target DRAM budget
+  num_source_objects: 4000     # working set diversity
+
+# Working set analysis (MLA actual sizing, 64 GiB buffer)
+capacity:
+  pages_per_gib: 7281          # 1 GiB / 144KB
+  pages_in_64gib: 465984       # 64 GiB budget
+  requests_in_64gib: 7639      # 465984 / 61 layers = 7639 full requests cached
+  tokens_cached_64gib: 1955584  # 7639 × 256 tokens = ~2M tokens
+
+# Traffic characteristics (derived, MLA actual sizing)
+traffic:
+  # At 400Gb/s (50 GB/s) serving 144KB pages:
+  max_pages_per_sec: 355556        # 50 GB/s ÷ 144KB
+  max_bursts_per_sec: 5829         # 355556 ÷ 61 layers
+  max_pages_per_sec_ipu_alt: 711111  # 50 GB/s ÷ 72KB (128-token variant)
+
+  # At 5:1 read:write ratio:
+  read_pages_per_sec: 296296
+  write_pages_per_sec: 59259
+  eviction_required_per_sec: 59259  # must evict this many to make room
+
+# Workload characteristics (from README.md "Reference Workload: DeepSeek")
+workload:
+  context_length_tokens: "32K-128K"
+  prefix_reuse_rate: ">80%"
+  typical_prefix_length_tokens: "16K-64K"
+  cache_hit_target: ">80%"
+
+# MoE note: DeepSeek-V3 is a mixture-of-experts model, but MoE routing only
+# affects the FFN layers — attention (and therefore the KV cache) runs the
+# same MLA computation regardless of which experts are active, so layer
+# count and per-layer page size above are unaffected (same rationale as
+# mixtral_8x22b_fp8.yaml).

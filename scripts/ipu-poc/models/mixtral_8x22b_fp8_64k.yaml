@@ -1,0 +1,63 @@
+# Model: Mixtral 8x22B — FP8 quantized KV cache, 32-token chunks
+#
+# Same architecture as mixtral_8x22b_fp8.yaml at a quarter of the chunk size,
+# which puts a 64 KiB page in the sweep. Mixtral is the only profile that can
+# reach 64 KiB: page size is fixed by
+# elems_per_token * dtype_bytes * tokens_per_chunk, and at 2048 B/token a
+# 32-token chunk lands exactly on 65536. DeepSeek's MLA caches 576 B/token,
+# which has no integer chunk size at 64 KiB (112 tokens = 63 KiB, 128 = 72 KiB).
+
+model:
+  name: "mistralai/Mixtral-8x22B-Instruct-v0.1 (64 KiB page)"
+  family: mixtral
+
+architecture:
+  num_layers: 56
+  num_kv_heads: 8       # GQA with 8 KV heads
+  head_size: 128
+  kv_size: 2
+
+quantization:
+  dtype: float8_e4m3fn
+  dtype_bytes: 1
+
+chunking:
+  tokens_per_chunk: 32
+
+# Derived page sizing
+page:
+  # kv_size(2) × num_kv_heads(8) × head_size(128) × dtype_bytes(1) × tokens(32)
+  # = 65,536 = 64 KiB
+  page_size_bytes: 65536
+
+# Full-prefix retrieval
+burst:
+  layers_per_burst: 56
+  burst_bytes: 3670016      # 56 × 64 KiB = 3.5 MiB per request
+
+# Benchmark parameters
+benchmark_params:
+  object_size: 65536
+  page_size: 65536
+  num_objects: 56
+  buffer_size: "64GB"
+  num_source_objects: 4000
+
+# Working set analysis
+capacity:
+  pages_per_gib: 16384
+  pages_in_64gib: 1048576
+  requests_in_64gib: 18724
+  tokens_cached_64gib: 599168   # same as the 128-token profile: bytes/token is unchanged
+
+# Traffic characteristics
+traffic:
+  # At 400Gb/s (50 GB/s) serving 64 KiB pages — 4× the page rate of the
+  # 128-token profile against the same fabric ceiling.
+  max_pages_per_sec: 800000
+  max_bursts_per_sec: 14285       # 800000 / 56
+
+# IPU considerations:
+# - Smallest page in the sweep; per-page overhead dominates where the 256 KiB
+#   profile is bandwidth-bound. This is the point that exposes IOPS limits.
+# - 3.5 MiB per submit, so a request holds the DMA path for a quarter as long.
