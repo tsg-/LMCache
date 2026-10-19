@@ -1,0 +1,9 @@
+apiVersion: 1
+providers:
+  - name: lmcache
+    type: file
+    allowUiUpdates: true
+    options:
+      # Sibling of the provider dir, NOT nested inside it -- a nested bind mount
+      # under a read-only mount fails at container init.
+      path: /var/lib/grafana/dashboards

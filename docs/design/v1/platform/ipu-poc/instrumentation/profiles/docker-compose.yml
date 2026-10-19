@@ -1,0 +1,50 @@
+# Captured deployed Prometheus settings. Start the base Grafana stack with
+# project name lmcache-telemetry before running docker compose up -d here.
+# MONITOR_BIND_ADDR=10.166.96.242 reproduces the lab management bindings.
+# SSH forwards must already provide the ports listed in each prometheus.yml.
+# The 6x6 scrape store is retained for history; its dashboard was retired.
+services:
+  prometheus-6x2:
+    image: prom/prometheus:v2.55.1
+    container_name: lmcache-prom-6x2
+    restart: unless-stopped
+    networks: [monitoring]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "${MONITOR_BIND_ADDR:-127.0.0.1}:9091:9090"
+    volumes:
+      - ./6x2/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prom-6x2:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+
+  prometheus-6x6:
+    image: prom/prometheus:v2.55.1
+    container_name: lmcache-prom-6x6
+    restart: unless-stopped
+    networks: [monitoring]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "${MONITOR_BIND_ADDR:-127.0.0.1}:9092:9090"
+    volumes:
+      - ./6x6/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prom-6x6:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=90d
+      - --web.enable-lifecycle
+
+networks:
+  monitoring:
+    external: true
+    name: lmcache-telemetry_default
+
+volumes:
+  prom-6x2:
+    name: lmcache-telemetry-6x2_prom-data
+  prom-6x6:
+    name: lmcache-telemetry-6x6_prom-data

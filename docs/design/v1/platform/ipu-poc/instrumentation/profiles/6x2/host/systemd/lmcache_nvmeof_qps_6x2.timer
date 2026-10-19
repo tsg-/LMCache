@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh LMCache 6x2 NVMe-oF queue metrics
+
+[Timer]
+OnBootSec=15s
+OnUnitActiveSec=10s
+AccuracySec=1s
+Unit=lmcache_nvmeof_qps_6x2.service
+
+[Install]
+WantedBy=timers.target

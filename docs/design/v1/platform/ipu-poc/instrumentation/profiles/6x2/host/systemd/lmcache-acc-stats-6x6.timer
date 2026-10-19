@@ -1,0 +1,11 @@
+[Unit]
+Description=Run acc-stats every 30s
+
+[Timer]
+Unit=lmcache-acc-stats-6x6.service
+OnBootSec=10s
+OnUnitActiveSec=30s
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

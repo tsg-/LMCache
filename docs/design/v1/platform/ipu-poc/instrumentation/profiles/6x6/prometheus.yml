@@ -1,0 +1,49 @@
+global:
+  scrape_interval: 4s
+  evaluation_interval: 15s
+  external_labels:
+    project: ipu-poc-nvmeof-6x6
+
+# 6x6 = six initiators (mmgi0-5) x six target IPUs (mmgt IPU1-4, mmgt2 IPU5-6).
+# Shares the read-only 6x2 tunnels on 172.17.0.1:192xx; adds mmgt2 on 19212/19213.
+scrape_configs:
+  - job_name: acc_grpc_6x6
+    static_configs:
+      - targets: [host.docker.internal:19211]
+        labels: {host: mmgt}
+      - targets: [host.docker.internal:19213]
+        labels: {host: mmgt2}
+
+  - job_name: node_6x6
+    static_configs:
+      - targets: [host.docker.internal:19206]
+        labels: {host: mmgt}
+      - targets: [host.docker.internal:19212]
+        labels: {host: mmgt2}
+      - targets: [host.docker.internal:19207]
+        labels: {host: mmgi0}
+      - targets: [host.docker.internal:19208]
+        labels: {host: mmgi1}
+      - targets: [host.docker.internal:19209]
+        labels: {host: mmgi2}
+      - targets: [host.docker.internal:19200]
+        labels: {host: mmgi3}
+      - targets: [host.docker.internal:19201]
+        labels: {host: mmgi4}
+      - targets: [host.docker.internal:19202]
+        labels: {host: mmgi5}
+
+  - job_name: lmcache_bench_6x6
+    static_configs:
+      - targets: [host.docker.internal:19210]
+        labels: {host: mmgi0, initiator: "0"}
+      - targets: [host.docker.internal:19220]
+        labels: {host: mmgi1, initiator: "1"}
+      - targets: [host.docker.internal:19230]
+        labels: {host: mmgi2, initiator: "2"}
+      - targets: [host.docker.internal:19240]
+        labels: {host: mmgi3, initiator: "3"}
+      - targets: [host.docker.internal:19250]
+        labels: {host: mmgi4, initiator: "4"}
+      - targets: [host.docker.internal:19260]
+        labels: {host: mmgi5, initiator: "5"}

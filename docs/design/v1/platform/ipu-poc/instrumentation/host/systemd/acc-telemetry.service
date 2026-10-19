@@ -1,0 +1,6 @@
+[Unit]
+Description=Refresh Falcon ACC telemetry textfile for node_exporter
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/bin/acc_telemetry_textfile.py

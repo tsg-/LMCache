@@ -1,0 +1,6 @@
+[Unit]
+Description=Refresh NIC ethtool counters textfile for node_exporter
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/rdma_nic_textfile.sh

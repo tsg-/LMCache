@@ -1,0 +1,14 @@
+[Unit]
+Description=Maintain the %i ACC gRPC tunnel through its IMC
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/default/acc-stats
+EnvironmentFile=/etc/default/acc-grpc-%i
+RuntimeDirectory=acc-grpc-%i
+RuntimeDirectoryMode=0700
+ExecStart=/usr/local/bin/acc_grpc_tunnel.py --netns ${ACC_GRPC_NETNS} --fabric-ip ${ACC_GRPC_FABRIC_IP} --local-port ${ACC_GRPC_LOCAL_PORT} --control-dir /run/acc-grpc-%i --proto-dir ${ACC_TELEMETRY_PROTO_DIR} --proto-source ${ACC_GRPC_PROTO_SOURCE}
+Restart=always
+RestartSec=5s

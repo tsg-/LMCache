@@ -1,0 +1,6 @@
+[Unit]
+Description=Refresh irdma hw_counters textfile for node_exporter
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/rdma_hwcounters_textfile.sh
