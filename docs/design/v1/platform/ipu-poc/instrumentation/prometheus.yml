@@ -1,0 +1,93 @@
+global:
+  scrape_interval: 4s
+  evaluation_interval: 15s
+  external_labels:
+    project: ipu-poc-nvmeof-alt
+
+scrape_configs:
+  - job_name: node
+    static_configs:
+      # These reach loopback-only node_exporter instances through SSH tunnels
+      # opened on the monitoring host.
+      - targets:
+          - host.docker.internal:19106   # mmgt  via ssh -L 19106:127.0.0.1:9100 mmgt
+          - host.docker.internal:19107   # mmgi0 via ssh -L 19107:127.0.0.1:9100 mmgi0
+          - host.docker.internal:19108   # mmgi1 via ssh -L 19108:127.0.0.1:9100 mmgi1
+          - host.docker.internal:19109   # mmgi2 via ssh -L 19109:127.0.0.1:9100 mmgi2
+          - host.docker.internal:19100   # mmgi3 via ssh -L 19100:127.0.0.1:9100 mmgi3
+        labels:
+          fabric: mgmt
+    relabel_configs:
+      - source_labels: [__address__]
+        regex: host\.docker\.internal:19106
+        target_label: host
+        replacement: mmgt
+      # The initiators export ACC core usage and Falcon tele_cli counters from
+      # their own MMG-400 (one card each, ACC at 200.0.4.3 / 200.0.3.3) via the
+      # acc-stats textfile collector, same as mmgt's two cards.
+      - source_labels: [__address__]
+        regex: host\.docker\.internal:19107
+        target_label: host
+        replacement: mmgi0
+      - source_labels: [__address__]
+        regex: host\.docker\.internal:19108
+        target_label: host
+        replacement: mmgi1
+      - source_labels: [__address__]
+        regex: host\.docker\.internal:19109
+        target_label: host
+        replacement: mmgi2
+      - source_labels: [__address__]
+        regex: host\.docker\.internal:19100
+        target_label: host
+        replacement: mmgi3
+
+  - job_name: acc_grpc
+    scrape_interval: 4s
+    scrape_timeout: 2s
+    static_configs:
+      - targets:
+          - host.docker.internal:19111   # mmgt  via ssh -L 19111:127.0.0.1:9188
+        labels:
+          fabric: mgmt
+          host: mmgt
+
+  # Same `bench l2 --serve-metrics` endpoints on the MMG-400 rig, where the load
+  # is driven from four initiator hosts instead of one. A separate job keeps the
+  # mkp1 panels from summing mmg series into their aggregate: the mkp dashboard
+  # filters on job alone.
+  #
+  # One physical benchmark process runs on each initiator. The local and
+  # remote endpoint pairs are explicit because the process port differs by
+  # host: 19110->mmgi0:9101 through 19140->mmgi3:9104.
+  # As with the mkp job, `up == 0` between cells is expected, and rates are
+  # valid over `phase="measured"` only.
+  #
+  # A run is scrapeable only while its --serve-metrics endpoint and this host's
+  # matching SSH tunnel are both up.
+  - job_name: lmcache_bench_mmg
+    static_configs:
+      - targets:
+          - host.docker.internal:19110   # initiator 0 -> mmgi0 127.0.0.1:9101
+        labels:
+          fabric: mgmt
+          host: mmgi0
+          initiator: "0"
+      - targets:
+          - host.docker.internal:19120   # initiator 1 -> mmgi1 127.0.0.1:9102
+        labels:
+          fabric: mgmt
+          host: mmgi1
+          initiator: "1"
+      - targets:
+          - host.docker.internal:19130   # initiator 2 -> mmgi2 127.0.0.1:9103
+        labels:
+          fabric: mgmt
+          host: mmgi2
+          initiator: "2"
+      - targets:
+          - host.docker.internal:19140   # initiator 3 -> mmgi3 127.0.0.1:9104
+        labels:
+          fabric: mgmt
+          host: mmgi3
+          initiator: "3"

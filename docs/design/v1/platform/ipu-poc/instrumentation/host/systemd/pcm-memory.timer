@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Intel PCM memory-bandwidth sample every 5s
+
+[Timer]
+OnBootSec=10s
+OnUnitActiveSec=5s
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,10 @@
+[Unit]
+Description=Run PCM PCIe/DDIO collector every five seconds
+
+[Timer]
+OnBootSec=12s
+OnUnitActiveSec=5s
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

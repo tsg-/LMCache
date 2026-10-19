@@ -1,0 +1,7 @@
+[Unit]
+Description=Emit LMCache 6x2 NVMe-oF queue metrics
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/lmcache-6x2/emit-nvmeof-qps

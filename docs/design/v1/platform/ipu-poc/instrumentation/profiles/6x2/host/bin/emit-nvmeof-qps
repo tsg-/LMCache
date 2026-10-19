@@ -1,0 +1,24 @@
+#!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+set -euo pipefail
+
+output_dir=/var/lib/lmcache-6x2/textfile
+temporary=$(mktemp "$output_dir/nvmeof_qps.prom.XXXXXX")
+trap 'rm -f "$temporary"' EXIT
+
+total=0
+for controller in /sys/class/nvme/nvme[0-9]*; do
+    [ -r "$controller/subsysnqn" ] || continue
+    grep -qE '^nqn\.2026-10\.(lab\.mmgt(\.6x2|2):|io\.lmcache\.mmg\.ns6x8:)' "$controller/subsysnqn" || continue
+    queue_count=$(cat "$controller/queue_count")
+    [ "$queue_count" -gt 0 ] || continue
+    total=$((total + queue_count - 1))
+done
+
+cat > "$temporary" <<EOF
+# HELP nvmeof_configured_io_qps_total Configured NVMe-oF I/O queue pairs.
+# TYPE nvmeof_configured_io_qps_total gauge
+nvmeof_configured_io_qps_total $total
+EOF
+chmod 644 "$temporary"
+mv -f "$temporary" "$output_dir/nvmeof_qps.prom"

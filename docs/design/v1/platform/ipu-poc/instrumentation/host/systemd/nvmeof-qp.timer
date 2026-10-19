@@ -1,0 +1,10 @@
+[Unit]
+Description=Run nvmeof-qp every 30s
+
+[Timer]
+OnBootSec=10s
+OnUnitActiveSec=30s
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

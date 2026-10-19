@@ -1,0 +1,3 @@
+# Install as /etc/default/lmcache-acc-stats-6x6 on mmgi4.
+# Set IMC_PASSWORD in that host-local file; keep it out of Git.
+ACC_TARGETS=:acc1:200.0.11.3

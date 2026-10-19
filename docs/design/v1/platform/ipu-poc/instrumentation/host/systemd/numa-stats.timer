@@ -1,0 +1,10 @@
+[Unit]
+Description=Run NUMA memory and allocation collector every 5s
+
+[Timer]
+OnBootSec=10s
+OnUnitActiveSec=5s
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,6 @@
+[Unit]
+Description=Refresh NVMe-oF configured-QP textfile for node_exporter
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/nvmeof_qp_textfile.sh

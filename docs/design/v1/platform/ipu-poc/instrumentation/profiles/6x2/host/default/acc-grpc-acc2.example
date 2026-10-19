@@ -1,0 +1,5 @@
+ACC_GRPC_NETNS=IPU1
+ACC_GRPC_FABRIC_IP=200.0.5.3
+ACC_GRPC_LOCAL_PORT=15002
+ACC_TELEMETRY_PROTO_DIR=/opt/acc-grpc-telemetry/proto/acc2
+ACC_GRPC_PROTO_SOURCE=/opt/falcon/tools/controller/python_out

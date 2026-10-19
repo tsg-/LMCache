@@ -1,0 +1,19 @@
+[Unit]
+Description=LMCache 6x2 Prometheus Node Exporter
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lmcache_metrics
+Group=lmcache_metrics
+ExecStart=/usr/local/lib/lmcache-6x2/node_exporter --web.listen-address=127.0.0.1:9100 --collector.processes --collector.systemd --collector.textfile --collector.textfile.directory=/var/lib/lmcache-6x2/textfile --no-collector.wifi --no-collector.bonding --no-collector.zfs
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/lmcache-6x2/textfile
+
+[Install]
+WantedBy=multi-user.target

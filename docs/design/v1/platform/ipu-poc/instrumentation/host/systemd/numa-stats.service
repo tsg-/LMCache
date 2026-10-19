@@ -1,0 +1,6 @@
+[Unit]
+Description=Refresh NUMA memory and allocation textfile for node_exporter
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/numa_stats_textfile.sh

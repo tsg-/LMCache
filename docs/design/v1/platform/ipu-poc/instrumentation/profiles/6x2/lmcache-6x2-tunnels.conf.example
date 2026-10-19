@@ -1,0 +1,13 @@
+# Install as /root/.ssh/lmcache-6x2-tunnels.conf after provisioning its private key.
+Host lmcache6x2-mmgi4
+    HostName 10.166.97.83
+    User root
+    IdentityFile /root/.ssh/lmcache_6x2_tunnel
+    IdentitiesOnly yes
+    StrictHostKeyChecking yes
+Host lmcache6x2-mmgi5
+    HostName 10.166.97.43
+    User root
+    IdentityFile /root/.ssh/lmcache_6x2_tunnel
+    IdentitiesOnly yes
+    StrictHostKeyChecking yes

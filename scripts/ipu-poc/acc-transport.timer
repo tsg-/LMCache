@@ -1,0 +1,10 @@
+[Unit]
+Description=Run ACC transport counters every 10s
+
+[Timer]
+OnBootSec=15s
+OnUnitActiveSec=10s
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

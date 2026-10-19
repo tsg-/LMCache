@@ -1,0 +1,9 @@
+[Unit]
+Description=Refresh Falcon transport counter textfile for node_exporter
+After=network-online.target acc-stats.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/default/acc-stats
+ExecStart=/usr/local/bin/acc_ssh_stats.py --transport-textfile /var/lib/node_exporter/textfile/acc_transport.prom
