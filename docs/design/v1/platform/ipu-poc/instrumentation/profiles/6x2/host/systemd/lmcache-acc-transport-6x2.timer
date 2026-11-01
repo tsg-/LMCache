@@ -1,0 +1,10 @@
+[Unit]
+Description=Collect persistent Falcon transport counters every ten seconds
+
+[Timer]
+OnBootSec=15s
+OnUnitActiveSec=10s
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

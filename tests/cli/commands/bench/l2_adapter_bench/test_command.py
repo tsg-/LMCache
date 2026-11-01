@@ -239,6 +239,8 @@ def test_kvcache_shape_profile_resolves_deepseek_page_burst(
         "objects_per_submit": 61,
         "page_size_bytes": 147456,
         "task_size_bytes": 8994816,
+        "payload_size_bytes": 8994816,
+        "padding_size_bytes": 0,
     }
     # A file-backed profile records no inline spec.
     assert "shape_spec" not in geometry
@@ -406,6 +408,8 @@ def test_inline_shape_spec_records_the_spec_as_its_provenance(
         "objects_per_submit": 61,
         "page_size_bytes": 147456,
         "task_size_bytes": 8994816,
+        "payload_size_bytes": 8994816,
+        "padding_size_bytes": 0,
     }
     # The file-provenance form is absent, not empty.
     assert "profile_path" not in geometry
@@ -582,6 +586,8 @@ def test_object_group_profile_drives_a_heterogeneous_round_trip(
         "separate_object_groups": True,
         "full_sw_kv": False,
         "task_size_bytes": 2 * 2 * (main_bytes + sw_bytes),
+        "payload_size_bytes": 2 * 2 * (main_bytes + sw_bytes),
+        "padding_size_bytes": 0,
     }
     assert "page_size_bytes" not in metrics["geometry"]
 
@@ -1260,3 +1266,15 @@ def test_strip_warmup_preserves_mode_and_timeout_flag() -> None:
 
     assert kept.mode is result.mode
     assert kept.timed_out is True
+
+
+def test_write_retention_requires_mixed_mode() -> None:
+    """Retention deletes only make sense for mixed-window stores."""
+    args = _parse(
+        "--only", "store", "--key-prefix", "p", "--write-retention-submits", "8"
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        run_l2_adapter_bench(MagicMock(), args)
+
+    assert exc.value.code == 2

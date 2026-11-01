@@ -1,0 +1,50 @@
+# DeepSeek-V4-Flash, persisted compressed KV under Zero SWA Caching.
+# Config: https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash/blob/60d8d70770c6776ff598c94bb586a859a38244f1/config.json
+# Report: https://arxiv.org/abs/2606.19348 (sections 3.5.2 and 4.2.1).
+# Layout: https://github.com/vllm-project/vllm/blob/4e591657157a021cab997f911d67f50c0d18a71e/vllm/models/deepseek_v4/attention.py
+# compress_ratios[:43]: 2 SWA-only, 21 CSA (4), 20 HCA (128).
+# The trailing zero in compress_ratios is the MTP layer; exclude it.
+# Main: 448 FP8 NoPE + 64*2 B BF16 RoPE + 7 UE8M0 scales + 1 B pad = 584 B.
+# CSA indexer K: MXFP4 128/2 values + 128/32 UE8M0 scales = 68 B.
+# 256 tokens: 21*64*(584+68) + 20*2*584 = 899648 B + 1472 B padding.
+# SWA and incomplete compression state are recomputed, not persisted here.
+# The report also offers SWA persistence; this profile excludes those modes.
+# Kernel page/TMA padding is not included; only packed records and 4 KiB tail.
+# Live LMCache grouping/registration is unverified; this models one packed object.
+# Inspect without traffic:
+# lmcache bench l2 --kvcache-shape-profile scripts/ipu-poc/models/deepseek_v4_flash.yaml --geometry-only
+# Add --tokens-per-chunk 1024 for the larger chunk.
+model:
+  name: deepseek-ai/DeepSeek-V4-Flash
+  family: deepseek
+runtime:
+  lmcache_tokens_per_chunk: 256
+  task_archetype: lookup_load
+  chunks_per_submit: 64
+  kv_ranks_per_chunk: 1
+  separate_object_groups: false
+  full_sw_kv: false
+object_groups:
+  - object_group_id: 0
+    name: persisted_global_kv
+    sw_size_chunks: -1
+    alignment_bytes: 4096
+    components:
+      - name: csa_main
+        role: key_value
+        cache_owning_layers: 21
+        architecture: {attention: packed, bytes_per_slot: 584}
+        quantization: {dtype: uint8, dtype_bytes: 1}
+        block_geometry: {tokens_per_block: 4, slots_per_block: 1}
+      - name: csa_indexer
+        role: key_only
+        cache_owning_layers: 21
+        architecture: {attention: packed, bytes_per_slot: 68}
+        quantization: {dtype: uint8, dtype_bytes: 1}
+        block_geometry: {tokens_per_block: 4, slots_per_block: 1}
+      - name: hca_main
+        role: key_value
+        cache_owning_layers: 20
+        architecture: {attention: packed, bytes_per_slot: 584}
+        quantization: {dtype: uint8, dtype_bytes: 1}
+        block_geometry: {tokens_per_block: 128, slots_per_block: 1}

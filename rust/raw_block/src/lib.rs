@@ -1074,6 +1074,8 @@ struct RawBlockDevice {
     // Count of currently in-flight I/O operations (global)
     // Used for shutdown and cleanup
     in_flight_count: Arc<AtomicU64>,
+    issued_pending: Arc<AtomicU64>,
+    peak_issued_pending: Arc<AtomicU64>,
     // Condition variable for signaling when in_flight_count reaches 0
     in_flight_cvar: Arc<Condvar>,
     // Per-batch in-flight count tracking
@@ -1211,6 +1213,8 @@ impl RawBlockDevice {
             fd_size_bytes(fd)?
         };
 
+        let issued_pending = Arc::new(AtomicU64::new(0));
+        let peak_issued_pending = Arc::new(AtomicU64::new(0));
         let (
             ring_opt,
             queue_opt,
@@ -1300,6 +1304,8 @@ impl RawBlockDevice {
             let in_flight_cvar_clone = Arc::clone(&in_flight_cvar);
             let batch_in_flight_clone = Arc::clone(&batch_in_flight);
             let ring_size = iouring_queue_depth;
+            let issued_pending_worker = Arc::clone(&issued_pending);
+            let peak_issued_pending_worker = Arc::clone(&peak_issued_pending);
 
             // Helper function to copy data from bounce buffer to original buffer
             fn copy_from_bounce_buffer(bounce: &AlignedBuf, orig_ptr: usize, payload_len: usize) {
@@ -1548,6 +1554,8 @@ impl RawBlockDevice {
                                 for cqe in completions {
                                     let user_data = cqe.user_data();
                                     if let Some(mut sub) = in_flight.remove(&user_data) {
+                                        issued_pending_worker
+                                            .store(in_flight.len() as u64, Ordering::Relaxed);
                                         let batch_id = sub.batch_id;
                                         let cqe_result = cqe.result();
 
@@ -1591,6 +1599,8 @@ impl RawBlockDevice {
                                             // Re-insert into in_flight with updated values
                                             // Don't decrement in_flight_count since we're resubmitting
                                             in_flight.insert(user_data, sub.clone());
+                                            issued_pending_worker
+                                                .store(in_flight.len() as u64, Ordering::Relaxed);
                                             // Push a new SQE for the remaining data
                                             let _ =
                                                 build_and_submit_sqe(&ring_clone, &sub, user_data);
@@ -1629,6 +1639,8 @@ impl RawBlockDevice {
                                 for cqe in completions {
                                     let user_data = cqe.user_data();
                                     if let Some(mut sub) = in_flight.remove(&user_data) {
+                                        issued_pending_worker
+                                            .store(in_flight.len() as u64, Ordering::Relaxed);
                                         let batch_id = sub.batch_id;
                                         let cqe_result = cqe.result();
 
@@ -1672,6 +1684,8 @@ impl RawBlockDevice {
                                             // Re-insert into in_flight with updated values
                                             // Don't decrement in_flight_count since we're resubmitting
                                             in_flight.insert(user_data, sub.clone());
+                                            issued_pending_worker
+                                                .store(in_flight.len() as u64, Ordering::Relaxed);
                                             // Push a new SQE for the remaining data
                                             let _ =
                                                 build_and_submit_sqe(&ring_clone, &sub, user_data);
@@ -1847,6 +1861,9 @@ impl RawBlockDevice {
                                     }
                                 }
                             }
+                            let pending = in_flight.len() as u64;
+                            issued_pending_worker.store(pending, Ordering::Relaxed);
+                            peak_issued_pending_worker.fetch_max(pending, Ordering::Relaxed);
                         }
                     }
 
@@ -1938,6 +1955,7 @@ impl RawBlockDevice {
                         );
                     }
 
+                    issued_pending_worker.store(0, Ordering::Relaxed);
                     // Final notification in case any thread is waiting on in_flight_count
                     in_flight_cvar_clone.notify_all();
                 })
@@ -1985,6 +2003,8 @@ impl RawBlockDevice {
             fixed_buffer_map: Arc::new(Mutex::new(HashMap::new())),
             fixed_buffers_registered: Arc::new(AtomicBool::new(false)),
             in_flight_count: in_flight_count_opt.unwrap_or_else(|| Arc::new(AtomicU64::new(0))),
+            issued_pending,
+            peak_issued_pending,
             in_flight_cvar: in_flight_cvar_opt.unwrap_or_else(|| Arc::new(Condvar::new())),
             batch_ready: batch_ready_opt,
             batched_buffer_objs: batched_buffer_objs_opt
@@ -2057,6 +2077,27 @@ impl RawBlockDevice {
     // Expose cached size to Python.
     fn size_bytes(&self) -> PyResult<u64> {
         Ok(self.size)
+    }
+
+    /// Snapshot request counts; fields are individually sampled atomics.
+    /// Issued pending counts worker-tracked submitted requests until CQE consumption,
+    /// not device queue depth. Outstanding also includes producer-queued requests.
+    /// The peak includes all operations since construction, including checkpoints.
+    fn io_stats(&self) -> HashMap<&str, u64> {
+        HashMap::from([
+            (
+                "issued_pending",
+                self.issued_pending.load(Ordering::Relaxed),
+            ),
+            (
+                "peak_issued_pending",
+                self.peak_issued_pending.load(Ordering::Relaxed),
+            ),
+            (
+                "outstanding_requests",
+                self.in_flight_count.load(Ordering::Relaxed),
+            ),
+        ])
     }
 
     /// Get NVMe namespace ID (only available when use_uring_cmd=true)

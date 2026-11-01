@@ -37,7 +37,7 @@ PROFILE_MODE_OBJECT_GROUP = "object_group"
 #: across ranks rather than owned by one.
 TASK_ARCHETYPES = ("store", "lookup_load", "shared_envelope")
 
-_ATTENTION_KINDS = ("gqa", "mla", "opaque")
+_ATTENTION_KINDS = ("gqa", "mla", "opaque", "packed")
 
 # ``burst`` is deliberately absent from both tuples: it carries the same
 # optional redundant cross-check in either form, so its presence says
@@ -101,6 +101,9 @@ class L2GeometryComponent:
     recurrent or linear-attention state has no per-token layout, so a block
     geometry would be fiction. Such a component is sized from its declared
     ``component_size_bytes`` alone.
+
+    A ``packed`` component counts byte records, including mixed precision
+    values and scales, rather than applying one dtype to an entire tensor.
     """
 
     name: str
@@ -132,6 +135,7 @@ class L2ObjectGroupGeometry:
     sw_size_chunks: int
     components: tuple[L2GeometryComponent, ...]
     object_size_bytes: int
+    alignment_padding_bytes: int = 0
 
 
 @dataclass(frozen=True)
@@ -193,6 +197,25 @@ class L2SubmitGeometry:
     def task_size_bytes(self) -> int:
         """Return the total payload one logical submit transfers."""
         return sum(descriptor.size_bytes for descriptor in self.objects)
+
+    @property
+    def padding_size_bytes(self) -> int:
+        """Return synthetic alignment bytes transferred in one submit."""
+        per_chunk = sum(
+            group.alignment_padding_bytes
+            + sum(
+                component.component_size_bytes
+                for component in group.components
+                if component.role == "padding"
+            )
+            for group in self.object_groups
+        )
+        return per_chunk * self.chunks_per_submit * self.kv_ranks_per_chunk
+
+    @property
+    def payload_size_bytes(self) -> int:
+        """Return KV bytes in one submit, excluding synthetic tail padding."""
+        return self.task_size_bytes - self.padding_size_bytes
 
     @property
     def is_uniform(self) -> bool:
@@ -284,7 +307,9 @@ def raw_submit_geometry(num_keys: int, page_size_bytes: int) -> L2SubmitGeometry
     )
 
 
-def resolve_submit_geometry(path: str) -> L2SubmitGeometry:
+def resolve_submit_geometry(
+    path: str, tokens_per_chunk: int | None = None
+) -> L2SubmitGeometry:
     """Resolve either profile form from *path* into the common submit shape.
 
     The file is read once and its top-level sections decide the form. A file
@@ -294,6 +319,8 @@ def resolve_submit_geometry(path: str) -> L2SubmitGeometry:
 
     Args:
         path: Path to the YAML profile.
+        tokens_per_chunk: Optional chunk-size override for derived packed
+            profiles. Fixed-size profiles reject an override.
 
     Returns:
         The resolved submit geometry.
@@ -301,12 +328,34 @@ def resolve_submit_geometry(path: str) -> L2SubmitGeometry:
     Raises:
         GeometryProfileError: If the file is unreadable or malformed, mixes
             the two geometry forms, or declares object groups that do not
-            describe a consistent submit.
+            describe a consistent submit; also if an override targets fixed
+            geometry or does not cover an integral number of compressed slots.
     """
     raw, document, profile_path = _read_profile(path)
     root = _mapping(document, "profile")
     if _object_group_form(root):
-        return _resolve_object_group_profile(raw, root, profile_path)
+        geometry = _resolve_object_group_profile(raw, root, profile_path)
+        if tokens_per_chunk is None:
+            return geometry
+        _positive_int(tokens_per_chunk, "tokens_per_chunk")
+        # Absolute byte totals and fixed transfer lengths cannot be resized.
+        if any(
+            component.get("architecture", {}).get("attention") != "packed"
+            or "component_size_bytes" in component
+            or "transfer_tokens_per_chunk" in component.get("block_geometry", {})
+            for group in root["object_groups"]
+            for component in group["components"]
+        ) or any("object_size_bytes" in group for group in root["object_groups"]):
+            raise GeometryProfileError(
+                "tokens_per_chunk overrides require derived packed profiles"
+            )
+        return _resolve_object_group_profile(
+            raw, root, profile_path, tokens_per_chunk=tokens_per_chunk
+        )
+    if tokens_per_chunk is not None:
+        raise GeometryProfileError(
+            "tokens_per_chunk overrides require derived packed profiles"
+        )
     return submit_geometry_from_uniform(
         _resolve_legacy_profile(raw, root, profile_path)
     )
@@ -437,15 +486,21 @@ def _resolve_legacy_profile(
 
 
 def _resolve_object_group_profile(
-    raw: bytes, root: dict[str, Any], profile_path: Path
+    raw: bytes,
+    root: dict[str, Any],
+    profile_path: Path,
+    tokens_per_chunk: int | None = None,
 ) -> L2SubmitGeometry:
     """Resolve the ``runtime`` plus ``object_groups`` sections of *root*."""
     model = _mapping(root.get("model"), "model")
     runtime = _mapping(root.get("runtime"), "runtime")
 
     model_name = _nonempty_string(model.get("name"), "model.name")
-    tokens_per_chunk = _positive_int(
+    profile_tokens_per_chunk = _positive_int(
         runtime.get("lmcache_tokens_per_chunk"), "runtime.lmcache_tokens_per_chunk"
+    )
+    tokens_per_chunk = (
+        profile_tokens_per_chunk if tokens_per_chunk is None else tokens_per_chunk
     )
     task_archetype = _nonempty_string(
         runtime.get("task_archetype"), "runtime.task_archetype"
@@ -496,7 +551,8 @@ def _resolve_object_group_profile(
         objects=objects,
         page_size_bytes=0,
     )
-    _validate_burst_cross_check(root.get("burst"), geometry)
+    if tokens_per_chunk == profile_tokens_per_chunk:
+        _validate_burst_cross_check(root.get("burst"), geometry)
     return geometry
 
 
@@ -560,14 +616,20 @@ def _resolve_object_group(
             f"duplicate component name in {field}.components: {component_names}"
         )
 
-    object_size_bytes = _positive_int(
-        group.get("object_size_bytes"), f"{field}.object_size_bytes"
-    )
     packed = sum(component.component_size_bytes for component in components)
-    if object_size_bytes != packed:
+    derived = all(component.attention == "packed" for component in components)
+    alignment = _positive_int(
+        group.get("alignment_bytes", 1), f"{field}.alignment_bytes"
+    )
+    aligned = (packed + alignment - 1) // alignment * alignment
+    object_size_bytes = _positive_int(
+        group.get("object_size_bytes", aligned if derived else None),
+        f"{field}.object_size_bytes",
+    )
+    if object_size_bytes != aligned:
         raise GeometryProfileError(
             f"{field}.object_size_bytes ({object_size_bytes}) does not equal "
-            f"the sum of its component sizes ({packed})"
+            f"the aligned sum of its component sizes ({aligned})"
         )
 
     return L2ObjectGroupGeometry(
@@ -576,6 +638,7 @@ def _resolve_object_group(
         sw_size_chunks=sw_size_chunks,
         components=components,
         object_size_bytes=object_size_bytes,
+        alignment_padding_bytes=aligned - packed,
     )
 
 
@@ -603,11 +666,15 @@ def _resolve_component(
     dtype_bytes = _positive_int(
         quantization.get("dtype_bytes"), f"{field}.quantization.dtype_bytes"
     )
-    component_size_bytes = _positive_int(
-        component.get("component_size_bytes"), f"{field}.component_size_bytes"
+    declared_size = component.get("component_size_bytes")
+    component_size_bytes = (
+        None
+        if attention == "packed" and declared_size is None
+        else _positive_int(declared_size, f"{field}.component_size_bytes")
     )
 
     if attention == "opaque":
+        assert component_size_bytes is not None
         if "block_geometry" in component:
             raise GeometryProfileError(
                 f"{field} is opaque, so it must not declare block_geometry: "
@@ -635,7 +702,10 @@ def _resolve_component(
         block.get("slots_per_block"), f"{field}.block_geometry.slots_per_block"
     )
     transfer_tokens_per_chunk = _positive_int(
-        block.get("transfer_tokens_per_chunk"),
+        block.get(
+            "transfer_tokens_per_chunk",
+            tokens_per_chunk if attention == "packed" else None,
+        ),
         f"{field}.block_geometry.transfer_tokens_per_chunk",
     )
     # A sliding-window component may move less than a full chunk, but never
@@ -655,7 +725,15 @@ def _resolve_component(
         )
     slots_per_object = scaled // tokens_per_block
 
-    if attention == "mla":
+    if attention == "packed":
+        elements_per_token = _positive_int(
+            architecture.get("bytes_per_slot"), f"{field}.architecture.bytes_per_slot"
+        )
+        if dtype != "uint8" or dtype_bytes != 1:
+            raise GeometryProfileError(
+                f"{field} packed records require uint8 byte storage"
+            )
+    elif attention == "mla":
         elements_per_token = _mla_elements_per_token(architecture)
     else:
         elements_per_token = (
@@ -669,7 +747,7 @@ def _resolve_component(
             )
         )
     expected = cache_owning_layers * elements_per_token * dtype_bytes * slots_per_object
-    if component_size_bytes != expected:
+    if component_size_bytes is not None and component_size_bytes != expected:
         raise GeometryProfileError(
             f"{field}.component_size_bytes ({component_size_bytes}) does not "
             f"match the declared architecture, dtype, and block geometry "
@@ -687,7 +765,7 @@ def _resolve_component(
         slots_per_block=slots_per_block,
         transfer_tokens_per_chunk=transfer_tokens_per_chunk,
         slots_per_object=slots_per_object,
-        component_size_bytes=component_size_bytes,
+        component_size_bytes=expected,
     )
 
 

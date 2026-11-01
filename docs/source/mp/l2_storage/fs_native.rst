@@ -26,6 +26,13 @@ I/O queue depth on a single Python thread.
   for reads that use ``O_DIRECT`` because direct I/O bypasses the page cache.
 - ``max_capacity_gb`` (float, default ``0``): Maximum L2 capacity in GB
   for client-side usage tracking.  Default ``0`` disables tracking.
+- ``num_shard_dirs`` (int, default ``0``, at most ``65536``): Spread
+  objects over this many hashed subdirectories of ``base_path``.  Each
+  store looks up, creates and renames a file, and each of those takes the
+  directory's inode lock, so with many workers a single flat directory
+  makes stores and loads wait on each other.  Use ``256`` when stores run
+  at high concurrency.  Every reader of ``base_path`` must use the same
+  value as the writer; objects stored with another value are not found.
 
 .. important::
 

@@ -969,6 +969,10 @@ class TestFSNativeL2AdapterConfig:
         assert config.relative_tmp_dir == ""
         assert config.use_odirect is False
         assert config.read_ahead_size is None
+        assert config.num_shard_dirs == 0
+        assert config.recycle_max_files == 0
+        assert config.store_workers == 0
+        assert config.delete_workers == 0
 
     def test_from_dict_full(self):
         # First Party
@@ -984,13 +988,46 @@ class TestFSNativeL2AdapterConfig:
                 "relative_tmp_dir": ".tmp",
                 "use_odirect": True,
                 "read_ahead_size": 4096,
+                "num_shard_dirs": 256,
             }
         )
+        assert config.num_shard_dirs == 256
         assert config.base_path == "/data/kv_cache"
         assert config.num_workers == 16
         assert config.relative_tmp_dir == ".tmp"
         assert config.use_odirect is True
         assert config.read_ahead_size == 4096
+
+    @pytest.mark.parametrize(
+        "name", ["recycle_max_files", "store_workers", "delete_workers"]
+    )
+    @pytest.mark.parametrize("value", [-1, True, "8", 2.0])
+    def test_from_dict_invalid_worker_and_recycle_counts_raise(self, name, value):
+        # First Party
+        from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
+            FSNativeL2AdapterConfig,
+        )
+
+        with pytest.raises(ValueError, match=name):
+            FSNativeL2AdapterConfig.from_dict(
+                {"type": "fs_native", "base_path": "/tmp/x", name: value}
+            )
+
+    @pytest.mark.parametrize("value", [-1, 65537, True, "8", 2.0])
+    def test_from_dict_invalid_num_shard_dirs_raises(self, value):
+        # First Party
+        from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
+            FSNativeL2AdapterConfig,
+        )
+
+        with pytest.raises(ValueError, match="num_shard_dirs"):
+            FSNativeL2AdapterConfig.from_dict(
+                {
+                    "type": "fs_native",
+                    "base_path": "/tmp/x",
+                    "num_shard_dirs": value,
+                }
+            )
 
     def test_from_dict_missing_base_path_raises(self):
         # First Party

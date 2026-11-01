@@ -370,6 +370,8 @@ class _FakeRawDevice:
         ] = []
         self.write_uring_calls: list[tuple[int, int, int, int | None]] = []
         self._batch_results: dict[int, list[bool]] = {}
+        # Entry indices (across one batched_write) reported as failed.
+        self.failed_entries: set[int] = set()
 
     def size_bytes(self) -> int:
         return self._size_bytes
@@ -390,7 +392,9 @@ class _FakeRawDevice:
     ) -> int:
         del buffers
         self.batched_write_calls.append((offsets, total_lens, placement_ids))
-        self._batch_results[123] = [True] * len(offsets)
+        self._batch_results[123] = [
+            index not in self.failed_entries for index in range(len(offsets))
+        ]
         return 123
 
     def wait_iouring(self, batch_id: int) -> tuple[list[bool], list[tuple[int, str]]]:
@@ -533,8 +537,7 @@ def test_raw_block_core_put_many_preserves_none_and_positive_placement(
 
         assert put_result.results == [True, True]
         assert [call[2] for call in raw_device.batched_write_calls] == [
-            [None, None],
-            [1, 1],
+            [None, None, 1, 1],
         ]
     finally:
         core.close()
@@ -789,3 +792,49 @@ def test_raw_block_core_does_not_restore_slot_affinity_from_checkpoint(tmp_path)
         assert status["fdp_slot_affinity_fallback_count"] == 1
     finally:
         recovered.close()
+
+
+def test_raw_block_core_put_many_submits_one_batch_per_chunk(tmp_path, monkeypatch):
+    """Header and payload writes for up to 16 objects share one submission."""
+    core, raw_device = _make_fake_io_uring_core(tmp_path, monkeypatch)
+    specs = [encode_object_key(make_object_key(900 + i)) for i in range(20)]
+
+    try:
+        put_result = core.put_many(
+            specs, [make_memory_obj(bytes([i]) * 64) for i in range(20)]
+        )
+
+        assert put_result.results == [True] * 20
+        assert put_result.stored_keys == [spec.encoded for spec in specs]
+        assert [len(call[0]) for call in raw_device.batched_write_calls] == [32, 8]
+        assert core.exists_many([spec.encoded for spec in specs]) == [True] * 20
+    finally:
+        core.close()
+
+
+def test_raw_block_core_put_many_fails_only_the_object_with_a_failed_write(
+    tmp_path, monkeypatch
+):
+    """A failed payload write fails its object and returns its slot."""
+    core, raw_device = _make_fake_io_uring_core(tmp_path, monkeypatch)
+    specs = [encode_object_key(make_object_key(950 + i)) for i in range(3)]
+    free_before = core.report_status()["free_slot_count"]
+    next_before = core.report_status()["next_slot"]
+    # Entries are [header0, payload0, header1, payload1, ...]; fail payload1.
+    raw_device.failed_entries = {3}
+
+    try:
+        put_result = core.put_many(specs, [make_memory_obj(b"x" * 64)] * 3)
+
+        assert put_result.results == [True, False, True]
+        assert put_result.stored_keys == [specs[0].encoded, specs[2].encoded]
+        assert core.exists_many([spec.encoded for spec in specs]) == [
+            True,
+            False,
+            True,
+        ]
+        status = core.report_status()
+        assert status["next_slot"] - next_before == 3
+        assert status["free_slot_count"] - free_before == 1
+    finally:
+        core.close()

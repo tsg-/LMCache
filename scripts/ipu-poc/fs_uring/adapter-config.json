@@ -1,0 +1,11 @@
+{
+  "type": "native_plugin",
+  "module_path": "lmcache_fs_uring",
+  "class_name": "LMCacheFSUringClient",
+  "adapter_params": {
+    "base_path": "/home/dev/tsg/fs-native-uring/test-data",
+    "num_workers": 32,
+    "use_odirect": true,
+    "io_depth": 32
+  }
+}

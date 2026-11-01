@@ -44,6 +44,9 @@ _META_HEADER_STRUCT = struct.Struct("<8sIQQI")
 RAW_BLOCK_IO_ENGINES = frozenset({"posix", "io_uring"})
 DEFAULT_IOURING_QUEUE_DEPTH = 256
 _MAX_FDP_PLACEMENT_ID = 0xFFFF
+# Objects per io_uring submission in put_many. One wait per chunk instead of
+# per object keeps several stores in flight on each store worker.
+_STORE_BATCH_OBJECTS = 16
 
 # FDP placement ID semantics are shared by design across raw-block write paths.
 # None omits the directive. Explicit identifiers must be positive because
@@ -380,6 +383,7 @@ class RawBlockCore:
         self._data_base_offset: int = 0
 
         self._raw = None
+        self._native_io_stats: dict[str, int] | None = None
         self._closed = False
 
         self._meta_seq: int = 0
@@ -752,61 +756,72 @@ class RawBlockCore:
         results = [False] * len(keys)
         stored_keys: list[str] = []
 
-        for i, (key, obj) in enumerate(zip(keys, objs, strict=False)):
-            placement_id = per_key_placement_ids[i]
+        for chunk_start in range(0, len(keys), _STORE_BATCH_OBJECTS):
             if self._closed:
                 break
-
+            reserved: list[tuple[int, int]] = []
             with self._lock:
-                if key.encoded in self._index:
-                    results[i] = True
-                    continue
-                if key.encoded in self._inflight:
-                    continue
-
-                try:
-                    offset = self._allocate_slot_locked(placement_id)
-                except RuntimeError:
-                    logger.warning(
-                        "RawBlockCore: no free slot available for key %s",
-                        key.encoded,
+                for i in range(
+                    chunk_start, min(chunk_start + _STORE_BATCH_OBJECTS, len(keys))
+                ):
+                    key, obj = keys[i], objs[i]
+                    if key.encoded in self._index:
+                        results[i] = True
+                        continue
+                    if key.encoded in self._inflight:
+                        continue
+                    try:
+                        offset = self._allocate_slot_locked(per_key_placement_ids[i])
+                    except RuntimeError:
+                        logger.warning(
+                            "RawBlockCore: no free slot available for key %s",
+                            key.encoded,
+                        )
+                        continue
+                    meta = DiskCacheMetadata(
+                        path=f"{self.device_path}@{offset}",
+                        size=len(obj.byte_array),
+                        shape=obj.metadata.shape,
+                        dtype=obj.metadata.dtype,
+                        cached_positions=obj.metadata.cached_positions,
+                        fmt=obj.metadata.fmt,
+                        pin_count=0,
                     )
-                    continue
+                    self._inflight[key.encoded] = _Inflight(offset=offset, meta=meta)
+                    reserved.append((i, offset))
 
-                meta = DiskCacheMetadata(
-                    path=f"{self.device_path}@{offset}",
-                    size=len(obj.byte_array),
-                    shape=obj.metadata.shape,
-                    dtype=obj.metadata.dtype,
-                    cached_positions=obj.metadata.cached_positions,
-                    fmt=obj.metadata.fmt,
-                    pin_count=0,
-                )
-                self._inflight[key.encoded] = _Inflight(offset=offset, meta=meta)
-
-            success = self._write_one(key, obj, offset, placement_id=placement_id)
+            if not reserved:
+                continue
+            successes = self._write_many(
+                [keys[i] for i, _ in reserved],
+                [objs[i] for i, _ in reserved],
+                [offset for _, offset in reserved],
+                [per_key_placement_ids[i] for i, _ in reserved],
+            )
 
             with self._lock:
-                inflight = self._inflight.pop(key.encoded, None)
-                if inflight is None:
-                    results[i] = False
-                    continue
-                if inflight.canceled or not success:
-                    self._append_free_slot_locked(
-                        self._offset_to_slot(int(inflight.offset))
+                for (i, _), success in zip(reserved, successes, strict=True):
+                    key = keys[i]
+                    inflight = self._inflight.pop(key.encoded, None)
+                    if inflight is None:
+                        results[i] = False
+                        continue
+                    if inflight.canceled or not success:
+                        self._append_free_slot_locked(
+                            self._offset_to_slot(int(inflight.offset))
+                        )
+                        self._meta_dirty_total += 1
+                        results[i] = False
+                        continue
+
+                    self._index[key.encoded] = _Entry(
+                        offset=inflight.offset,
+                        size=inflight.meta.size,
+                        meta=inflight.meta,
                     )
                     self._meta_dirty_total += 1
-                    results[i] = False
-                    continue
-
-                self._index[key.encoded] = _Entry(
-                    offset=inflight.offset,
-                    size=inflight.meta.size,
-                    meta=inflight.meta,
-                )
-                self._meta_dirty_total += 1
-                results[i] = True
-                stored_keys.append(key.encoded)
+                    results[i] = True
+                    stored_keys.append(key.encoded)
 
         return RawBlockPutManyResult(
             results=results,
@@ -1057,6 +1072,11 @@ class RawBlockCore:
                 "metadata_dirty_total": self._meta_dirty_total,
                 "metadata_persisted": self._meta_persisted,
                 "inflight_io_count": self._inflight_io_count,
+                "native_io": (
+                    self._raw.io_stats()
+                    if self._raw is not None and hasattr(self._raw, "io_stats")
+                    else self._native_io_stats
+                ),
                 "use_odirect": self.use_odirect,
                 "enable_zero_copy": self.enable_zero_copy,
                 "io_engine": self.io_engine,
@@ -1089,6 +1109,8 @@ class RawBlockCore:
         if self._raw is not None:
             try:
                 self._raw.close()
+                if hasattr(self._raw, "io_stats"):
+                    self._native_io_stats = self._raw.io_stats()
             except Exception as e:
                 logger.warning(
                     "Failed to close raw block device %s: %s", self.device_path, e
@@ -1658,6 +1680,97 @@ class RawBlockCore:
             )
             return [False] * expected_count
         return [bool(result) for result in results]
+
+    def _write_many(
+        self,
+        keys: Sequence[RawBlockKeySpec],
+        memory_objs: Sequence[MemoryObj],
+        offsets: Sequence[int],
+        placement_ids: Sequence[PlacementId],
+    ) -> list[bool]:
+        """Write several reserved slots, sharing one io_uring wait when possible.
+
+        Args:
+            keys: Raw-block key specs whose slots were reserved by the caller.
+            memory_objs: Source objects, aligned with ``keys``.
+            offsets: Reserved slot byte offsets, aligned with ``keys``.
+            placement_ids: FDP placement identifiers, aligned with ``keys``.
+
+        Returns:
+            Per-object success, aligned with ``keys``. An object succeeds only
+            when both its header and payload writes complete.
+        """
+        if self.io_engine != "io_uring" or self.use_uring_cmd or len(keys) == 1:
+            return [
+                self._write_one(key, obj, offset, placement_id=placement_id)
+                for key, obj, offset, placement_id in zip(
+                    keys, memory_objs, offsets, placement_ids, strict=True
+                )
+            ]
+
+        successes = [False] * len(keys)
+        write_offsets: list[int] = []
+        write_buffers: list[Any] = []
+        write_lens: list[int] = []
+        write_placements: list[PlacementId] = []
+        prepared: list[int] = []
+        for index, (key, obj, offset, placement_id) in enumerate(
+            zip(keys, memory_objs, offsets, placement_ids, strict=True)
+        ):
+            try:
+                header = self._encode_header(key.slot_identity, len(obj.byte_array))
+                buf, payload_len, total_len = self._prepare_write_payload(obj)
+            except Exception as e:
+                logger.error("RawBlockCore write failed for %s: %s", key.encoded, e)
+                continue
+            hdr_total = (
+                round_up(len(header), self.block_align)
+                if self._requires_transfer_alignment
+                else len(header)
+            )
+            if payload_len != total_len:
+                # batched_write cannot express a shorter source than transfer.
+                successes[index] = self._write_one(
+                    key, obj, offset, placement_id=placement_id
+                )
+                continue
+            write_offsets += [offset, offset + self.header_bytes]
+            write_buffers += [header, buf]
+            write_lens += [hdr_total, total_len]
+            write_placements += [placement_id, placement_id]
+            prepared.append(index)
+
+        if not prepared:
+            return successes
+        raw_dev = self._rawdev()
+        with self._lock:
+            self._inflight_io_count += len(prepared)
+        try:
+            batch_id = raw_dev.batched_write(
+                write_offsets,
+                write_buffers,
+                write_lens,
+                normalize_raw_block_placement_ids(
+                    write_placements,
+                    len(write_offsets),
+                    field_name="placement_ids",
+                ),
+            )
+            done = self._wait_iouring_results(
+                raw_dev, batch_id, len(write_offsets), "io_uring write"
+            )
+        except Exception as e:
+            logger.error(
+                "RawBlockCore batched write of %d objects failed: %s", len(prepared), e
+            )
+            done = [False] * len(write_offsets)
+        finally:
+            with self._lock:
+                self._inflight_io_count -= len(prepared)
+                self._last_io_ts = time.monotonic()
+        for position, index in enumerate(prepared):
+            successes[index] = done[2 * position] and done[2 * position + 1]
+        return successes
 
     def _write_one(
         self,

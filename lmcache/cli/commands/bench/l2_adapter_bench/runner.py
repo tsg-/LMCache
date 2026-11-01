@@ -32,6 +32,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Callable
+import queue
+import threading
 import time
 
 # First Party
@@ -86,6 +88,9 @@ _STORE_TIMEOUT_SEC = 120.0
 _LOOKUP_TIMEOUT_SEC = 60.0
 _LOAD_TIMEOUT_SEC = 120.0
 _MIXED_WRITE_VERIFY_SAMPLES = 3
+# Adapter delete() blocks until its batch completes and queues behind loads
+# and stores, so one thread cannot retire submits as fast as they are stored.
+_RETENTION_DELETE_THREADS = 8
 
 
 @dataclass(frozen=True)
@@ -563,6 +568,7 @@ def run_sustained_mixed_window(
     log: LogFn,
     verify_write_samples: bool = True,
     object_sizes: Sequence[int] = (),
+    write_retention_submits: int = 0,
 ) -> bool:
     """Run a sustained read/write window under one global in-flight limit.
 
@@ -588,6 +594,11 @@ def run_sustained_mixed_window(
         object_sizes: Per-object payload sizes in submit order, shared by
             both directions because a mixed run reads and writes the same
             geometry. Defaults to the uniform sizes implied by the results.
+        write_retention_submits: When positive, after store submit ``k``
+            succeeds, helper threads delete the keys of store submit
+            ``k - write_retention_submits`` so stored bytes stay bounded.
+            The first ``_MIXED_WRITE_VERIFY_SAMPLES`` stores are kept for the
+            post-window readback. ``0`` keeps every store.
 
     Returns:
         ``True`` when every completion was successful and the final successful
@@ -611,6 +622,8 @@ def run_sustained_mixed_window(
         raise ValueError("store_result requires BenchMode.SUSTAINED")
     if read_count <= 0 or write_count <= 0:
         raise ValueError("read_write_ratio values must be positive")
+    if write_retention_submits < 0:
+        raise ValueError("write_retention_submits must be non-negative")
     object_sizes = _resolve_object_sizes(
         object_sizes, load_result.num_keys, load_result.data_size_bytes
     )
@@ -623,6 +636,24 @@ def run_sustained_mixed_window(
     next_store_index = 0
     # (operation, task id) -> (submit timestamp, reusable global slot)
     pending: dict[tuple[str, int], tuple[float, int]] = {}
+    # store task id -> store submit index, for retention deletes
+    store_index_by_task: dict[int, int] = {}
+    deletes: queue.Queue[list[ObjectKey] | None] = queue.Queue()
+
+    def run_deletes() -> None:
+        """Delete retired store submits until told to stop."""
+        while (keys := deletes.get()) is not None:
+            adapter.delete(keys)
+
+    deleters = [
+        threading.Thread(
+            target=run_deletes, name=f"mixed-retention-{index}", daemon=True
+        )
+        for index in range(_RETENTION_DELETE_THREADS)
+    ]
+    if write_retention_submits:
+        for deleter in deleters:
+            deleter.start()
     free_slots = list(range(load_result.in_flight))
     rejected = False
     # ``fs_native`` reports a successful store when it has accepted a task,
@@ -652,6 +683,7 @@ def run_sustained_mixed_window(
                 keys,
                 objects,
             )
+            store_index_by_task[task_id] = next_store_index
             next_store_index += 1
         pending[(operation, task_id)] = (submitted_at, slot)
 
@@ -713,6 +745,13 @@ def run_sustained_mixed_window(
                 success = _bitmap_success(payload, object_sizes)
             else:
                 success = _store_success(payload, object_sizes)
+                retired = store_index_by_task.pop(task_id) - write_retention_submits
+                if (
+                    write_retention_submits
+                    and success.objects == result.num_keys
+                    and retired >= _MIXED_WRITE_VERIFY_SAMPLES
+                ):
+                    deletes.put(store_keys_for_submit(retired))
             result.record_success(success.objects, success.payload_bytes)
             if success.objects != result.num_keys:
                 log(
@@ -731,6 +770,12 @@ def run_sustained_mixed_window(
     phase_end = time.time()
     load_result.phase_ended_at = phase_end
     store_result.phase_ended_at = phase_end
+    if write_retention_submits:
+        log(f"  [Mixed] draining {deletes.qsize()} retention deletes")
+        for _ in deleters:
+            deletes.put(None)
+        for deleter in deleters:
+            deleter.join()
     if verify_write_samples and not rejected and not pending:
         if not verify_mixed_write_samples(
             adapter,
@@ -797,14 +842,21 @@ def verify_mixed_write_samples(
         for loaded in loaded_objects:
             loaded.raw_data.fill_(0xA5)
         task_id = adapter.submit_load_task(keys, loaded_objects)
-        if not wait_eventfd(adapter.get_load_event_fd(), timeout=timeout):
-            log("  [Mixed Verify] TIMEOUT waiting for write-prefix readback")
-            return False
-        bitmap = adapter.query_load_result(task_id)
-        if bitmap is None or _bitmap_count(bitmap) != len(keys):
+        deadline = time.perf_counter() + timeout
+        bitmap = None
+        while bitmap is None:
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0 or not wait_eventfd(
+                adapter.get_load_event_fd(), timeout=remaining
+            ):
+                log("  [Mixed Verify] TIMEOUT waiting for write-prefix readback")
+                return False
+            # Notifications may remain after an earlier task was harvested.
+            bitmap = adapter.query_load_result(task_id)
+        if _bitmap_count(bitmap) != len(keys):
             log(
                 "  [Mixed Verify] FAILED: write-prefix sample did not "
-                f"load all {len(keys)} keys"
+                f"load all {len(keys)} keys ({_bitmap_count(bitmap)} loaded)"
             )
             return False
         if not verify_round_trip(keys, expected_objects, loaded_objects, log):
@@ -828,6 +880,7 @@ def bench_mixed_sustained(
     on_result: ResultHook = _discard_result_hook,
     verify_write_samples: bool = True,
     object_sizes: Sequence[int] = (),
+    write_retention_submits: int = 0,
 ) -> tuple[BenchResult, BenchResult, bool]:
     """Benchmark a sustained read/write payload mix.
 
@@ -853,6 +906,8 @@ def bench_mixed_sustained(
             successful stores before accepting the result.
         object_sizes: Per-object payload sizes in submit order. Empty means
             the uniform ``num_keys`` x ``data_size`` geometry.
+        write_retention_submits: Keep only this many most recent store
+            submits; see ``run_sustained_mixed_window``. ``0`` keeps all.
 
     Returns:
         ``(load_result, store_result, accepted)``. ``accepted`` is false on
@@ -899,6 +954,7 @@ def bench_mixed_sustained(
         log=log,
         verify_write_samples=verify_write_samples,
         object_sizes=sizes,
+        write_retention_submits=write_retention_submits,
     )
     _log_sustained_summary(load_result, log)
     _log_sustained_summary(store_result, log)

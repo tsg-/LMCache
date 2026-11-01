@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh persistent Falcon transport counters for node telemetry
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/default/lmcache-acc-stats-6x6
+ExecStart=/usr/bin/python3 /usr/local/lib/lmcache-6x2/acc_ssh_stats.py --transport-textfile /var/lib/lmcache-6x2/textfile/acc_transport.prom
+TimeoutStartSec=30s
+TimeoutStopSec=2s
