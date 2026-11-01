@@ -44,3 +44,14 @@ def test_legacy_backend_bytes_and_recovery(salt: str) -> None:
     assert BigtableL2KeyEncoder(layer_group_size=4).encode_row_key(key) == (
         f"dead@org/model@lg4@0000002a@3@deadbeef{suffix}".encode()
     )
+
+
+@pytest.mark.parametrize("tags", [{}, {"lora": "a1", "dtype": "fp8"}])
+@pytest.mark.parametrize("salt", ["", "tenant"])
+@pytest.mark.parametrize("rank, group", [(0, 0), (0xFFFFFFFF, 255), (7, 0x1F)])
+def test_storage_key_matches_the_generic_template(
+    salt: str, rank: int, group: int, tags: dict[str, str]
+) -> None:
+    key = ObjectKey(bytes(range(16)), "a/b/c", rank, group, salt, tags=tags)
+    template = "{model}@{rank}@{group}@{hash}{suffix}"
+    assert encode_storage_key(key) == format_storage_key(key, template)
