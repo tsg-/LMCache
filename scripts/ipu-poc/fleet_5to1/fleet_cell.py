@@ -108,17 +108,21 @@ def run_lmc(a, host, outdir):
         target=trim_loop, args=(stop, a.trim_every, trims), daemon=True
     )
     th.start()
-    extra = [
-        "--duration-sec",
-        str(a.dur),
-        "--read-write-ratio",
-        "5:1",
-        "--write-key-prefix",
-        prefix + "-w",
-        "--write-retention-submits",
-        str(a.retention),
-        "--no-skip-verify",
-    ]
+    if a.read_only:
+        # Same seeded corpus the 5:1 cells read from.
+        extra = ["--duration-sec", str(a.dur), "--only", "load"]
+    else:
+        extra = [
+            "--duration-sec",
+            str(a.dur),
+            "--read-write-ratio",
+            "5:1",
+            "--write-key-prefix",
+            prefix + "-w",
+            "--write-retention-submits",
+            str(a.retention),
+            "--no-skip-verify",
+        ]
     t0 = time.time()
     # wait4 gives the bench child's own rusage; RUSAGE_CHILDREN would also
     # count the fstrim children the trim thread reaps meanwhile.
@@ -236,8 +240,7 @@ def run_fio(a, host):
             "--invalidate=1",
             "--output-format=json",
             "--bs=256k",
-            "--rw=randrw",
-            "--rwmixread=83",
+            *(["--rw=randread"] if a.read_only else ["--rw=randrw", "--rwmixread=83"]),
             "--time_based=1",
             f"--runtime={a.dur}",
             "--ramp_time=30",
@@ -271,6 +274,7 @@ def main():
     ap.add_argument("--trim-every", type=int, default=30)
     ap.add_argument("--py", default="")
     ap.add_argument("--repo", default="")
+    ap.add_argument("--read-only", action="store_true")
     ap.add_argument("--pythonpath", default="/root/dig5to1/lmc_copy:/root/dig5to1/mod")
     a = ap.parse_args()
     # fs_uring holds one fd per in-flight read; a 1024 soft limit caps in-flight

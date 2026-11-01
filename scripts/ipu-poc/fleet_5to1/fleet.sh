@@ -1,5 +1,5 @@
 #!/bin/bash
-# Usage: [PYPATH=...] fleet.sh <mode> <name> [dur] [adapter-json] [in_flight] [retention] [trim_every]
+# Usage: [PYPATH=...] [RO=1] fleet.sh <mode> <name> [dur] [adapter-json] [in_flight] [retention] [trim_every]
 # Launches one synchronized cell on all six initiators, waits, prints the sum.
 set -u
 MODE=$1; NAME=$2; DUR=${3:-600}; ADAPTER=${4:-}; IF=${5:-16}; RET=${6:-20000}; TRIM=${7:-30}
@@ -12,7 +12,7 @@ echo "nuse_before $(nuse)"
 for h in $HOSTS; do
   case $h in mmgi4|mmgi5) R=/root/LMCache;; *) R=/root/anthropic/LMCache;; esac
   $SSH $h "python3 -I /root/dig5to1/fleet_cell.py $MODE --name $NAME --start-at $START --dur $DUR \
-    --adapter '$ADAPTER' --in-flight $IF --retention $RET --trim-every $TRIM --py $R/.venv-bench-l2/bin/python --repo $R --pythonpath $PYPATH" \
+    --adapter '$ADAPTER' --in-flight $IF --retention $RET --trim-every $TRIM --py $R/.venv-bench-l2/bin/python --repo $R --pythonpath $PYPATH ${RO:+--read-only}" \
     > /tmp/dig5to1/fleet-$NAME-$h.log 2>&1 &
 done
 wait
