@@ -38,6 +38,31 @@ I/O queue depth on a single Python thread.
   ``num_read_workers`` x object size, so ``num_read_workers`` must be
   large enough for the budget to bind.  Sizing notes:
   ``docs/design/v1/distributed/l2_adapters/fs_native_read_depth.md``.
+- ``num_shard_dirs`` (int, default ``0``, at most ``65536``): Spread
+  objects over this many hashed subdirectories of ``base_path``.  Each
+  store looks up, creates and renames a file, and each of those takes the
+  directory's inode lock, so with many workers a single flat directory
+  makes stores and loads wait on each other.  Use ``256`` when stores run
+  at high concurrency.  Every reader of ``base_path`` must use the same
+  value as the writer; objects stored with another value are not found.
+- ``recycle_max_files`` (int, default ``0``): On delete, move up to this
+  many object files into a per-shard ``.pool`` directory instead of
+  unlinking them; a later store of the same size overwrites a pooled file
+  in place and renames it into position.  Overwriting allocated blocks
+  keeps the SSD-visible footprint flat under steady store and delete
+  churn without ``fstrim``.  A pooled file is reused only after a 1 s
+  quarantine, so a load that opened it before the delete can finish; a
+  load still holding the file open after that could read another
+  object's bytes.  Pooled files left by an earlier process are adopted.
+  Reuse needs a pooled file of the same size in the same shard, so mixed
+  object sizes reuse less.  Recycled objects are not crash-safe: the
+  overwrite is not synced before the rename, so after a power loss an
+  object can hold another object's earlier bytes.  Use it only where
+  objects are not read back after a restart.
+- ``store_workers`` / ``delete_workers`` (int, default ``0``): Dedicated
+  worker threads for stores and deletes.  ``0`` runs them on the shared
+  ``num_workers`` pool, where their blocking metadata work queues ahead
+  of loads.
 
 .. important::
 

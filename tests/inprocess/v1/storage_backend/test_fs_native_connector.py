@@ -296,3 +296,249 @@ def test_negative_num_read_workers_is_rejected(tmp_path: Path) -> None:
     LMCacheFSClient = _import_fs_client()
     with pytest.raises(RuntimeError, match="num_read_workers must be >= 0"):
         LMCacheFSClient(str(tmp_path), 1, "", False, 0, -1)
+
+
+def test_sharded_layout_round_trip(tmp_path) -> None:
+    """Sharded objects live one level down and read back through the client."""
+    LMCacheFSClient = _import_fs_client()
+    key = "test_model@00000000@0@00112233445566778899"
+    size = 8192
+    _source_raw, source = _aligned_memoryview(size, 4096)
+    _dest_raw, dest = _aligned_memoryview(size, 4096)
+    _fill(source)
+
+    client = LMCacheFSClient(str(tmp_path), 2, num_shard_dirs=16)
+    try:
+        shards = sorted(p.name for p in tmp_path.iterdir())
+        assert shards == [f"{i:x}" for i in range(16)]
+
+        assert _submit_and_wait(client, "submit_batch_set", key, source)[1]
+        stored = [p for p in tmp_path.rglob("*.data")]
+        assert len(stored) == 1
+        assert stored[0].parent.parent == tmp_path
+
+        load = _submit_and_wait(client, "submit_batch_get", key, dest)
+        assert load[1], load[2]
+        assert bytes(dest) == bytes(source)
+
+        exists = _wait_for_completion(client, client.submit_batch_exists([key]))
+        assert exists[3] == [True]
+
+        deleted = _wait_for_completion(client, client.submit_batch_delete([key]))
+        assert deleted[1], deleted[2]
+        assert not list(tmp_path.rglob("*.data"))
+    finally:
+        client.close()
+
+
+def test_shard_count_must_match_to_find_objects(tmp_path) -> None:
+    """A flat reader cannot see objects a sharded writer stored."""
+    LMCacheFSClient = _import_fs_client()
+    key = "test_model@00000000@0@aabbccddeeff00112233"
+    _source_raw, source = _aligned_memoryview(4096, 4096)
+    _fill(source)
+
+    writer = LMCacheFSClient(str(tmp_path), 1, num_shard_dirs=4)
+    try:
+        assert _submit_and_wait(writer, "submit_batch_set", key, source)[1]
+    finally:
+        writer.close()
+
+    flat = LMCacheFSClient(str(tmp_path), 1, num_shard_dirs=0)
+    try:
+        exists = _wait_for_completion(flat, flat.submit_batch_exists([key]))
+        assert exists[3] == [False]
+    finally:
+        flat.close()
+
+
+def _store(client: Any, key: str, view: memoryview) -> None:
+    assert _submit_and_wait(client, "submit_batch_set", key, view)[1]
+
+
+def _data_path(base: Path, key_hash: str) -> Path:
+    return next(p for p in base.rglob("*.data") if key_hash in p.name)
+
+
+def _shard_name(key: str, num_shard_dirs: int) -> str:
+    """Mirror the connector layout: FNV-1a of the on-disk filename."""
+    model, rank, group, chunk = key.split("@")
+    filename = f"{model}@0x{rank}@{group}@{chunk}.data"
+    h = 14695981039346656037
+    for byte in filename.encode():
+        h = ((h ^ byte) * 1099511628211) % (1 << 64)
+    width = max(1, len(f"{num_shard_dirs - 1:x}"))
+    return f"{h % num_shard_dirs:0{width}x}"
+
+
+def test_recycling_reuses_a_deleted_file_after_quarantine(tmp_path) -> None:
+    """A delete parks the file; a same-shard store after 1 s overwrites it."""
+    LMCacheFSClient = _import_fs_client()
+    size = 8192
+    shards = 2
+    keys = [f"test_model@00000000@0@{i:016x}" for i in range(1, 64)]
+    first = keys[0]
+    same = [k for k in keys[1:] if _shard_name(k, shards) == _shard_name(first, shards)]
+    early, late = same[0], same[1]
+    client = LMCacheFSClient(
+        str(tmp_path), 2, num_shard_dirs=shards, recycle_max_files=100
+    )
+    try:
+        _raw, view = _aligned_memoryview(size, 4096)
+        _fill(view)
+        _store(client, first, view)
+        stored = _data_path(tmp_path, first.rsplit("@", 1)[1])
+        assert stored.parent.name == _shard_name(first, shards)
+        inode = stored.stat().st_ino
+        deleted = _wait_for_completion(client, client.submit_batch_delete([first]))
+        assert deleted[1], deleted[2]
+        pool = stored.parent / ".pool"
+        assert [p.stat().st_ino for p in pool.iterdir()] == [inode]
+
+        # Inside the quarantine a store in the same shard gets a fresh file.
+        _store(client, early, view)
+        assert _data_path(tmp_path, early.rsplit("@", 1)[1]).stat().st_ino != inode
+
+        time.sleep(1.2)
+        _raw2, fresh = _aligned_memoryview(size, 4096)
+        fresh[:] = b"\x5a" * size
+        _store(client, late, fresh)
+        assert _data_path(tmp_path, late.rsplit("@", 1)[1]).stat().st_ino == inode
+        assert not list(pool.iterdir())
+
+        _raw3, dest = _aligned_memoryview(size, 4096)
+        assert _submit_and_wait(client, "submit_batch_get", late, dest)[1]
+        assert bytes(dest) == b"\x5a" * size
+    finally:
+        client.close()
+
+
+def test_recycling_adopts_pool_files_left_by_an_earlier_client(tmp_path) -> None:
+    """Pool files survive a restart and are reused without a new quarantine."""
+    LMCacheFSClient = _import_fs_client()
+    size = 8192
+    key = "test_model@00000000@0@" + "a" * 16
+    _raw, view = _aligned_memoryview(size, 4096)
+    _fill(view)
+
+    client = LMCacheFSClient(str(tmp_path), 1, recycle_max_files=10)
+    try:
+        _store(client, key, view)
+        inode = _data_path(tmp_path, "a" * 16).stat().st_ino
+        assert _wait_for_completion(client, client.submit_batch_delete([key]))[1]
+    finally:
+        client.close()
+
+    client = LMCacheFSClient(str(tmp_path), 1, recycle_max_files=10)
+    try:
+        other = "test_model@00000000@0@" + "b" * 16
+        _store(client, other, view)
+        assert _data_path(tmp_path, "b" * 16).stat().st_ino == inode
+        assert not list((tmp_path / ".pool").iterdir())
+    finally:
+        client.close()
+
+
+def test_dedicated_store_and_delete_lanes_serve_requests(tmp_path) -> None:
+    """Store/delete lanes behave like the shared pool from the caller side."""
+    LMCacheFSClient = _import_fs_client()
+    size = 8192
+    client = LMCacheFSClient(
+        str(tmp_path), 2, num_shard_dirs=4, store_workers=2, delete_workers=2
+    )
+    try:
+        keys = [f"test_model@00000000@0@{i:016x}" for i in (1, 2)]
+        _raw, view = _aligned_memoryview(size, 4096)
+        _fill(view)
+        for key in keys:
+            _store(client, key, view)
+        _raw2, dest = _aligned_memoryview(size, 4096)
+        assert _submit_and_wait(client, "submit_batch_get", keys[0], dest)[1]
+        assert bytes(dest) == bytes(view)
+        assert _wait_for_completion(client, client.submit_batch_delete([keys[0]]))[1]
+        exists = _wait_for_completion(client, client.submit_batch_exists(keys))
+        assert exists[3] == [False, True]
+    finally:
+        client.close()
+
+
+def test_negative_lane_worker_count_is_rejected(tmp_path) -> None:
+    LMCacheFSClient = _import_fs_client()
+    with pytest.raises(ValueError, match="store_workers"):
+        LMCacheFSClient(str(tmp_path), 1, store_workers=-1)
+
+
+def test_recycling_unlinks_once_the_pool_is_full(tmp_path: Path) -> None:
+    """Deletes past recycle_max_files fall back to unlinking."""
+    LMCacheFSClient = _import_fs_client()
+    _raw, view = _aligned_memoryview(4096, 4096)
+    _fill(view)
+    keys = [f"test_model@00000000@0@{i:016x}" for i in (1, 2, 3)]
+    client = LMCacheFSClient(str(tmp_path), 1, recycle_max_files=2)
+    try:
+        for key in keys:
+            _store(client, key, view)
+        deleted = _wait_for_completion(client, client.submit_batch_delete(keys))
+        assert deleted[1], deleted[2]
+        assert len(list((tmp_path / ".pool").iterdir())) == 2
+        assert not list(tmp_path.glob("*.data"))
+    finally:
+        client.close()
+
+
+def test_recycling_drops_a_pooled_file_of_another_size(tmp_path: Path) -> None:
+    """A store never reuses a pooled file whose size differs from the object."""
+    LMCacheFSClient = _import_fs_client()
+    _big_raw, big = _aligned_memoryview(8192, 4096)
+    _small_raw, small = _aligned_memoryview(4096, 4096)
+    _fill(big)
+    small[:] = b"\x3c" * 4096
+    first = "test_model@00000000@0@" + "1" * 16
+    second = "test_model@00000000@0@" + "2" * 16
+    client = LMCacheFSClient(str(tmp_path), 1, recycle_max_files=10)
+    try:
+        _store(client, first, big)
+        inode = _data_path(tmp_path, "1" * 16).stat().st_ino
+        assert _wait_for_completion(client, client.submit_batch_delete([first]))[1]
+        time.sleep(1.2)
+
+        _store(client, second, small)
+        stored = _data_path(tmp_path, "2" * 16)
+        assert stored.stat().st_ino != inode
+        assert stored.stat().st_size == 4096
+        assert not list((tmp_path / ".pool").iterdir())
+
+        _dest_raw, dest = _aligned_memoryview(4096, 4096)
+        assert _submit_and_wait(client, "submit_batch_get", second, dest)[1]
+        assert bytes(dest) == b"\x3c" * 4096
+    finally:
+        client.close()
+
+
+@pytest.mark.skipif(not hasattr(os, "O_DIRECT"), reason="needs O_DIRECT")
+def test_misaligned_store_keeps_the_pooled_file_reusable(tmp_path: Path) -> None:
+    """A rejected O_DIRECT store leaves an eligible pooled file in the pool."""
+    LMCacheFSClient = _import_fs_client()
+    block_size = os.statvfs(tmp_path).f_bsize
+    size = block_size * 2
+    _raw, view = _aligned_memoryview(size, block_size)
+    _fill(view)
+    _bad_raw, bad = _misaligned_memoryview(size, block_size)
+    first = "test_model@00000000@0@" + "a" * 16
+    client = LMCacheFSClient(str(tmp_path), 1, use_odirect=True, recycle_max_files=10)
+    try:
+        _store(client, first, view)
+        inode = _data_path(tmp_path, "a" * 16).stat().st_ino
+        assert _wait_for_completion(client, client.submit_batch_delete([first]))[1]
+        time.sleep(1.2)
+
+        rejected = _submit_and_wait(
+            client, "submit_batch_set", "test_model@00000000@0@" + "b" * 16, bad
+        )
+        assert not rejected[1]
+        assert [p.stat().st_ino for p in (tmp_path / ".pool").iterdir()] == [inode]
+
+        _store(client, "test_model@00000000@0@" + "c" * 16, view)
+        assert _data_path(tmp_path, "c" * 16).stat().st_ino == inode
+    finally:
+        client.close()
