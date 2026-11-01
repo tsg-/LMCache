@@ -39,6 +39,9 @@ logger = init_logger(__name__)
 # file descriptor.
 DEFAULT_NUM_READ_WORKERS = 256
 
+# Shard directories are created up front; this bounds start-up work.
+MAX_SHARD_DIRS = 65536
+
 
 def _validate_non_negative_int(name: str, raw: object) -> int:
     """Return ``raw`` if it is a non-negative ``int``.
@@ -80,6 +83,14 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
       the adapter spec also carries an ``eviction`` block, e.g.
       ``{"eviction": {"eviction_policy": "LRU"}}``. Without one,
       files accumulate past the declared capacity.
+    - num_shard_dirs: spread objects over this many hashed
+      subdirectories (default 0 = one flat directory, at most 65536).
+      Readers must use the same value as the writer.
+    - recycle_max_files: keep up to this many deleted object
+      files for in-place reuse by later stores of the same size
+      (default 0 = unlink on delete).
+    - store_workers / delete_workers: dedicated worker threads
+      for stores / deletes (default 0 = shared num_workers pool).
     """
 
     def __init__(
@@ -92,12 +103,18 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
         max_capacity_gb: float = 0,
         num_read_workers: int = DEFAULT_NUM_READ_WORKERS,
         read_max_bytes_in_flight: int = 0,
+        num_shard_dirs: int = 0,
+        recycle_max_files: int = 0,
+        store_workers: int = 0,
+        delete_workers: int = 0,
     ):
         """Build the config; see the class docstring for each field.
 
         Raises:
-            ValueError: If ``num_read_workers`` or
-                ``read_max_bytes_in_flight`` is not a non-negative integer.
+            ValueError: If ``num_read_workers``, ``read_max_bytes_in_flight``,
+                ``recycle_max_files``, ``store_workers`` or
+                ``delete_workers`` is not a non-negative integer, or
+                ``num_shard_dirs`` is not an integer in [0, 65536].
         """
         self.base_path = base_path
         self.num_workers = num_workers
@@ -110,6 +127,20 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
         )
         self.read_max_bytes_in_flight = _validate_non_negative_int(
             "read_max_bytes_in_flight", read_max_bytes_in_flight
+        )
+        self.num_shard_dirs = _validate_non_negative_int(
+            "num_shard_dirs", num_shard_dirs
+        )
+        if num_shard_dirs > MAX_SHARD_DIRS:
+            raise ValueError(
+                f"num_shard_dirs must be at most {MAX_SHARD_DIRS}, got {num_shard_dirs}"
+            )
+        self.recycle_max_files = _validate_non_negative_int(
+            "recycle_max_files", recycle_max_files
+        )
+        self.store_workers = _validate_non_negative_int("store_workers", store_workers)
+        self.delete_workers = _validate_non_negative_int(
+            "delete_workers", delete_workers
         )
         if num_read_workers == 0 and read_max_bytes_in_flight > 0:
             logger.warning(
@@ -164,6 +195,10 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
             max_capacity_gb=float(max_capacity_gb),
             num_read_workers=d.get("num_read_workers", DEFAULT_NUM_READ_WORKERS),
             read_max_bytes_in_flight=d.get("read_max_bytes_in_flight", 0),
+            num_shard_dirs=d.get("num_shard_dirs", 0),
+            recycle_max_files=d.get("recycle_max_files", 0),
+            store_workers=d.get("store_workers", 0),
+            delete_workers=d.get("delete_workers", 0),
         )
 
     @classmethod
@@ -190,7 +225,14 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
             "- max_capacity_gb (float): declared L2 capacity in GB "
             "for usage accounting (default 0 = disabled). Does not "
             "bound disk usage by itself; add an 'eviction' block "
-            "to enforce it"
+            "to enforce it\n"
+            "- num_shard_dirs (int): hashed subdirectories "
+            "for objects; readers must match the writer "
+            "(default 0 = flat)\n"
+            "- recycle_max_files (int): deleted files kept for "
+            "in-place reuse (default 0 = unlink)\n"
+            "- store_workers / delete_workers (int): dedicated "
+            "worker threads (default 0 = shared pool)"
         )
 
 
@@ -226,6 +268,10 @@ def _create_fs_native_l2_adapter(
         config.read_ahead_size or 0,
         config.num_read_workers,
         config.read_max_bytes_in_flight,
+        config.num_shard_dirs,
+        config.recycle_max_files,
+        config.store_workers,
+        config.delete_workers,
     )
     effective_read_budget = native_client.read_budget_bytes()
     logger.info(
@@ -254,6 +300,10 @@ def _create_fs_native_l2_adapter(
             "read_ahead_size": config.read_ahead_size,
             "num_read_workers": config.num_read_workers,
             "read_max_bytes_in_flight": effective_read_budget,
+            "num_shard_dirs": config.num_shard_dirs,
+            "recycle_max_files": config.recycle_max_files,
+            "store_workers": config.store_workers,
+            "delete_workers": config.delete_workers,
             "pad_buffers_to_alignment": config.use_odirect,
         },
     )

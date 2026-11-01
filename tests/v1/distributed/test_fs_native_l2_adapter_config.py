@@ -99,3 +99,44 @@ class TestFSNativeReadPoolValidation:
     def test_constructor_rejects(self, field):
         with pytest.raises(ValueError, match=field):
             FSNativeL2AdapterConfig(base_path="/data", **{field: -1})
+
+
+_LAYOUT_FIELDS = ["recycle_max_files", "store_workers", "delete_workers"]
+
+
+class TestFSNativeLayoutAndLaneValidation:
+    def test_defaults_keep_flat_layout_and_shared_pool(self):
+        cfg, _ = _from_dict()
+        assert cfg.num_shard_dirs == 0
+        assert cfg.recycle_max_files == 0
+        assert cfg.store_workers == 0
+        assert cfg.delete_workers == 0
+
+    def test_from_dict_reads_every_field(self):
+        cfg, _ = _from_dict(
+            num_shard_dirs=256,
+            recycle_max_files=200000,
+            store_workers=64,
+            delete_workers=16,
+        )
+        assert cfg.num_shard_dirs == 256
+        assert cfg.recycle_max_files == 200000
+        assert cfg.store_workers == 64
+        assert cfg.delete_workers == 16
+
+    @pytest.mark.parametrize("field", ["num_shard_dirs", *_LAYOUT_FIELDS])
+    @pytest.mark.parametrize("bad", [-1, True, 1.5, "8", None])
+    def test_from_dict_rejects(self, field, bad):
+        with pytest.raises(ValueError, match=field):
+            FSNativeL2AdapterConfig.from_dict({**BASE, field: bad})
+
+    def test_shard_count_above_limit_is_rejected(self):
+        limit = fs_native_l2_adapter.MAX_SHARD_DIRS
+        assert _from_dict(num_shard_dirs=limit)[0].num_shard_dirs == limit
+        with pytest.raises(ValueError, match="num_shard_dirs"):
+            FSNativeL2AdapterConfig.from_dict({**BASE, "num_shard_dirs": limit + 1})
+
+    @pytest.mark.parametrize("field", ["num_shard_dirs", *_LAYOUT_FIELDS])
+    def test_constructor_rejects(self, field):
+        with pytest.raises(ValueError, match=field):
+            FSNativeL2AdapterConfig(base_path="/data", **{field: -1})
