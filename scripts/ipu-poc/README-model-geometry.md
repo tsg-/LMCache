@@ -80,6 +80,10 @@ rank)`, each packing one or more components whose sizes need not agree.
 | `mixtral_8x22b_fp8_tp8_packed.yaml` | Mixtral 8x22B FP8, TP=8 | object group | 8 | 3.5 MiB | 28 MiB |
 | `minimax_m3_bf16_tp8.yaml` | MiniMax-M3 bf16, TP=8 | object group | 8 | 9.34 MiB | 74.7 MiB |
 | `minimax_m3_bf16_tp8_odirect.yaml` | MiniMax-M3 bf16, TP=8, padded | object group | 8 | 9.34 MiB | 74.7 MiB |
+| `deepseek_v3_2.yaml` | DeepSeek-V3.2, MLA + DSA indexer | object group | 64 | 11.74 MiB | 751.25 MiB |
+| `deepseek_v4_flash.yaml` | DeepSeek-V4-Flash, CSA + HCA | object group | 64 | 880 KiB | 55 MiB |
+| `deepseek_v4_1_flash.yaml` | DeepSeek-V4.1-Flash, encoder + decoder | object group | 64 | 224 KiB | 14 MiB |
+| `deepseek_v4_pro.yaml` | DeepSeek-V4-Pro, CSA + HCA | object group | 64 | 1.23 MiB | 78.75 MiB |
 
 The four Mixtral profiles change only chunk size (32/64/128/256 tokens), so page
 size is the single variable: 64/128/256/512 KiB. DeepSeek's MLA cache is

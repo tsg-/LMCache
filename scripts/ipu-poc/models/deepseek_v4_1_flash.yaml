@@ -1,0 +1,61 @@
+# DeepSeek-V4.1-Flash: report FP4 global KV layout, SWA Bounded Replay.
+# Config: https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/blob/314113f8a7dadb388215396ba5fbee2c610a04d6/config.json
+# Report: same pinned repo, DeepSeek_V41_Tech_Report.pdf, section 2.4.4.
+# Ownership: same pinned repo, inference/model.py, Indexer.owns_k.
+# 40 backbone layers (20 encoder + 20 decoder), excluding 3 MTP layers.
+# Only kv_source_layer_ids [2,8,14,20] own global KV and indexer K.
+# Layers 2,8,14 compress by 2; layer 20 by 1. Reindex layers reuse K.
+# Main: FP4 E2M1 512/2 B + 512/16 E4M3 scales = 288 B (RoPE included).
+# Indexer K: MXFP4 128/2 B + 128/32 UE8M0 scales = 68 B.
+# (3/2+1)*(288+68) = 890 B/input token.
+# 256 tokens: 227840 B KV + 1536 B padding = 229376 B (224 KiB).
+# 1024 tokens: 911360 B KV + 2048 B padding = 913408 B (892 KiB).
+# SWA is rebuilt with bounded replay and is excluded from persistent objects.
+# UNVERIFIED in the lab: FP4 cache registration and grouping. Current vLLM:
+# https://github.com/vllm-project/vllm/blob/4e591657157a021cab997f911d67f50c0d18a71e/vllm/v1/attention/backends/mla/flashmla_sparse.py
+# That implementation describes
+# a 528 B FP8 V4.1 main cache. This profile models the report's FP4 format,
+# not that runtime layout. No serving compatibility is established.
+# Inspect without traffic:
+# lmcache bench l2 --kvcache-shape-profile scripts/ipu-poc/models/deepseek_v4_1_flash.yaml --geometry-only
+# Add --tokens-per-chunk 1024 for the larger chunk.
+model:
+  name: deepseek-ai/DeepSeek-V4.1-Flash
+  family: deepseek
+runtime:
+  lmcache_tokens_per_chunk: 256
+  task_archetype: lookup_load
+  chunks_per_submit: 64
+  kv_ranks_per_chunk: 1
+  separate_object_groups: false
+  full_sw_kv: false
+object_groups:
+  - object_group_id: 0
+    name: persisted_global_kv
+    sw_size_chunks: -1
+    alignment_bytes: 4096
+    components:
+      - name: encoder_main
+        role: key_value
+        cache_owning_layers: 3
+        architecture: {attention: packed, bytes_per_slot: 288}
+        quantization: {dtype: uint8, dtype_bytes: 1}
+        block_geometry: {tokens_per_block: 2, slots_per_block: 1}
+      - name: encoder_indexer
+        role: key_only
+        cache_owning_layers: 3
+        architecture: {attention: packed, bytes_per_slot: 68}
+        quantization: {dtype: uint8, dtype_bytes: 1}
+        block_geometry: {tokens_per_block: 2, slots_per_block: 1}
+      - name: decoder_main
+        role: key_value
+        cache_owning_layers: 1
+        architecture: {attention: packed, bytes_per_slot: 288}
+        quantization: {dtype: uint8, dtype_bytes: 1}
+        block_geometry: {tokens_per_block: 1, slots_per_block: 1}
+      - name: decoder_indexer
+        role: key_only
+        cache_owning_layers: 1
+        architecture: {attention: packed, bytes_per_slot: 68}
+        quantization: {dtype: uint8, dtype_bytes: 1}
+        block_geometry: {tokens_per_block: 1, slots_per_block: 1}

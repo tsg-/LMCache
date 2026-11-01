@@ -13,6 +13,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 import argparse
+import functools
 import os
 import sys
 
@@ -24,6 +25,11 @@ if TYPE_CHECKING:
     )
     from lmcache.cli.commands.bench.l2_adapter_bench.result import BenchResult
     from lmcache.cli.metrics import Metrics
+
+
+# Load-key lists memoised per window slot (~56 keys each); bounds memory when
+# a run has more slots than this.
+_LOAD_KEY_CACHE_SUBMITS = 4096
 
 
 def _noop_shutdown() -> None:
@@ -48,6 +54,31 @@ def _parse_read_write_ratio(value: str) -> tuple[int, int]:
             "--read-write-ratio values must both be positive, e.g. 5:1"
         )
     return read_count, write_count
+
+
+def _print_geometry(geometry: "L2SubmitGeometry") -> None:
+    """Print transfer sizes without importing or constructing an adapter."""
+    print(
+        f"[KV Cache Shape] {geometry.model_name}: "
+        f"{geometry.tokens_per_chunk} tokens/chunk"
+    )
+    for group in geometry.object_groups:
+        padding = group.alignment_padding_bytes + sum(
+            component.component_size_bytes
+            for component in group.components
+            if component.role == "padding"
+        )
+        print(
+            f"  group {group.object_group_id}: "
+            f"{group.object_size_bytes - padding} B payload, "
+            f"{padding} B O_DIRECT padding, {group.object_size_bytes} B/object"
+        )
+    print(
+        f"  {geometry.objects_per_submit} objects/submit, "
+        f"{geometry.chunks_per_submit} chunks/submit, "
+        f"{geometry.payload_size_bytes} B KV/submit, "
+        f"{geometry.task_size_bytes} B/submit"
+    )
 
 
 class _ExplicitGeometryAction(argparse.Action):
@@ -160,6 +191,21 @@ def add_l2_arguments(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument(
+        "--tokens-per-chunk",
+        type=int,
+        default=None,
+        help=(
+            "Override chunk size for derived packed shape profiles "
+            "(profile default: 256 for DeepSeek; also supports 1024). "
+            "Requires --kvcache-shape-profile; fixed-size profiles reject it."
+        ),
+    )
+    parser.add_argument(
+        "--geometry-only",
+        action="store_true",
+        help="Print resolved object sizes and padding, then exit before adapter setup.",
+    )
+    parser.add_argument(
         "--l1-align-bytes",
         type=int,
         default=1,
@@ -227,6 +273,19 @@ def add_l2_arguments(parser: argparse.ArgumentParser) -> None:
             "payload ratio, e.g. 5:1. Requires --duration-sec, a "
             "prepopulated --key-prefix, and a distinct --write-key-prefix. "
             "Cannot be combined with --only."
+        ),
+    )
+    parser.add_argument(
+        "--write-retention-submits",
+        type=int,
+        default=0,
+        metavar="N",
+        help=(
+            "In --read-write-ratio mode, delete the keys of store submit k-N "
+            "once store submit k succeeds, so stored bytes stay near "
+            "N x submit size instead of growing for the whole window. "
+            "Deletes run on helper threads through the adapter's delete(). "
+            "Default 0 keeps every store."
         ),
     )
     parser.add_argument(
@@ -409,6 +468,13 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
     geometry: L2SubmitGeometry
     geometry_profile_path = getattr(args, "kvcache_shape_profile", None)
     inline_shape_spec = getattr(args, "kvcache_shape_spec", None)
+    tokens_per_chunk = getattr(args, "tokens_per_chunk", None)
+    if tokens_per_chunk is not None and not geometry_profile_path:
+        print(
+            "Error: --tokens-per-chunk requires --kvcache-shape-profile.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     if geometry_profile_path or inline_shape_spec:
         source_flag = (
             "--kvcache-shape-profile"
@@ -429,7 +495,9 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
             sys.exit(2)
         try:
             if geometry_profile_path:
-                geometry = resolve_submit_geometry(geometry_profile_path)
+                geometry = resolve_submit_geometry(
+                    geometry_profile_path, tokens_per_chunk=tokens_per_chunk
+                )
             else:
                 geometry = submit_geometry_from_uniform(
                     resolve_inline_shape_spec(inline_shape_spec)
@@ -444,6 +512,10 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
             num_keys=args.num_keys, page_size_bytes=args.data_size_kb * 1024
         )
 
+    if getattr(args, "geometry_only", False):
+        _print_geometry(geometry)
+        return
+
     # Lazy imports: keep CLI loadable without torch / native deps.
     # First Party
     from lmcache.cli.commands.bench.l2_adapter_bench.data import (
@@ -454,17 +526,6 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
         make_object_keys,
         verify_round_trip,
     )
-    from lmcache.cli.commands.bench.l2_adapter_bench.runner import (
-        bench_load,
-        bench_load_sustained,
-        bench_lookup,
-        bench_mixed_sustained,
-        bench_store,
-        bench_store_sustained,
-        StoreFreshnessUnknownError,
-        StoreNamespaceNotEmptyError,
-        require_empty_store_namespace,
-    )
     from lmcache.cli.commands.bench.l2_adapter_bench.metrics import (
         PHASE_MEASURED,
         PHASE_WARMUP,
@@ -472,6 +533,17 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
         BenchMetricsState,
         MetricsServerError,
         start_metrics_server,
+    )
+    from lmcache.cli.commands.bench.l2_adapter_bench.runner import (
+        StoreFreshnessUnknownError,
+        StoreNamespaceNotEmptyError,
+        bench_load,
+        bench_load_sustained,
+        bench_lookup,
+        bench_mixed_sustained,
+        bench_store,
+        bench_store_sustained,
+        require_empty_store_namespace,
     )
     from lmcache.cli.profiling import (
         PY_SPY_MODES,
@@ -557,6 +629,16 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
         print(
             "Error: --read-write-ratio requires --key-prefix for the "
             "prepopulated read corpus",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    write_retention_submits = int(getattr(args, "write_retention_submits", 0))
+    if write_retention_submits < 0:
+        print("Error: --write-retention-submits must be >= 0", file=sys.stderr)
+        sys.exit(2)
+    if write_retention_submits and not mixed:
+        print(
+            "Error: --write-retention-submits requires --read-write-ratio",
             file=sys.stderr,
         )
         sys.exit(2)
@@ -663,19 +745,8 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
         if not quiet:
             print(msg)
 
-    if geometry.source_path or geometry.shape_spec:
-        shape = (
-            f"{geometry.page_size_bytes} B"
-            if geometry.page_size_bytes
-            else f"{len(geometry.object_groups)} groups, {task_size_bytes} B"
-        )
-        log(
-            "[KV Cache Shape] "
-            f"{geometry.model_name}: "
-            f"{geometry.objects_per_submit} objects x {shape} "
-            f"({geometry.tokens_per_chunk} tokens/chunk, "
-            f"{units_per_submit} chunks/submit)"
-        )
+    if (geometry.source_path or geometry.shape_spec) and not quiet:
+        _print_geometry(geometry)
 
     # Resolve L2 adapter JSON: CLI arg takes priority, then env var
     l2_adapter_specs = args.l2_adapter
@@ -997,18 +1068,25 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
             write_key_namespace,
         )
 
+    # Building a submit's ObjectKeys costs over 100 us on the issuing thread,
+    # which bounds a sustained run before storage does. Load keys repeat per
+    # slot, so build each slot's list once; past the cap, slots are rebuilt.
+    @functools.lru_cache(maxsize=_LOAD_KEY_CACHE_SUBMITS)
+    def _load_keys_for_slot(slot_idx: int) -> list:
+        return _keys_for_units(
+            slot_idx * units_per_submit, units_per_submit, key_namespace
+        )
+
     def _sustained_load_keys(submit_index: int) -> list:
         """Keys for sustained load submit *submit_index* (wraps).
 
         Wraps within ``total_run_units`` -- the unit range a prepopulating
         store pass at matching geometry actually covered -- so reads hit
         rather than measuring the miss path. Mixed mode intentionally uses
-        measured rounds only because it has no rounds warmup.
+        measured rounds only because it has no rounds warmup. Submits of the
+        same slot share one key list; callers must not mutate it.
         """
-        slot_idx = submit_index % total_submit_slots
-        return _keys_for_units(
-            slot_idx * units_per_submit, units_per_submit, key_namespace
-        )
+        return _load_keys_for_slot(submit_index % total_submit_slots)
 
     def _first_store_wave_keys() -> list:
         """Keys the store phase writes first, in whichever mode is active.
@@ -1097,6 +1175,7 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
                 on_result=_publish_measured,
                 verify_write_samples=not args.skip_verify,
                 object_sizes=object_sizes,
+                write_retention_submits=write_retention_submits,
             )
             results.extend([load_result, store_result])
             failed = not accepted
@@ -1363,6 +1442,11 @@ def _add_object_group_sections(
             f"[{tag}] Object size (bytes)",
             group.object_size_bytes,
         )
+        group_section.add(
+            f"group_{tag}_alignment_padding_bytes",
+            f"[{tag}] Alignment padding (bytes)",
+            group.alignment_padding_bytes,
+        )
 
     components = [
         (group, component)
@@ -1481,6 +1565,12 @@ def _emit_l2_adapter_metrics(
         geometry_section.add(
             "task_size_bytes", "Task payload (bytes)", geometry.task_size_bytes
         )
+        geometry_section.add(
+            "payload_size_bytes", "KV payload (bytes)", geometry.payload_size_bytes
+        )
+        geometry_section.add(
+            "padding_size_bytes", "Tail padding (bytes)", geometry.padding_size_bytes
+        )
         _add_object_group_sections(metrics, geometry)
     duration_sec = float(getattr(args, "duration_sec", 0.0))
     if duration_sec > 0:
@@ -1498,6 +1588,11 @@ def _emit_l2_adapter_metrics(
                 "read_write_ratio_requested",
                 "Requested read:write",
                 f"{read_count}:{write_count}",
+            )
+            cfg_section.add(
+                "write_retention_submits",
+                "Write retention (submits)",
+                int(getattr(args, "write_retention_submits", 0)),
             )
             cfg_section.add(
                 "write_key_prefix",

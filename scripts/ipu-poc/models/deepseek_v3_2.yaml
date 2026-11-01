@@ -1,0 +1,41 @@
+# Persisted DeepSeek-V3.2 KV: one object containing all 61 backbone layers.
+# Config: https://huggingface.co/deepseek-ai/DeepSeek-V3.2/blob/a7e62ac04ecb2c0a54d736dc46601c5606cf10a6/config.json
+# Layout: https://github.com/vllm-project/vllm/blob/4e591657157a021cab997f911d67f50c0d18a71e/vllm/v1/attention/backends/mla/flashmla_sparse.py
+# Indexer: same vLLM revision, vllm/model_executor/layers/sparse_attn_indexer.py.
+# Main: 512 FP8 latent + 4*4 B FP32 scales + 64*2 B BF16 RoPE = 656 B.
+# Indexer K: 128 FP8 values + 4 B FP32 scale = 132 B.
+# BF16 main alternative is (512+64)*2 = 1152 B, not this profile's layout.
+# 256 tokens: 61*256*(656+132) = 12305408 B KV + 3072 B tail padding.
+# The MTP layer is excluded. No TP replication of the shared MLA latent.
+# This is a storage-shape model; live LMCache registration is unverified.
+# Inspect without traffic:
+# lmcache bench l2 --kvcache-shape-profile scripts/ipu-poc/models/deepseek_v3_2.yaml --geometry-only
+# Add --tokens-per-chunk 1024 for the larger chunk.
+model:
+  name: deepseek-ai/DeepSeek-V3.2
+  family: deepseek
+runtime:
+  lmcache_tokens_per_chunk: 256
+  task_archetype: lookup_load
+  chunks_per_submit: 64
+  kv_ranks_per_chunk: 1
+  separate_object_groups: false
+  full_sw_kv: false
+object_groups:
+  - object_group_id: 0
+    name: persisted_global_kv
+    sw_size_chunks: -1
+    alignment_bytes: 4096
+    components:
+      - name: mla_main
+        role: key_value
+        cache_owning_layers: 61
+        architecture: {attention: packed, bytes_per_slot: 656}
+        quantization: {dtype: uint8, dtype_bytes: 1}
+        block_geometry: {tokens_per_block: 1, slots_per_block: 1}
+      - name: dsa_indexer
+        role: key_only
+        cache_owning_layers: 61
+        architecture: {attention: packed, bytes_per_slot: 132}
+        quantization: {dtype: uint8, dtype_bytes: 1}
+        block_geometry: {tokens_per_block: 1, slots_per_block: 1}

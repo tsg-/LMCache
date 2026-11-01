@@ -7,7 +7,7 @@ exercises its actual wait path rather than a stubbed one.
 """
 
 # Standard
-from typing import Any
+from typing import Any, cast
 import threading
 import time
 
@@ -17,27 +17,29 @@ import torch
 
 # First Party
 from lmcache.cli.commands.bench.l2_adapter_bench import runner as runner_module
+from lmcache.cli.commands.bench.l2_adapter_bench.data import (
+    make_object_keys,
+    wait_eventfds,
+)
+from lmcache.cli.commands.bench.l2_adapter_bench.metrics import (
+    PHASE_MEASURED,
+    BenchMetricsState,
+)
 from lmcache.cli.commands.bench.l2_adapter_bench.result import (
     BenchMode,
     BenchResult,
 )
-from lmcache.cli.commands.bench.l2_adapter_bench.data import make_object_keys
 from lmcache.cli.commands.bench.l2_adapter_bench.runner import (
     StoreFreshnessUnknownError,
     SubmitSuccess,
     WarmupNotDrainedError,
     _record_round_latencies,
-    bench_mixed_sustained,
     _require_drained_warmup,
+    bench_mixed_sustained,
     count_existing_keys,
     require_empty_store_namespace,
     run_sustained_mixed_window,
     run_sustained_window,
-)
-from lmcache.cli.commands.bench.l2_adapter_bench.data import wait_eventfds
-from lmcache.cli.commands.bench.l2_adapter_bench.metrics import (
-    PHASE_MEASURED,
-    BenchMetricsState,
 )
 from lmcache.v1.platform import create_event_notifier
 
@@ -588,6 +590,11 @@ class _MixedFakeAdapter:
         self.max_outstanding = 0
         self.submissions: list[tuple[str, int]] = []
         self.completion_order: list[str] = []
+        self.deleted: list[list[Any]] = []
+
+    def delete(self, keys: list[Any]) -> None:
+        with self._lock:
+            self.deleted.append(list(keys))
 
     def get_store_event_fd(self) -> int:
         return self._store_notifier.fileno()
@@ -665,6 +672,10 @@ class _MixedFakeAdapter:
         with self._lock:
             return self._load_done.pop(task_id, None)
 
+    def signal_load_wakeup(self) -> None:
+        """Signal an old Load notification without completing a new task."""
+        self._load_notifier.notify()
+
     def close(self) -> None:
         for thread in self._threads:
             thread.join(timeout=5.0)
@@ -693,11 +704,11 @@ def _run_mixed(
 ) -> tuple[BenchResult, BenchResult, bool]:
     load_result = _mixed_result("Load", in_flight, num_keys)
     store_result = _mixed_result("Store", in_flight, num_keys)
-    store_objects = [
+    store_objects: list[list[Any]] = [
         [_MixedMemoryObject(slot + key) for key in range(num_keys)]
         for slot in range(in_flight)
     ]
-    load_objects = [
+    load_objects: list[list[Any]] = [
         [_MixedMemoryObject(0xA5) for _ in range(num_keys)] for _ in range(in_flight)
     ]
     accepted = run_sustained_mixed_window(
@@ -705,8 +716,8 @@ def _run_mixed(
         load_result=load_result,
         store_result=store_result,
         read_write_ratio=ratio,
-        load_keys_for_submit=lambda _index: [object()] * num_keys,
-        store_keys_for_submit=lambda _index: [object()] * num_keys,
+        load_keys_for_submit=lambda _index: cast(Any, [object()] * num_keys),
+        store_keys_for_submit=lambda _index: cast(Any, [object()] * num_keys),
         load_objs_for_slot=lambda slot: load_objects[slot],
         store_objs_for_slot=lambda slot: store_objects[slot],
         duration_sec=duration_sec,
@@ -724,6 +735,29 @@ class _MixedMemoryObject:
 
     def get_physical_size(self) -> int:
         return self.raw_data.numel()
+
+
+def test_mixed_readback_waits_for_its_task_after_an_old_notification() -> None:
+    """A stale wakeup must not reject a still-pending sample readback."""
+    adapter = _MixedFakeAdapter(service_sec=0.05)
+    keys: list[Any] = [object()] * 8
+    expected: list[Any] = [_MixedMemoryObject(index) for index in range(8)]
+    loaded: list[Any] = [_MixedMemoryObject(0xA5) for _ in range(8)]
+    try:
+        adapter.submit_store_task(keys, expected)
+        assert runner_module.wait_eventfd(adapter.get_store_event_fd(), timeout=1.0)
+        adapter.pop_completed_store_tasks()
+        adapter.signal_load_wakeup()
+
+        assert runner_module.verify_mixed_write_samples(
+            adapter,
+            [(keys, expected, 0)],
+            lambda _slot: loaded,
+            timeout=1.0,
+            log=lambda _message: None,
+        )
+    finally:
+        adapter.close()
 
 
 def test_wait_eventfds_returns_every_ready_operation() -> None:
@@ -839,8 +873,8 @@ def test_mixed_window_rejects_a_partial_load() -> None:
 def test_mixed_window_rejects_a_corrupt_write_readback() -> None:
     """A full completion bitmap does not substitute for byte integrity."""
     adapter = _MixedFakeAdapter(corrupt_load_payload=True)
-    store_objects = [_MixedMemoryObject(0x33)]
-    load_objects = [_MixedMemoryObject(0xA5)]
+    store_objects: list[Any] = [_MixedMemoryObject(0x33)]
+    load_objects: list[Any] = [_MixedMemoryObject(0xA5)]
     try:
         load_result = _mixed_result("Load")
         store_result = _mixed_result("Store")
@@ -849,8 +883,8 @@ def test_mixed_window_rejects_a_corrupt_write_readback() -> None:
             load_result=load_result,
             store_result=store_result,
             read_write_ratio=(5, 1),
-            load_keys_for_submit=lambda _index: [object()],
-            store_keys_for_submit=lambda _index: [object()],
+            load_keys_for_submit=lambda _index: cast(Any, [object()]),
+            store_keys_for_submit=lambda _index: cast(Any, [object()]),
             load_objs_for_slot=lambda _slot: load_objects,
             store_objs_for_slot=lambda _slot: store_objects,
             duration_sec=0.1,
@@ -887,8 +921,8 @@ def test_mixed_window_rejects_a_timeout_from_either_direction(
 def test_mixed_window_registers_both_measured_operation_series() -> None:
     adapter = _MixedFakeAdapter()
     state = BenchMetricsState()
-    store_objects = [[_MixedMemoryObject(slot)] for slot in range(6)]
-    load_objects = [[_MixedMemoryObject(0xA5)] for _ in range(6)]
+    store_objects: list[list[Any]] = [[_MixedMemoryObject(slot)] for slot in range(6)]
+    load_objects: list[list[Any]] = [[_MixedMemoryObject(0xA5)] for _ in range(6)]
     try:
         load_result, store_result, accepted = bench_mixed_sustained(
             adapter,
@@ -897,10 +931,10 @@ def test_mixed_window_registers_both_measured_operation_series() -> None:
             data_size=_MB,
             duration_sec=0.5,
             read_write_ratio=(5, 1),
-            load_keys_for_submit=lambda _index: [object()],
-            store_keys_for_submit=lambda _index: [object()],
-            load_objs_for_slot=lambda slot: load_objects[slot],
-            store_objs_for_slot=lambda slot: store_objects[slot],
+            load_keys_for_submit=lambda _index: cast(Any, [object()]),
+            store_keys_for_submit=lambda _index: cast(Any, [object()]),
+            load_objs_for_slot=lambda slot: cast(Any, load_objects[slot]),
+            store_objs_for_slot=lambda slot: cast(Any, store_objects[slot]),
             log=lambda _message: None,
             on_result=lambda result: state.register(
                 result.operation, result, PHASE_MEASURED
@@ -992,3 +1026,140 @@ def test_an_empty_key_list_needs_no_probe() -> None:
     assert count_existing_keys(adapter, [], timeout=0.05) == 0
 
     adapter.close()
+
+
+def test_mixed_window_retention_deletes_only_retired_store_submits() -> None:
+    """Retention deletes submit k-N after submit k and keeps readback samples."""
+    adapter = _MixedFakeAdapter()
+    load_result = _mixed_result("Load")
+    store_result = _mixed_result("Store")
+    store_keys: dict[int, Any] = {}
+
+    def keys_for_store(index: int) -> Any:
+        return store_keys.setdefault(index, [("store", index)])
+
+    store_objects = [[_MixedMemoryObject(slot)] for slot in range(6)]
+    load_objects = [[_MixedMemoryObject(0xA5)] for _ in range(6)]
+    try:
+        accepted = run_sustained_mixed_window(
+            adapter=adapter,
+            load_result=load_result,
+            store_result=store_result,
+            read_write_ratio=(5, 1),
+            load_keys_for_submit=lambda _index: cast(Any, [object()]),
+            store_keys_for_submit=keys_for_store,
+            load_objs_for_slot=lambda slot: cast(Any, load_objects[slot]),
+            store_objs_for_slot=lambda slot: cast(Any, store_objects[slot]),
+            duration_sec=0.5,
+            timeout=1.0,
+            log=lambda _message: None,
+            write_retention_submits=2,
+        )
+    finally:
+        adapter.close()
+
+    completed = store_result.completed_submits
+    assert accepted
+    assert completed > 6
+    deleted = sorted(keys[0][1] for keys in adapter.deleted)
+    assert deleted == list(range(3, completed - 2))
+
+
+class _SlowStoreAdapter(_MixedFakeAdapter):
+    """Holds one store far longer than the rest and records delete ordering."""
+
+    def __init__(self, slow_store: int, *, failing_deletes: bool = False) -> None:
+        super().__init__()
+        self._slow_store = slow_store
+        self._failing_deletes = failing_deletes
+        self.completed_stores: set[int] = set()
+        self.deleted_before_completion: list[int] = []
+
+    def _complete(
+        self,
+        operation: str,
+        task_id: int,
+        keys: list[Any],
+        objects: list[Any],
+    ) -> None:
+        if operation == "Store" and task_id == self._slow_store:
+            time.sleep(0.2)
+        if operation == "Store":
+            # Before the parent notifies, so a delete the runner issues on
+            # seeing the completion never races this bookkeeping.
+            with self._lock:
+                self.completed_stores.add(task_id)
+        super()._complete(operation, task_id, keys, objects)
+
+    def delete(self, keys: list[Any]) -> None:
+        if self._failing_deletes:
+            raise RuntimeError("delete failed")
+        with self._lock:
+            index = keys[0][1]
+            if index not in self.completed_stores:
+                self.deleted_before_completion.append(index)
+        super().delete(keys)
+
+
+def _run_retention(adapter: _MixedFakeAdapter, log: Any) -> tuple[bool, BenchResult]:
+    store_result = _mixed_result("Store")
+    store_keys: dict[int, Any] = {}
+    store_objects = [[_MixedMemoryObject(slot)] for slot in range(6)]
+    load_objects = [[_MixedMemoryObject(0xA5)] for _ in range(6)]
+    try:
+        accepted = run_sustained_mixed_window(
+            adapter=adapter,
+            load_result=_mixed_result("Load"),
+            store_result=store_result,
+            read_write_ratio=(1, 1),
+            load_keys_for_submit=lambda _index: cast(Any, [object()]),
+            store_keys_for_submit=lambda i: store_keys.setdefault(i, [("store", i)]),
+            load_objs_for_slot=lambda slot: cast(Any, load_objects[slot]),
+            store_objs_for_slot=lambda slot: cast(Any, store_objects[slot]),
+            duration_sec=0.6,
+            timeout=1.0,
+            log=log,
+            write_retention_submits=1,
+        )
+    finally:
+        adapter.close()
+    return accepted, store_result
+
+
+def test_mixed_window_retention_waits_for_an_in_flight_store() -> None:
+    """A store still in flight when it comes due is deleted after it completes."""
+    adapter = _SlowStoreAdapter(slow_store=5)
+    accepted, store_result = _run_retention(adapter, lambda _message: None)
+
+    assert accepted
+    assert store_result.completed_submits > 8
+    assert adapter.deleted_before_completion == []
+    assert 5 in {keys[0][1] for keys in adapter.deleted}
+
+
+def test_mixed_window_reports_failed_retention_deletes() -> None:
+    """A delete that raises is counted and reported instead of stopping deletes."""
+    messages: list[str] = []
+    adapter = _SlowStoreAdapter(slow_store=-1, failing_deletes=True)
+    accepted, _ = _run_retention(adapter, messages.append)
+
+    assert accepted
+    assert any("retention deletes" in m and "failed" in m for m in messages)
+
+
+def test_mixed_window_rejects_negative_retention() -> None:
+    with pytest.raises(ValueError, match="write_retention_submits"):
+        run_sustained_mixed_window(
+            adapter=_MixedFakeAdapter(),
+            load_result=_mixed_result("Load"),
+            store_result=_mixed_result("Store"),
+            read_write_ratio=(5, 1),
+            load_keys_for_submit=lambda _index: cast(Any, [object()]),
+            store_keys_for_submit=lambda _index: cast(Any, [object()]),
+            load_objs_for_slot=lambda _slot: [],
+            store_objs_for_slot=lambda _slot: [],
+            duration_sec=0.1,
+            timeout=1.0,
+            log=lambda _message: None,
+            write_retention_submits=-1,
+        )
