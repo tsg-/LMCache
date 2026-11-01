@@ -68,9 +68,9 @@ class FSConnector : public ConnectorBase<WorkerFSConn> {
   //   lock for a lookup, a create and a rename, so in one flat directory
   //   concurrent stores, and loads opening files, wait on each other. A
   //   reader configured with a different value cannot find existing objects.
-  // recycle_max_files > 0 renames deleted objects into a per-shard ".pool"
-  //   directory instead of unlinking them, and later stores of the same size
-  //   overwrite a pooled file in place, so the SSD-visible footprint stops
+  // recycle_max_files > 0 renames deleted objects to ".pool-*" names in
+  //   their own shard instead of unlinking them, and later stores of the same
+  //   size overwrite a pooled file in place, so the SSD-visible footprint stops
   //   growing without discards. A pooled file is reused only after a 1 s
   //   quarantine, so a load that opened it before the delete can finish.
   // store_workers / delete_workers > 0 give those operations dedicated
@@ -125,6 +125,7 @@ class FSConnector : public ConnectorBase<WorkerFSConn> {
   };
 
   size_t pool_index(const std::string& filename) const;
+  // The shard directory holding pool `index`; pooled files sit beside objects.
   std::filesystem::path pool_dir(size_t index) const;
   // Moves an object into its pool. Returns false when the pool is full or the
   // rename fails; the caller then unlinks normally.

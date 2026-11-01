@@ -356,6 +356,11 @@ def _store(client: Any, key: str, view: memoryview) -> None:
     assert _submit_and_wait(client, "submit_batch_set", key, view)[1]
 
 
+def _pooled(directory: Path) -> list[Path]:
+    """Pooled files parked in *directory* (they sit beside the live objects)."""
+    return sorted(directory.glob(".pool-*"))
+
+
 def _data_path(base: Path, key_hash: str) -> Path:
     return next(p for p in base.rglob("*.data") if key_hash in p.name)
 
@@ -392,8 +397,9 @@ def test_recycling_reuses_a_deleted_file_after_quarantine(tmp_path) -> None:
         inode = stored.stat().st_ino
         deleted = _wait_for_completion(client, client.submit_batch_delete([first]))
         assert deleted[1], deleted[2]
-        pool = stored.parent / ".pool"
-        assert [p.stat().st_ino for p in pool.iterdir()] == [inode]
+        # Parked in the object's own shard, so delete and reuse renames stay
+        # within one directory.
+        assert [p.stat().st_ino for p in _pooled(stored.parent)] == [inode]
 
         # Inside the quarantine a store in the same shard gets a fresh file.
         _store(client, early, view)
@@ -404,7 +410,7 @@ def test_recycling_reuses_a_deleted_file_after_quarantine(tmp_path) -> None:
         fresh[:] = b"\x5a" * size
         _store(client, late, fresh)
         assert _data_path(tmp_path, late.rsplit("@", 1)[1]).stat().st_ino == inode
-        assert not list(pool.iterdir())
+        assert not _pooled(stored.parent)
 
         _raw3, dest = _aligned_memoryview(size, 4096)
         assert _submit_and_wait(client, "submit_batch_get", late, dest)[1]
@@ -434,7 +440,7 @@ def test_recycling_adopts_pool_files_left_by_an_earlier_client(tmp_path) -> None
         other = "test_model@00000000@0@" + "b" * 16
         _store(client, other, view)
         assert _data_path(tmp_path, "b" * 16).stat().st_ino == inode
-        assert not list((tmp_path / ".pool").iterdir())
+        assert not _pooled(tmp_path)
     finally:
         client.close()
 
@@ -480,7 +486,7 @@ def test_recycling_unlinks_once_the_pool_is_full(tmp_path: Path) -> None:
             _store(client, key, view)
         deleted = _wait_for_completion(client, client.submit_batch_delete(keys))
         assert deleted[1], deleted[2]
-        assert len(list((tmp_path / ".pool").iterdir())) == 2
+        assert len(_pooled(tmp_path)) == 2
         assert not list(tmp_path.glob("*.data"))
     finally:
         client.close()
@@ -506,7 +512,7 @@ def test_recycling_drops_a_pooled_file_of_another_size(tmp_path: Path) -> None:
         stored = _data_path(tmp_path, "2" * 16)
         assert stored.stat().st_ino != inode
         assert stored.stat().st_size == 4096
-        assert not list((tmp_path / ".pool").iterdir())
+        assert not _pooled(tmp_path)
 
         _dest_raw, dest = _aligned_memoryview(4096, 4096)
         assert _submit_and_wait(client, "submit_batch_get", second, dest)[1]
@@ -536,7 +542,7 @@ def test_misaligned_store_keeps_the_pooled_file_reusable(tmp_path: Path) -> None
             client, "submit_batch_set", "test_model@00000000@0@" + "b" * 16, bad
         )
         assert not rejected[1]
-        assert [p.stat().st_ino for p in (tmp_path / ".pool").iterdir()] == [inode]
+        assert [p.stat().st_ino for p in _pooled(tmp_path)] == [inode]
 
         _store(client, "test_model@00000000@0@" + "c" * 16, view)
         assert _data_path(tmp_path, "c" * 16).stat().st_ino == inode
