@@ -46,8 +46,8 @@ I/O queue depth on a single Python thread.
   at high concurrency.  Every reader of ``base_path`` must use the same
   value as the writer; objects stored with another value are not found.
 - ``recycle_max_files`` (int, default ``0``): On delete, move up to this
-  many object files into a per-shard ``.pool`` directory instead of
-  unlinking them; a later store of the same size overwrites a pooled file
+  many object files to ``.pool-*`` names in their own shard directory
+  instead of unlinking them; a later store of the same size overwrites a pooled file
   in place and renames it into position.  Overwriting allocated blocks
   keeps the SSD-visible footprint flat under steady store and delete
   churn without ``fstrim``.  A pooled file is reused only after a 1 s
