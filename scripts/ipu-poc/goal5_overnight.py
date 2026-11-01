@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Goal5: six private eight-namespace arrays, fixed QPs, and matched load curves.
+"""Goal5: private eight-namespace arrays, fixed QPs and read/mixed curves.
 
 Run on mmgi0. Use init-config, preflight, prepare, then run, each with --config.
 prepare byte-checks a canary, seeds a corpus and checks load success in a fresh
-process; run never formats, reconnects, or changes QPs. cleanup stops only
-processes owned by this run.
+process. XFS runs include 5:1 mixed cells after separate read preconditioning,
+then reclaim exactly each cell's successful Store manifest. cleanup stops only
+processes owned by this run; run preserves array geometry and QPs.
 Raw preparation requires --ack-raw-overwrite and an independently unmounted array.
 SPDK target provisioning/comparison remains a separate follow-up.
 """
@@ -33,12 +34,31 @@ from setup_mmgt_namespace_6x8 import validate_manifest
 
 HOSTS = tuple(f"mmgi{i}" for i in range(6))
 SETUP = "/root/lmcache-namespace-6x8-20261018"
-DEPLOY = "/root/goal5-overnight"
+DEPLOY = str(Path(__file__).resolve().parent)
 PROFILES = {
     "mixtral64k": "mixtral_8x22b_fp8_64k.yaml",
     "mixtral256k": "mixtral_8x22b_fp8.yaml",
     "minimax": "minimax_m3_bf16_tp8_odirect.yaml",
+    "deepseek_v4_1_flash": "deepseek_v4_1_flash.yaml",
+    "deepseek_v4_flash": "deepseek_v4_flash.yaml",
 }
+
+
+def validate_hosts(hosts: tuple[str, ...]) -> None:
+    """Validate a nonempty, distinct initiator selection containing mmgi0.
+
+    Args:
+        hosts: Selected initiator aliases from mmgi0 through mmgi5.
+
+    Raises:
+        ValueError: A host is unknown, duplicated, or the coordinator is absent.
+    """
+    if (
+        "mmgi0" not in hosts
+        or len(set(hosts)) != len(hosts)
+        or not set(hosts).issubset(HOSTS)
+    ):
+        raise ValueError("Select distinct known hosts including coordinator mmgi0")
 
 
 def config_digest(cfg: dict[str, Any]) -> str:
@@ -57,20 +77,34 @@ def write_json(path: Path, value: Any) -> None:
 def adapter(cfg: dict[str, Any], host: str) -> dict[str, Any]:
     """Return O_DIRECT filesystem or ordinary raw-block I/O configuration."""
     if cfg["backend"] == "xfs":
-        return {
+        params = {
             "type": "fs_native",
             "base_path": f"/mnt/lmcache/{host}/goal5/{cfg['run_id']}",
             "num_workers": cfg["load_workers"],
             "use_odirect": True,
         }
+        if "filesystem_plugin" in cfg:
+            plugin = cfg["filesystem_plugin"]
+            params.pop("type")
+            params.update(
+                io_depth=plugin["io_depth"],
+                stats_directory=f"{DEPLOY}/host-results/{cfg['run_id']}",
+            )
+            return {
+                "type": "native_plugin",
+                "module_path": plugin["module_path"],
+                "class_name": plugin["class_name"],
+                "adapter_params": params,
+            }
+        return params
     if cfg["backend"] not in ("raw_posix", "raw_io_uring"):
         raise ValueError("Unknown backend")
     return {
-        "type": "raw_block",
+        "type": "goal5_raw_recording" if cfg.get("raw_recorder") else "raw_block",
         "device_path": "/dev/md0",
         "slot_bytes": ((cfg["geometry"]["max_object_bytes"] + 8191) // 4096) * 4096,
         "header_bytes": 4096,
-        "meta_total_bytes": 268435456,
+        "meta_total_bytes": cfg.get("raw_meta_total_bytes", 268435456),
         "use_odirect": True,
         "use_uring_cmd": False,
         "io_engine": "posix" if cfg["backend"] == "raw_posix" else "io_uring",
@@ -79,7 +113,18 @@ def adapter(cfg: dict[str, Any], host: str) -> dict[str, Any]:
         "num_store_workers": 4,
         "num_lookup_workers": 1,
         "load_checkpoint_on_init": True,
+        **(
+            {"capacity_bytes": cfg["raw_capacity_bytes"][host]}
+            if "raw_capacity_bytes" in cfg
+            else {}
+        ),
     }
+
+
+def filesystem_base(cfg: dict[str, Any], host: str) -> str:
+    """Return the owned filesystem root for blocking or native plugin clients."""
+    selected = adapter(cfg, host)
+    return str(selected.get("adapter_params", selected)["base_path"])
 
 
 def cells(cfg: dict[str, Any]) -> list[tuple[int, int]]:
@@ -96,18 +141,35 @@ def cells(cfg: dict[str, Any]) -> list[tuple[int, int]]:
         )
     ):
         raise ValueError("Every in-flight must divide dataset_submits")
-    return [
+    matrix = [
         (value, repetition)
         for repetition in range(1, cfg["repetitions"] + 1)
         for value in values
     ]
+    if "measurement_cells" not in cfg:
+        return matrix
+    selection = cfg["measurement_cells"]
+    if not isinstance(selection, list) or not selection:
+        raise ValueError("measurement_cells must select distinct matrix cells")
+    selected = []
+    for pair in selection:
+        if (
+            not isinstance(pair, (list, tuple))
+            or len(pair) != 2
+            or any(type(value) is not int for value in pair)
+            or tuple(pair) not in matrix
+            or tuple(pair) in selected
+        ):
+            raise ValueError("measurement_cells must select distinct matrix cells")
+        selected.append(tuple(pair))
+    return selected
 
 
 def benchmark_args(
-    cfg: dict[str, Any], host: str, in_flight: int, mode: str
+    cfg: dict[str, Any], host: str, in_flight: int, mode: str, repetition: int = 0
 ) -> list[str]:
     """Build a NUMA-bound command with a fixed, profile-specific key universe."""
-    if mode not in ("load", "store", "verify", "canary"):
+    if mode not in ("load", "store", "verify", "canary", "mixed", "precondition"):
         raise ValueError("Unknown benchmark mode")
     if in_flight <= 0 or cfg["dataset_submits"] % in_flight:
         raise ValueError("In-flight must divide dataset_submits")
@@ -118,7 +180,7 @@ def benchmark_args(
         f"--membind={row['numa']}",
         row["python"],
         "-m",
-        "lmcache.cli.main",
+        "goal5_raw_recording" if cfg.get("raw_recorder") else "lmcache.cli.main",
         "bench",
         "l2",
         "--l2-adapter",
@@ -139,22 +201,42 @@ def benchmark_args(
         "--format",
         "json",
     ]
-    if mode != "canary":
+    if mode not in ("canary", "mixed"):
         args += ["--only", "store" if mode == "store" else "load"]
-    if mode == "load":
+    if mode in ("load", "mixed", "precondition"):
         args += [
             "--duration-sec",
-            str(cfg["duration_sec"]),
-            "--warmup-sec",
-            str(cfg["warmup_sec"]),
+            str(cfg["warmup_sec"] if mode == "precondition" else cfg["duration_sec"]),
             "--serve-metrics",
             str(row["metrics_port"]),
             "--metrics-bind-address",
             "127.0.0.1",
         ]
+        if mode != "mixed":
+            args += ["--warmup-sec", str(cfg["warmup_sec"] if mode == "load" else 0)]
+        else:
+            if cfg["backend"] not in ("xfs", "raw_io_uring") or repetition <= 0:
+                raise ValueError("Mixed requires XFS/raw io_uring and a repetition")
+            args += [
+                "--read-write-ratio",
+                "5:1",
+                "--write-key-prefix",
+                write_prefix(cfg, host, in_flight, repetition),
+                "--no-skip-verify",
+            ]
     if mode == "canary":
         args += ["--no-skip-verify"]
     return args
+
+
+def write_prefix(
+    cfg: dict[str, Any], host: str, in_flight: int, repetition: int
+) -> str:
+    """Return the Store namespace owned by exactly one host and mixed cell."""
+    return (
+        f"{cfg['run_id']}-writes-if{in_flight}-r{repetition}-{host}-"
+        f"{cfg['geometry']['profile_sha256'][:12]}"
+    )
 
 
 def validate_evidence(
@@ -171,7 +253,7 @@ def validate_evidence(
         row.get("config_sha256") != config_digest(cfg)
         or row.get("host") != host
         or row.get("cell") != identity
-        or row.get("command") != benchmark_args(cfg, host, in_flight, mode)
+        or row.get("command") != benchmark_args(cfg, host, in_flight, mode, repetition)
     ):
         raise ValueError(
             "Evidence configuration differs; use a fresh results directory"
@@ -184,16 +266,96 @@ def validate_evidence(
         reported["in_flight"] != in_flight
         or json.loads(reported["l2_adapter_json"]) != adapter(cfg, host)
         or metrics["geometry"]["profile_sha256"] != cfg["geometry"]["profile_sha256"]
-        or reported["mode"] != ("sustained" if mode == "load" else "rounds")
+        or reported["mode"]
+        != ("sustained" if mode in ("load", "mixed", "precondition") else "rounds")
         or (
-            mode == "load"
+            mode in ("load", "mixed", "precondition")
             and (
-                reported["duration_sec"] != cfg["duration_sec"]
-                or reported["warmup_sec"] != cfg["warmup_sec"]
+                reported["duration_sec"]
+                != (
+                    cfg["warmup_sec"] if mode == "precondition" else cfg["duration_sec"]
+                )
+                or reported["warmup_sec"]
+                != (cfg["warmup_sec"] if mode == "load" else 0)
             )
         )
     ):
         raise ValueError("Reported benchmark configuration differs")
+    if "filesystem_plugin" in cfg:
+        native = row.get("native", {})
+        terminal = native.get("terminal", {})
+        reads = sum(
+            op["total_success"]
+            for key, op in metrics.items()
+            if key.startswith("op_") and op["operation"] == "Load"
+        )
+        if (
+            not terminal
+            or terminal["pending_reads"]
+            or terminal["submitted_reads"] != terminal["completed_reads"]
+            or terminal["completed_reads"] < reads
+            or terminal["max_worker_pending"] > cfg["filesystem_plugin"]["io_depth"]
+            or terminal["max_total_pending"]
+            > cfg["load_workers"] * cfg["filesystem_plugin"]["io_depth"]
+            or (
+                mode in ("load", "mixed", "precondition")
+                and (
+                    native.get("samples", 0) < 2
+                    or row.get("sampled", {}).get("samples", 0) < 2
+                )
+            )
+        ):
+            return False
+    if mode == "mixed":
+        if (
+            reported["write_key_prefix"]
+            != write_prefix(cfg, host, in_flight, repetition)
+            or reported["read_write_ratio_requested"] != "5:1"
+        ):
+            raise ValueError("Reported mixed configuration differs")
+        operations = {
+            value["operation"]: value
+            for key, value in metrics.items()
+            if key.startswith("op_")
+        }
+        if set(operations) != {"Load", "Store"}:
+            raise ValueError("Reported mixed operations differ")
+        for op in operations.values():
+            span = op["phase_end_time_seconds"] - op["phase_start_time_seconds"]
+            if (
+                op.get("timed_out", False)
+                or not op["total_keys"]
+                or op["total_success"] != op["total_keys"]
+                or op["total_keys"] % cfg["geometry"]["objects_per_submit"]
+                or op["total_success_bytes"]
+                != (
+                    op["total_keys"]
+                    // cfg["geometry"]["objects_per_submit"]
+                    * cfg["geometry"]["task_size_bytes"]
+                )
+                or not math.isfinite(span)
+                or span <= 0
+                or not math.isfinite(op["window_sec"])
+                or op["window_sec"] + 0.001 < cfg["duration_sec"]
+                or not all(
+                    math.isfinite(op[k]) and op[k] >= 0
+                    for k in ("submit_latency_p50_ms", "submit_latency_p99_ms")
+                )
+            ):
+                return False
+        load, store = operations["Load"], operations["Store"]
+        if any(
+            load[k] != store[k]
+            for k in (
+                "phase_start_time_seconds",
+                "phase_end_time_seconds",
+                "window_sec",
+            )
+        ):
+            return False
+        return (
+            4.95 <= load["total_success_bytes"] / store["total_success_bytes"] <= 5.05
+        )
     operation = "Store" if mode == "store" else "Load"
     matches = [
         value
@@ -211,7 +373,7 @@ def validate_evidence(
         or op["total_success"] != op["total_keys"]
     ):
         return False
-    if mode == "load":
+    if mode in ("load", "precondition"):
         span = op["phase_end_time_seconds"] - op["phase_start_time_seconds"]
         payload = (
             op["total_keys"]
@@ -224,7 +386,8 @@ def validate_evidence(
             or span <= 0
             or not math.isfinite(window)
             # The CLI rounds this duration to milliseconds.
-            or window + 0.001 < cfg["duration_sec"]
+            or window + 0.001
+            < (cfg["warmup_sec"] if mode == "precondition" else cfg["duration_sec"])
             or op["total_success_bytes"] != payload
         ):
             return False
@@ -239,13 +402,17 @@ def validate_evidence(
 
 
 def summarize(
-    rows: dict[str, Any], cfg: dict[str, Any], in_flight: int, repetition: int
+    rows: dict[str, Any],
+    cfg: dict[str, Any],
+    in_flight: int,
+    repetition: int,
+    mode: str = "load",
 ) -> dict[str, Any]:
     """Sum per-host successful-payload rates; retain per-host submit quantiles."""
     if set(rows) != set(cfg["hosts"]):
-        raise ValueError("Incomplete six-host evidence")
+        raise ValueError("Incomplete selected-host evidence")
     for host, row in rows.items():
-        if not validate_evidence(row, cfg, host, in_flight, repetition, "load"):
+        if not validate_evidence(row, cfg, host, in_flight, repetition, mode):
             raise ValueError(f"Failed I/O on {host}")
     ops = {host: row["result"]["metrics"]["op_0"] for host, row in rows.items()}
     starts = [op["phase_start_time_seconds"] for op in ops.values()]
@@ -262,6 +429,58 @@ def summarize(
         / 1e9
         for host, op in ops.items()
     }
+    if mode == "mixed":
+        hosts = {}
+        read_bytes = write_bytes = 0
+        for host, row in rows.items():
+            operations = {}
+            for key, op in row["result"]["metrics"].items():
+                if not key.startswith("op_"):
+                    continue
+                span = op["phase_end_time_seconds"] - op["phase_start_time_seconds"]
+                operations[op["operation"]] = {
+                    "payload_gbps_decimal": op["total_success_bytes"] * 8 / span / 1e9,
+                    "successful_bytes": op["total_success_bytes"],
+                    "p50_submit_ms": op["submit_latency_p50_ms"],
+                    "p99_submit_ms": op["submit_latency_p99_ms"],
+                    "submit_latency_count": op["submit_latency_count"],
+                    "submit_latency_sample_count": op.get(
+                        "submit_latency_sample_count", op["submit_latency_count"]
+                    ),
+                    "latency_quantile_scope": (
+                        "latest completions"
+                        if op.get(
+                            "submit_latency_sample_count", op["submit_latency_count"]
+                        )
+                        < op["submit_latency_count"]
+                        else "all completions"
+                    ),
+                }
+            hosts[host] = {
+                "operations": operations,
+                **(
+                    {"sampled": row["sampled"], "native": row["native"]}
+                    if "filesystem_plugin" in cfg
+                    else {}
+                ),
+            }
+            read_bytes += operations["Load"]["successful_bytes"]
+            write_bytes += operations["Store"]["successful_bytes"]
+        return {
+            "in_flight": in_flight,
+            "repetition": repetition,
+            "mode": mode,
+            "payload_gbps_decimal": sum(
+                op["payload_gbps_decimal"]
+                for h in hosts.values()
+                for op in h["operations"].values()
+            ),
+            "read_write_ratio_achieved": read_bytes / write_bytes,
+            "latency_unit": (
+                "submit-to-observed completion; not individual object or TTFT"
+            ),
+            "hosts": hosts,
+        }
     return {
         "in_flight": in_flight,
         "repetition": repetition,
@@ -270,6 +489,11 @@ def summarize(
         "hosts": {
             host: {
                 "payload_gbps_decimal": rates[host],
+                **(
+                    {"sampled": rows[host]["sampled"], "native": rows[host]["native"]}
+                    if "filesystem_plugin" in cfg
+                    else {}
+                ),
                 "p50_submit_ms": op["submit_latency_p50_ms"],
                 "p99_submit_ms": op["submit_latency_p99_ms"],
                 "submit_latency_count": op["submit_latency_count"],
@@ -333,7 +557,18 @@ def validate_host(row: dict[str, Any], cfg: dict[str, Any], host: str) -> None:
             not row["restore_enabled"],
             not row["restore_active"],
             row["rust_available"],
-            cfg["backend"] != "raw_io_uring" or row["io_uring_disabled"] == 0,
+            cfg["backend"] != "raw_io_uring"
+            or (
+                row["io_uring_disabled"]
+                == cfg.get("io_uring_policy", {}).get("disabled", 0)
+                and (
+                    "io_uring_policy" not in cfg
+                    or (
+                        row.get("io_uring_group") == cfg["io_uring_policy"]["group"]
+                        and row.get("io_uring_ready") is True
+                    )
+                )
+            ),
         ]
     if not all(checks):
         raise ValueError(f"{host} readiness differs; inspect preflight.json")
@@ -341,7 +576,12 @@ def validate_host(row: dict[str, Any], cfg: dict[str, Any], host: str) -> None:
 
 def remote(host: str, request: dict[str, Any]) -> dict[str, Any]:
     """Run the deployed helper via SSH, or locally for the mmgi0 coordinator."""
-    args = ["python3", f"{DEPLOY}/goal5_probe.py"]
+    helper = (
+        request["cfg"].get("probe_helper", "goal5_probe.py")
+        if host in request["cfg"]["hosts"]
+        else "goal5_probe.py"
+    )
+    args = ["python3", f"{DEPLOY}/{helper}"]
     if host != "mmgi0":
         args = ["ssh", "-o", "BatchMode=yes", host, shlex.join(args)]
     completed = subprocess.run(
@@ -357,7 +597,7 @@ def remote(host: str, request: dict[str, Any]) -> dict[str, Any]:
 
 
 def preflight(cfg: dict[str, Any]) -> dict[str, Any]:
-    """Collect read-only readiness evidence on all six hosts and the kernel target."""
+    """Collect readiness evidence on selected hosts and the kernel target."""
     with ThreadPoolExecutor(max_workers=7) as pool:
         futures = {
             host: pool.submit(remote, host, {"action": "inspect", "cfg": cfg})
@@ -398,14 +638,18 @@ class Run:
             )
             write_json(self.directory / "config.json", cfg)
 
-    def phase(self, in_flight: int, repetition: int, mode: str) -> dict[str, Any]:
+    def phase(
+        self, in_flight: int, repetition: int, mode: str, fresh: bool = False
+    ) -> dict[str, Any]:
         """Resume matching successful evidence or append a new bounded attempt."""
         self.check_stopped()
         stem = f"{mode}-if{in_flight}-r{repetition}"
         attempts = self.directory / stem
         attempts.mkdir(exist_ok=True)
         prior = sorted(attempts.glob("attempt-*"))
-        if prior:
+        if fresh and mode != "precondition":
+            raise ValueError("Only read-only preconditioning can force a fresh attempt")
+        if prior and not fresh:
             rows = {}
             for host in self.cfg["hosts"]:
                 path = prior[-1] / f"{host}.json"
@@ -415,9 +659,9 @@ class Run:
                         row, self.cfg, host, in_flight, repetition, mode
                     ):
                         rows[host] = row
-            if len(rows) == 6:
+            if len(rows) == len(self.cfg["hosts"]):
                 return rows
-            if mode != "load":
+            if mode not in ("load", "precondition"):
                 raise ValueError(
                     "Interrupted preparation may have seeded keys; use a fresh run "
                     "configuration. Existing corpus and evidence are preserved."
@@ -426,6 +670,16 @@ class Run:
         self.check_stopped()
         attempt = attempts / f"attempt-{len(prior) + 1:04d}"
         attempt.mkdir()
+        write_json(
+            self.status_path,
+            {
+                "config_sha256": self.digest,
+                "state": "running",
+                "mode": mode,
+                "in_flight": in_flight,
+                "repetition": repetition,
+            },
+        )
         requests = {
             host: {
                 "action": "bench",
@@ -436,7 +690,7 @@ class Run:
                     "repetition": repetition,
                     "mode": mode,
                 },
-                "command": benchmark_args(self.cfg, host, in_flight, mode),
+                "command": benchmark_args(self.cfg, host, in_flight, mode, repetition),
                 "artifact": f"{attempt.name}-{stem}",
                 "timeout": self.cfg["warmup_sec"] + self.cfg["duration_sec"] + 600,
                 "config_sha256": self.digest,
@@ -487,7 +741,8 @@ class Run:
                     raise ValueError("Preparation evidence is incomplete")
         summaries = []
         write_json(self.status_path, {"config_sha256": self.digest, "state": "running"})
-        for in_flight, repetition in cells(self.cfg):
+        read_cells = cells(self.cfg) if self.cfg.get("include_read", True) else []
+        for in_flight, repetition in read_cells:
             if (self.directory / "STOP").exists() or (
                 stop_at
                 and datetime.now(ZoneInfo("America/Phoenix"))
@@ -501,13 +756,65 @@ class Run:
             rows = self.phase(in_flight, repetition, "load")
             summaries.append(summarize(rows, self.cfg, in_flight, repetition))
             write_json(self.directory / "summary.json", summaries)
+        if not read_cells:
+            write_json(self.directory / "summary.json", summaries)
+        if self.cfg.get("include_mixed", False):
+            mixed_summaries = []
+            for in_flight, repetition in cells(self.cfg):
+                self.check_stopped()
+                if stop_at and datetime.now(ZoneInfo("America/Phoenix")) >= (
+                    datetime.fromisoformat(stop_at)
+                ):
+                    write_json(
+                        self.status_path,
+                        {"config_sha256": self.digest, "state": "stopped-incomplete"},
+                    )
+                    return
+                if not any(
+                    (self.directory / f"mixed-if{in_flight}-r{repetition}").glob(
+                        "attempt-*"
+                    )
+                ):
+                    self.phase(in_flight, repetition, "precondition", fresh=True)
+                rows = self.phase(in_flight, repetition, "mixed")
+                summary = summarize(rows, self.cfg, in_flight, repetition, "mixed")
+                for host, row in rows.items():
+                    receipt = remote(
+                        host,
+                        {
+                            "action": "reclaim",
+                            "cfg": self.cfg,
+                            "host": host,
+                            "row": row,
+                        },
+                    )
+                    write_json(
+                        self.directory
+                        / f"reclaim-if{in_flight}-r{repetition}-{host}.json",
+                        receipt,
+                    )
+                mixed_summaries.append(summary)
+                write_json(self.directory / "mixed-summary.json", mixed_summaries)
         write_json(
             self.status_path, {"config_sha256": self.digest, "state": "complete"}
         )
 
 
-def initialize(path: Path, model: str, backend: str) -> None:
-    """Create a fresh OS configuration from live identities and source hashes."""
+def initialize(
+    path: Path, model: str, backend: str, hosts: tuple[str, ...] = HOSTS
+) -> None:
+    """Create a fresh configuration from selected hosts' live identities.
+
+    Args:
+        path: New configuration file path.
+        model: Registered profile name.
+        backend: Storage backend name.
+        hosts: Distinct initiators including the mmgi0 coordinator.
+
+    Raises:
+        ValueError: Selection is invalid, the file exists, or host sources differ.
+    """
+    validate_hosts(hosts)
     if path.exists():
         raise ValueError("Configuration already exists")
     manifest = json.loads(Path(f"{SETUP}/manifest.json").read_text())
@@ -532,9 +839,11 @@ def initialize(path: Path, model: str, backend: str) -> None:
         "iouring_queue_depth": 256,
         "max_phase_skew_sec": 5,
         "min_results_free_bytes": 2 * 1024**3,
+        "include_mixed": backend == "xfs",
         "hosts": {},
     }
-    for index, host in enumerate(HOSTS):
+    for host in hosts:
+        index = HOSTS.index(host)
         repo = "/root/anthropic/LMCache" if index < 4 else "/root/LMCache"
         cfg["hosts"][host] = {
             "repo": repo,
@@ -546,7 +855,7 @@ def initialize(path: Path, model: str, backend: str) -> None:
     with ThreadPoolExecutor(max_workers=6) as pool:
         futures = {
             host: pool.submit(remote, host, {"action": "inspect", "cfg": cfg})
-            for host in HOSTS
+            for host in hosts
         }
         snapshots = {host: future.result() for host, future in futures.items()}
     for host, row in snapshots.items():
@@ -587,6 +896,13 @@ def main() -> None:
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--model", choices=PROFILES, default="mixtral64k")
     parser.add_argument(
+        "--hosts",
+        nargs="+",
+        choices=HOSTS,
+        default=list(HOSTS),
+        help="Initiators for init-config; must include mmgi0 (default: all six)",
+    )
+    parser.add_argument(
         "--backend", choices=("xfs", "raw_posix", "raw_io_uring"), default="xfs"
     )
     parser.add_argument("--ack-raw-overwrite", action="store_true")
@@ -595,11 +911,12 @@ def main() -> None:
     )
     args = parser.parse_args()
     if args.action == "init-config":
-        initialize(args.config, args.model, args.backend)
+        initialize(args.config, args.model, args.backend, tuple(args.hosts))
         return
     cfg = json.loads(args.config.read_text())
-    if set(cfg["hosts"]) != set(HOSTS) or cfg["target"] != "kernel":
-        raise ValueError("Goal5 currently requires all six hosts and the kernel target")
+    validate_hosts(tuple(cfg["hosts"]))
+    if cfg["target"] != "kernel":
+        raise ValueError("Goal5 requires the kernel target")
     cells(cfg)
     if args.stop_at and datetime.fromisoformat(args.stop_at).tzinfo is None:
         raise ValueError("--stop-at needs a UTC offset")
@@ -608,9 +925,17 @@ def main() -> None:
             json.dumps(
                 {
                     "run_id": cfg["run_id"],
-                    "cells": cells(cfg),
-                    "adapter": {h: adapter(cfg, h) for h in HOSTS},
-                    "commands": {h: benchmark_args(cfg, h, 1, "load") for h in HOSTS},
+                    "cells": cells(cfg) if cfg.get("include_read", True) else [],
+                    "adapter": {h: adapter(cfg, h) for h in cfg["hosts"]},
+                    "commands": {
+                        h: benchmark_args(cfg, h, 1, "load") for h in cfg["hosts"]
+                    },
+                    "mixed_cells": cells(cfg) if cfg.get("include_mixed") else [],
+                    "mixed_commands": (
+                        {h: benchmark_args(cfg, h, 1, "mixed", 1) for h in cfg["hosts"]}
+                        if cfg.get("include_mixed")
+                        else {}
+                    ),
                 },
                 indent=2,
             )
@@ -624,7 +949,7 @@ def main() -> None:
     run = Run(cfg)
     if args.action == "cleanup":
         (run.directory / "STOP").touch()
-        for host in HOSTS:
+        for host in cfg["hosts"]:
             print(host, remote(host, {"action": "cleanup", "cfg": cfg}))
         return
     with (Path(DEPLOY) / "fleet.lock").open("w") as fleet:
@@ -640,7 +965,7 @@ def dispatch(run: Run, args: argparse.Namespace) -> None:
         try:
             if args.action == "preflight":
                 preflight(cfg)
-                print("All six hosts and kernel target ready")
+                print("All selected hosts and kernel target ready")
             elif args.action == "prepare":
                 if cfg["backend"] != "xfs" and not args.ack_raw_overwrite:
                     raise ValueError("Raw prepare requires --ack-raw-overwrite")

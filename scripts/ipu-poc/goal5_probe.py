@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 # Standard
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 import fcntl
@@ -55,7 +56,34 @@ def unit(name: str, verb: str) -> bool:
     )
 
 
-def provenance(repo: str, python: str, profile: str, backend: str) -> dict[str, Any]:
+def metrics_port_busy(port: int) -> bool:
+    """Check availability using the metrics server's socket reuse policy.
+
+    Args:
+        port: Loopback TCP port intended for the Prometheus metrics server.
+
+    Returns:
+        True if binding fails, including when another server is listening.
+        Retired TIME_WAIT connections do not prevent reuse.
+    """
+    with socket.socket() as sock:
+        # prometheus_client's ThreadingWSGIServer enables address reuse.
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind(("127.0.0.1", port))
+        except OSError:
+            return True
+    return False
+
+
+def host_directory(cfg: dict[str, Any]) -> Path:
+    """Locate bound host evidence independently of an isolated helper directory."""
+    return Path(cfg.get("host_results_root", DEPLOY / "host-results")) / cfg["run_id"]
+
+
+def provenance(
+    repo: str, python: str, profile: str, backend: str, git_repo: str | None = None
+) -> dict[str, Any]:
     """Hash source, deployed helpers and artifacts resolved by the benchmark Python.
 
     Args:
@@ -63,6 +91,7 @@ def provenance(repo: str, python: str, profile: str, backend: str) -> dict[str, 
         python: Benchmark interpreter path.
         profile: Profile path relative to the checkout.
         backend: Selected filesystem or raw engine.
+        git_repo: Original checkout for an isolated source snapshot's Git identity.
 
     Returns:
         Source revision, hashes, and resolved runtime artifact paths.
@@ -76,8 +105,8 @@ def provenance(repo: str, python: str, profile: str, backend: str) -> dict[str, 
     if backend != "xfs":
         files += [
             "lmcache/v1/distributed/l2_adapters/raw_block_l2_adapter.py",
-            "lmcache/v1/storage_backend/raw_block/core.py",
-            "lmcache/v1/storage_backend/raw_block/key_codec.py",
+            "lmcache/v1/distributed/l2_adapters/raw_block/core.py",
+            "lmcache/v1/distributed/l2_adapters/raw_block/key_codec.py",
         ]
         extension = "lmcache_rust_raw_block_io"
     modules = [name[:-3].replace("/", ".") for name in files if name != profile] + [
@@ -98,7 +127,7 @@ for name in {modules!r}:
 print(json.dumps(artifacts))
 """
     return {
-        "git_sha": command(["git", "rev-parse", "HEAD"], repo),
+        "git_sha": command(["git", "rev-parse", "HEAD"], git_repo or repo),
         "files": {
             name: hashlib.sha256((Path(repo) / name).read_bytes()).hexdigest()
             for name in files
@@ -180,7 +209,13 @@ def inspect(cfg: dict[str, Any]) -> dict[str, Any]:
         ):
             raise ValueError("Cache path contains a symlink")
     repo = expected["repo"]
-    artifacts = provenance(repo, expected["python"], cfg["profile"], cfg["backend"])
+    artifacts = provenance(
+        repo,
+        expected["python"],
+        cfg["profile"],
+        cfg["backend"],
+        expected.get("git_repo"),
+    )
     probe = (
         "import json,importlib.util; "
         "from lmcache.cli.commands.bench.l2_adapter_bench.geometry "
@@ -200,7 +235,13 @@ def inspect(cfg: dict[str, Any]) -> dict[str, Any]:
         except (FileNotFoundError, PermissionError, ProcessLookupError):
             continue
         if (
-            (b"lmcache.cli.main" in argv and b"bench" in argv)
+            (
+                any(
+                    name in argv
+                    for name in (b"lmcache.cli.main", b"goal5_raw_recording")
+                )
+                and b"bench" in argv
+            )
             or (argv and Path(os.fsdecode(argv[0])).name == "fio")
             or any(
                 Path(os.fsdecode(a)).name
@@ -213,12 +254,7 @@ def inspect(cfg: dict[str, Any]) -> dict[str, Any]:
             )
         ):
             active.append(proc.name)
-    busy = False
-    with socket.socket() as sock:
-        try:
-            sock.bind(("127.0.0.1", expected["metrics_port"]))
-        except OSError:
-            busy = True
+    busy = metrics_port_busy(expected["metrics_port"])
     return {
         "namespace_uuids": [m["uuid"] for m in members],
         "devices": devices,
@@ -254,7 +290,8 @@ def inspect(cfg: dict[str, Any]) -> dict[str, Any]:
         == "yes",
         "provenance": artifacts,
         "git_dirty": command(
-            ["git", "status", "--porcelain", "--untracked-files=no"], repo
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            expected.get("git_repo", repo),
         ),
         "kernel": command(["uname", "-r"]),
         "mount": mount,
@@ -348,7 +385,7 @@ def cleanup(cfg: dict[str, Any]) -> list[int]:
     """Stop this run's saved groups without deleting corpus or result artifacts."""
     token = hashlib.sha256(json.dumps(cfg, sort_keys=True).encode()).hexdigest()
     stopped = []
-    directory = DEPLOY / "host-results" / cfg["run_id"]
+    directory = host_directory(cfg)
     directory.mkdir(parents=True, exist_ok=True)
     with (directory / "launch.lock").open("w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
@@ -361,40 +398,111 @@ def cleanup(cfg: dict[str, Any]) -> list[int]:
     return stopped
 
 
-def bench(request: dict[str, Any]) -> dict[str, Any]:
-    """Launch one bounded process group, retaining logs and original benchmark JSON."""
+def bench(
+    request: dict[str, Any],
+    raw_guard: Callable[[dict[str, Any]], Any] | None = None,
+) -> dict[str, Any]:
+    """Launch one bounded process group, retaining logs and original benchmark JSON.
+
+    Args:
+        request: Bound command, configuration and exclusively owned artifact identity.
+        raw_guard: Required durable prefix/capacity check for raw mixed writes.
+
+    Returns:
+        Original benchmark evidence with exit status and command identity.
+
+    Raises:
+        ValueError: Identity is reused, the run is stopped or a Store guard rejects it.
+    """
     cfg = request["cfg"]
     host = request["host"]
-    directory = DEPLOY / "host-results" / cfg["run_id"]
+    directory = host_directory(cfg)
     directory.mkdir(parents=True, exist_ok=True)
     prefix = directory / request["artifact"]
     output = prefix.with_suffix(".bench.json")
     argv = request["command"] + ["--output", str(output)]
-    with (directory / "launch.lock").open("w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        if (directory / "STOP").exists():
-            raise ValueError("Run stopped; refusing delayed benchmark launch")
-        if output.exists() or prefix.with_suffix(".log").exists():
-            raise ValueError("Host artifact already exists")
-        with prefix.with_suffix(".log").open("w") as log:
-            process = subprocess.Popen(
-                argv,
-                cwd=cfg["hosts"][host]["repo"],
-                stdout=log,
-                stderr=log,
-                start_new_session=True,
-                env={**os.environ, "GOAL5_TOKEN": request["config_sha256"]},
-            )
-            prefix.with_suffix(".pid.json").write_text(json.dumps({"pid": process.pid}))
+
+    def interrupt(signum: int, _frame: Any) -> None:
+        raise SystemExit(128 + signum)
+
+    process: subprocess.Popen | None = None
+    handlers = {
+        sig: signal.signal(sig, interrupt) for sig in (signal.SIGTERM, signal.SIGHUP)
+    }
     try:
-        process.wait(timeout=request["timeout"])
-    except subprocess.TimeoutExpired:
-        os.killpg(process.pid, signal.SIGTERM)
+        with (directory / "launch.lock").open("w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            if (directory / "STOP").exists():
+                raise ValueError("Run stopped; refusing delayed benchmark launch")
+            if output.exists() or prefix.with_suffix(".log").exists():
+                raise ValueError("Host artifact already exists")
+            if request["cell"]["mode"] == "mixed" and cfg["backend"] != "xfs":
+                if raw_guard is None:
+                    raise ValueError("Mixed raw Store requires a durable index guard")
+                raw_guard(request)
+            if request["cell"]["mode"] == "mixed" and cfg["backend"] == "xfs":
+                # Third Party
+                from goal5_overnight import filesystem_base, write_prefix
+
+                base = Path(filesystem_base(cfg, host))
+                stem = (
+                    write_prefix(
+                        cfg,
+                        host,
+                        request["cell"]["in_flight"],
+                        request["cell"]["repetition"],
+                    )
+                    + "-bench-model@"
+                )
+                if any(entry.name.startswith(stem) for entry in base.iterdir()):
+                    raise ValueError("Mixed Store prefix is not fresh")
+                space = os.statvfs(base)
+                # A conservative 800 Gb/s per-host ceiling, 1:6 Store share and
+                # outstanding Store buffers leave an additional 1 TiB reserve.
+                needed = (
+                    1024**4
+                    + 100_000_000_000 * cfg["duration_sec"] // 6
+                    + 2
+                    * request["cell"]["in_flight"]
+                    * cfg["geometry"]["task_size_bytes"]
+                )
+                if space.f_bavail * space.f_frsize < needed:
+                    raise ValueError(
+                        "Insufficient capacity for bounded mixed Store window"
+                    )
+            with prefix.with_suffix(".log").open("w") as log:
+                process = subprocess.Popen(
+                    argv,
+                    cwd=cfg["hosts"][host]["repo"],
+                    stdout=log,
+                    stderr=log,
+                    start_new_session=True,
+                    env={
+                        **os.environ,
+                        **cfg["hosts"][host].get("bench_env", {}),
+                        "GOAL5_TOKEN": request["config_sha256"],
+                        "GOAL5_ARTIFACT": request["artifact"],
+                    },
+                )
+                prefix.with_suffix(".pid.json").write_text(
+                    json.dumps({"pid": process.pid})
+                )
         try:
-            process.wait(timeout=10)
+            process.wait(timeout=request["timeout"])
         except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGTERM)
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait()
+    finally:
+        if process is not None and process.poll() is None:
             os.killpg(process.pid, signal.SIGKILL)
             process.wait()
+        for sig, handler in handlers.items():
+            signal.signal(sig, handler)
+    assert process is not None
     row = {
         "config_sha256": request["config_sha256"],
         "host": host,
@@ -407,6 +515,96 @@ def bench(request: dict[str, Any]) -> dict[str, Any]:
     }
     prefix.with_suffix(".json").write_text(json.dumps(row, indent=2))
     return row
+
+
+def reclaim(request: dict[str, Any]) -> dict[str, Any]:
+    """Remove exactly the successful Store manifest of a validated mixed cell.
+
+    Args:
+        request: Bound configuration, host and original successful benchmark row.
+
+    Returns:
+        Persisted count and byte receipt; an existing matching receipt is resumable.
+
+    Raises:
+        ValueError: Evidence, path, entry type, count or byte sum differs.
+    """
+    # Third Party
+    from goal5_overnight import (
+        config_digest,
+        filesystem_base,
+        validate_evidence,
+        write_json,
+        write_prefix,
+    )
+
+    cfg, host, row = request["cfg"], request["host"], request["row"]
+    cell = row["cell"]
+    if cfg["backend"] != "xfs" or not validate_evidence(
+        row, cfg, host, cell["in_flight"], cell["repetition"], "mixed"
+    ):
+        raise ValueError("Reclaim requires successful XFS mixed evidence")
+    prefix = write_prefix(cfg, host, cell["in_flight"], cell["repetition"])
+    receipt_path = host_directory(cfg) / f"{prefix}.reclaim.json"
+    store = next(
+        op
+        for key, op in row["result"]["metrics"].items()
+        if key.startswith("op_") and op["operation"] == "Store"
+    )
+    receipt = {
+        "config_sha256": config_digest(cfg),
+        "prefix": prefix,
+        "files": store["total_success"],
+        "bytes": store["total_success_bytes"],
+    }
+    if receipt_path.exists():
+        if json.loads(receipt_path.read_text()) != receipt:
+            raise ValueError("Reclaim receipt differs from evidence")
+        return receipt
+    base = Path(filesystem_base(cfg, host))
+    if base.is_symlink() or not base.is_dir():
+        raise ValueError("Unsafe Store base")
+    files = {}
+    with os.scandir(base) as entries:
+        for entry in entries:
+            if not entry.name.startswith(prefix + "-bench-model@"):
+                continue
+            if not entry.name.endswith(".data") or not entry.is_file(
+                follow_symlinks=False
+            ):
+                raise ValueError("Unexpected matching Store entry")
+            files[entry.name] = entry.stat(follow_symlinks=False).st_size
+    manifest_path = receipt_path.with_suffix(".manifest.json")
+    if manifest_path.exists():
+        manifest = json.loads(manifest_path.read_text())
+        expected = manifest["entries"]
+        if (
+            manifest["receipt"] != receipt
+            or manifest["base_path"] != str(base.resolve())
+            or len(expected) != receipt["files"]
+            or sum(expected.values()) != receipt["bytes"]
+            or any(
+                name not in expected or expected[name] != size
+                for name, size in files.items()
+            )
+        ):
+            raise ValueError("Store manifest changed; preserving remaining files")
+    else:
+        if len(files) != receipt["files"] or sum(files.values()) != receipt["bytes"]:
+            raise ValueError("Store manifest count or bytes differs; preserving files")
+        write_json(
+            manifest_path,
+            {
+                "receipt": receipt,
+                "base_path": str(base.resolve()),
+                "entries": files,
+            },
+        )
+    for name in files:
+        os.unlink(base / name)
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    write_json(receipt_path, receipt)
+    return receipt
 
 
 def main() -> None:
@@ -423,6 +621,10 @@ def main() -> None:
         result = target(request["cfg"])
     elif action == "cleanup":
         result = cleanup(request["cfg"])
+    elif action == "reclaim":
+        with Path("/run/lock/lmcache-goal5-md0.lock").open("w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            result = reclaim(request)
     else:
         raise ValueError("Unknown action")
     print(json.dumps(result))
