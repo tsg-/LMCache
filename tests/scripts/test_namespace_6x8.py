@@ -315,3 +315,84 @@ def test_verified_manifest_rejects_shared_native_namespace(tmp_path: Path) -> No
     )
     assert result.returncode != 0
     assert "native namespace" in result.stderr.lower()
+
+
+def _connect_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host: str):
+    """Return the setup module with sysfs, hostnqn and commands redirected."""
+    monkeypatch.syspath_prepend(str(SCRIPT.parent))
+    setup = importlib.import_module("setup_initiator_namespace_6x8")
+    inventory, hosts = fixtures()
+    manifest = json.loads(plan(tmp_path, inventory, hosts).stdout)
+    root = tmp_path / "root"
+    (root / "etc/nvme").mkdir(parents=True)
+    (root / "etc/nvme/hostnqn").write_text(manifest["hosts"][host]["host_nqn"])
+    (root / "sys/class/nvme").mkdir(parents=True)
+    real_path = setup.Path
+    monkeypatch.setattr(
+        setup,
+        "Path",
+        lambda p: root / str(p).lstrip("/") if str(p).startswith("/") else real_path(p),
+    )
+    calls: list[list[str]] = []
+
+    def record(argv: list[str]) -> str:
+        calls.append(argv)
+        return ""
+
+    monkeypatch.setattr(setup, "command", record)
+    monkeypatch.setattr(setup, "resolve_members", lambda expected, block_root: [])
+    return setup, manifest, root, calls
+
+
+def test_connect_can_route_every_subsystem_through_one_port(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A via-address and queue count override every manifest subsystem."""
+    setup, manifest, _, calls = _connect_fixture(tmp_path, monkeypatch, "mmgi3")
+    setup.connect(manifest, "mmgi3", nr_io_queues=1, via_address="200.0.5.2")
+    connects = [argv for argv in calls if argv[:2] == ["nvme", "connect"]]
+    assert len(connects) == len(manifest["hosts"]["mmgi3"]["subsystems"])
+    for argv in connects:
+        assert argv[argv.index("-a") + 1] == "200.0.5.2"
+        assert "--nr-io-queues=1" in argv
+
+
+def test_connect_defaults_keep_manifest_addresses_and_128_queues(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without overrides the production connection is unchanged."""
+    setup, manifest, _, calls = _connect_fixture(tmp_path, monkeypatch, "mmgi0")
+    setup.connect(manifest, "mmgi0")
+    connects = [argv for argv in calls if argv[:2] == ["nvme", "connect"]]
+    expected = [s["address"] for s in manifest["hosts"]["mmgi0"]["subsystems"]]
+    assert [argv[argv.index("-a") + 1] for argv in connects] == expected
+    assert all("--nr-io-queues=128" in argv for argv in connects)
+
+
+def test_connect_rejects_mismatched_existing_controller(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An existing controller with other queues or address is not silently reused."""
+    setup, manifest, root, calls = _connect_fixture(tmp_path, monkeypatch, "mmgi0")
+    subsystem = manifest["hosts"]["mmgi0"]["subsystems"][0]
+    ctrl = root / "sys/class/nvme/nvme7"
+    ctrl.mkdir()
+    (ctrl / "subsysnqn").write_text(subsystem["nqn"])
+    (ctrl / "queue_count").write_text("129")
+    (ctrl / "address").write_text(f"traddr={subsystem['address']},trsvcid=4420")
+    with pytest.raises(ValueError, match="differs from the requested connection"):
+        setup.connect(manifest, "mmgi0", nr_io_queues=1)
+    with pytest.raises(ValueError, match="differs from the requested connection"):
+        setup.connect(manifest, "mmgi0", via_address="200.0.9.9")
+    assert not [argv for argv in calls if argv[:2] == ["nvme", "connect"]]
+
+
+@pytest.mark.parametrize("queues,address", [(0, ""), (129, ""), (8, "not-an-ip")])
+def test_connect_rejects_invalid_overrides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, queues: int, address: str
+) -> None:
+    """Out-of-range queue counts and malformed addresses fail before connecting."""
+    setup, manifest, _, calls = _connect_fixture(tmp_path, monkeypatch, "mmgi0")
+    with pytest.raises(ValueError):
+        setup.connect(manifest, "mmgi0", nr_io_queues=queues, via_address=address)
+    assert not calls

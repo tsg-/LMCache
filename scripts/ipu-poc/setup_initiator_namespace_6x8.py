@@ -5,6 +5,7 @@
 from pathlib import Path
 from typing import Any
 import argparse
+import ipaddress
 import json
 import subprocess
 import sys
@@ -30,17 +31,50 @@ def private_members(manifest: dict[str, Any], host: str) -> list[dict[str, Any]]
     ]
 
 
-def connect(manifest: dict[str, Any], host: str) -> list[str]:
-    """Connect two private RDMA subsystems and resolve all members by UUID."""
+def connect(
+    manifest: dict[str, Any],
+    host: str,
+    nr_io_queues: int = 128,
+    via_address: str = "",
+) -> list[str]:
+    """Connect two private RDMA subsystems and resolve all members by UUID.
+
+    Args:
+        manifest: Validated ownership manifest.
+        host: Initiator that owns the subsystems.
+        nr_io_queues: I/O queues requested per controller (1 to 128).
+        via_address: Target port address used for every subsystem instead of the
+            manifest's per-subsystem address; empty keeps the manifest address.
+
+    Returns:
+        The eight namespace head devices in manifest member order.
+
+    Raises:
+        ValueError: The host identity, queue count, address or an existing
+            controller differs from the request.
+    """
+    if not 1 <= nr_io_queues <= 128:
+        raise ValueError("nr_io_queues must be between 1 and 128")
+    if via_address:
+        ipaddress.IPv4Address(via_address)
     row = manifest["hosts"][host]
     if Path("/etc/nvme/hostnqn").read_text().strip() != row["host_nqn"]:
         raise ValueError("Local host NQN differs from the manifest")
     for subsystem in row["subsystems"]:
+        address = via_address or subsystem["address"]
         controllers = [
             path
             for path in Path("/sys/class/nvme").glob("nvme[0-9]*")
             if (path / "subsysnqn").read_text().strip() == subsystem["nqn"]
         ]
+        for path in controllers:
+            queues = int((path / "queue_count").read_text()) - 1
+            traddr = (path / "address").read_text().strip()
+            if queues != nr_io_queues or f"traddr={address}," not in traddr + ",":
+                raise ValueError(
+                    f"{path.name}: existing controller ({traddr}, {queues} queues) "
+                    "differs from the requested connection"
+                )
         if not controllers:
             command(
                 [
@@ -49,12 +83,12 @@ def connect(manifest: dict[str, Any], host: str) -> list[str]:
                     "-t",
                     "rdma",
                     "-a",
-                    subsystem["address"],
+                    address,
                     "-s",
                     "4420",
                     "-n",
                     subsystem["nqn"],
-                    "--nr-io-queues=128",
+                    f"--nr-io-queues={nr_io_queues}",
                     "--queue-size=128",
                     "--ctrl-loss-tmo=600",
                 ]
@@ -135,7 +169,14 @@ def boot_config(manifest_path: Path, host: str, filesystem_uuid: str) -> None:
     command(["systemctl", "enable", "lmcache-ns6x8.service"])
 
 
-def configure(manifest_path: Path, host: str, create: bool, destroy: bool) -> None:
+def configure(
+    manifest_path: Path,
+    host: str,
+    create: bool,
+    destroy: bool,
+    nr_io_queues: int = 128,
+    via_address: str = "",
+) -> None:
     """Create a private array only when authorized, or restore its saved identity."""
     manifest = json.loads(manifest_path.read_text())
     private_members(manifest, host)
@@ -143,7 +184,7 @@ def configure(manifest_path: Path, host: str, create: bool, destroy: bool) -> No
         raise ValueError("Creation requires --destroy-corpus")
     if any(not row.get("verified") for row in manifest["drives"]):
         raise ValueError("Target native namespace verification is incomplete")
-    devices = connect(manifest, host)
+    devices = connect(manifest, host, nr_io_queues, via_address)
     state_path = manifest_path.parent / f"{host}-array.json"
     md = Path("/dev/md0")
     if create:
@@ -230,6 +271,12 @@ def main() -> None:
     parser.add_argument("--manifest", required=True, type=Path)
     parser.add_argument("--host", required=True, choices=[f"mmgi{i}" for i in range(6)])
     parser.add_argument("--destroy-corpus", action="store_true")
+    parser.add_argument("--nr-io-queues", type=int, default=128)
+    parser.add_argument(
+        "--via-address",
+        default="",
+        help="connect every subsystem through this target port address",
+    )
     args = parser.parse_args()
     try:
         if args.action == "validate":
@@ -240,7 +287,12 @@ def main() -> None:
             )
         else:
             configure(
-                args.manifest, args.host, args.action == "create", args.destroy_corpus
+                args.manifest,
+                args.host,
+                args.action == "create",
+                args.destroy_corpus,
+                args.nr_io_queues,
+                args.via_address,
             )
     except (ValueError, KeyError, OSError, subprocess.CalledProcessError) as error:
         print(f"ABORT: {error}", file=sys.stderr)
