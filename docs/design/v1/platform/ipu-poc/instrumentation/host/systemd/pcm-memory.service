@@ -4,3 +4,6 @@ Description=Refresh Intel PCM memory-bandwidth textfile for node_exporter
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/pcm_memory_textfile.sh
+# PCM visits every CPU; under load the FIFO-50 irdma CEQ threads delay each sample by tens of seconds.
+CPUSchedulingPolicy=fifo
+CPUSchedulingPriority=51

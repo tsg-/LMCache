@@ -3,4 +3,7 @@ Description=Refresh irdma hw_counters textfile for node_exporter
 
 [Service]
 Type=oneshot
+EnvironmentFile=-/etc/default/rdma-hwcounters
 ExecStart=/usr/local/bin/rdma_hwcounters_textfile.sh
+TimeoutStartSec=8s
+TimeoutStopSec=2s

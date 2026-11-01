@@ -1,31 +1,46 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-OUT_DIR="/var/lib/node_exporter/textfile"
+OUT_DIR="${OUT_DIR:-/var/lib/node_exporter/textfile}"
 OUT_FILE="$OUT_DIR/pcm_pcie.prom"
 find "$OUT_DIR" -maxdepth 1 -type f -name 'pcm_pcie.prom.??????' \
     -mmin +1 -delete
 TMP_FILE="$(mktemp "$OUT_DIR/pcm_pcie.prom.XXXXXX")"
 CSV_FILE="$(mktemp /tmp/pcm_pcie.XXXXXX.csv)"
 PCM_PCIE_BIN="${PCM_PCIE_BIN:-/usr/local/bin/pcm-pcie-20260811}"
+PCM_PCIE_TIMEOUT_SECONDS="${PCM_PCIE_TIMEOUT_SECONDS:-5}"
+START_TIMESTAMP="$(date +%s)"
 
 trap 'rm -f "$TMP_FILE" "$CSV_FILE"' EXIT
+
+publish_timing() {
+    local end_timestamp
+    end_timestamp="$(date +%s)"
+    echo "# HELP pcm_pcie_collector_start_timestamp_seconds Unix timestamp before starting PCM (not an exact PMU boundary)"
+    echo "# TYPE pcm_pcie_collector_start_timestamp_seconds gauge"
+    printf 'pcm_pcie_collector_start_timestamp_seconds %s\n' "$START_TIMESTAMP"
+    echo "# HELP pcm_pcie_collector_duration_seconds Wall-clock collector duration with one-second resolution"
+    echo "# TYPE pcm_pcie_collector_duration_seconds gauge"
+    printf 'pcm_pcie_collector_duration_seconds %s\n' "$((end_timestamp - START_TIMESTAMP))"
+    echo "# HELP pcm_pcie_collector_timestamp_seconds Unix timestamp of the collector attempt"
+    echo "# TYPE pcm_pcie_collector_timestamp_seconds gauge"
+    printf 'pcm_pcie_collector_timestamp_seconds %s\n' "$end_timestamp"
+}
 
 publish_failure() {
     {
         echo "# HELP pcm_pcie_collector_success 1 when the latest PCM PCIe sample succeeded"
         echo "# TYPE pcm_pcie_collector_success gauge"
         echo "pcm_pcie_collector_success 0"
-        echo "# HELP pcm_pcie_collector_timestamp_seconds Unix timestamp of the collector attempt"
-        echo "# TYPE pcm_pcie_collector_timestamp_seconds gauge"
-        printf 'pcm_pcie_collector_timestamp_seconds %s\n' "$(date +%s)"
+        publish_timing
     } > "$TMP_FILE"
     chmod 0644 "$TMP_FILE"
     mv "$TMP_FILE" "$OUT_FILE"
 }
 
 if [[ ! -x "$PCM_PCIE_BIN" ]] ||
-    ! "$PCM_PCIE_BIN" 1 -B -e -csv="$CSV_FILE" -i=1 >/dev/null 2>&1; then
+    ! timeout --kill-after=1s "$PCM_PCIE_TIMEOUT_SECONDS" \
+        "$PCM_PCIE_BIN" 1 -B -e -csv="$CSV_FILE" -i=1 >/dev/null 2>&1; then
     publish_failure
     exit 1
 fi
@@ -66,15 +81,13 @@ if ! samples="$(
 fi
 
 {
-    echo "# HELP pcm_pcie_bandwidth_bytes_per_second PCM PCIe bandwidth class from a one-second sample"
+    echo "# HELP pcm_pcie_bandwidth_bytes_per_second PCM PCIe bandwidth class from a bounded PCM report"
     echo "# TYPE pcm_pcie_bandwidth_bytes_per_second gauge"
     printf '%s\n' "$samples"
     echo "# HELP pcm_pcie_collector_success 1 when the latest PCM PCIe sample succeeded"
     echo "# TYPE pcm_pcie_collector_success gauge"
     echo "pcm_pcie_collector_success 1"
-    echo "# HELP pcm_pcie_collector_timestamp_seconds Unix timestamp of the latest PCM PCIe sample"
-    echo "# TYPE pcm_pcie_collector_timestamp_seconds gauge"
-    printf 'pcm_pcie_collector_timestamp_seconds %s\n' "$(date +%s)"
+    publish_timing
 } > "$TMP_FILE"
 
 chmod 0644 "$TMP_FILE"

@@ -1,0 +1,15 @@
+[Unit]
+Description=Forward mmgi4 node telemetry to the monitoring Docker bridge
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=TUNNEL_BIND_ADDR=172.17.0.1
+EnvironmentFile=-/etc/default/lmcache-mmgi4-telemetry-tunnel
+ExecStart=/usr/bin/bash -c 'exec /usr/bin/ssh -F /root/.ssh/lmcache-6x2-tunnels.conf -N -T -o BatchMode=yes -o ConnectTimeout=6 -o ControlMaster=no -o ControlPath=none -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -L ${TUNNEL_BIND_ADDR}:19201:127.0.0.1:9100 lmcache6x2-mmgi4'
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

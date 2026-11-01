@@ -1,5 +1,7 @@
 [Unit]
 Description=Refresh NIC ethtool counters textfile for node_exporter
+# Allow the one-second timer to run within systemd's start-limit window.
+StartLimitBurst=20
 
 [Service]
 Type=oneshot

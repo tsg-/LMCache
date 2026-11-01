@@ -40,16 +40,18 @@
 
 set -euo pipefail
 
-OUT_DIR="/var/lib/node_exporter/textfile"
+OUT_DIR="${OUT_DIR:-/var/lib/node_exporter/textfile}"
+SYSFS_ROOT="${SYSFS_ROOT:-/sys}"
 OUT_FILE="$OUT_DIR/rdma_hwcounters.prom"
 TMP_FILE="$(mktemp "$OUT_DIR/rdma_hwcounters.prom.XXXXXX")"
 
 trap 'rm -f "$TMP_FILE"' EXIT
 
 {
+    count=0
     echo "# HELP rdma_hw_counter irdma per-port RDMA hardware counter"
     echo "# TYPE rdma_hw_counter counter"
-    for dev_path in /sys/class/infiniband/*; do
+    for dev_path in "$SYSFS_ROOT"/class/infiniband/*; do
         [ -d "$dev_path" ] || continue
         dev=$(basename "$dev_path")
         for port_path in "$dev_path"/ports/*; do
@@ -64,6 +66,7 @@ trap 'rm -f "$TMP_FILE"' EXIT
                 esac
                 printf 'rdma_hw_counter{device="%s",port="%s",counter="%s"} %s\n' \
                     "$dev" "$port" "$name" "$val"
+                count=$((count + 1))
             done
             # Link state as a gauge alongside, so a dead link is visible.
             state=$(cat "$port_path/state" 2>/dev/null || echo "")
@@ -74,6 +77,16 @@ trap 'rm -f "$TMP_FILE"' EXIT
             printf 'rdma_port_up{device="%s",port="%s"} %s\n' "$dev" "$port" "$up"
         done
     done
+    echo "# HELP rdma_hw_collector_success 1 when hardware counters were collected"
+    echo "# TYPE rdma_hw_collector_success gauge"
+    if [ "$count" -gt 0 ]; then
+        echo "rdma_hw_collector_success 1"
+    else
+        echo "rdma_hw_collector_success 0"
+    fi
+    echo "# HELP rdma_hw_collector_timestamp_seconds Unix timestamp of the collector attempt"
+    echo "# TYPE rdma_hw_collector_timestamp_seconds gauge"
+    printf 'rdma_hw_collector_timestamp_seconds %s\n' "$(date +%s)"
 } > "$TMP_FILE"
 
 chmod 0644 "$TMP_FILE"

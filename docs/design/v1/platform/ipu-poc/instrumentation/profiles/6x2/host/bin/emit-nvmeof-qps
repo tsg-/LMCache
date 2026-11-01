@@ -9,7 +9,7 @@ trap 'rm -f "$temporary"' EXIT
 total=0
 for controller in /sys/class/nvme/nvme[0-9]*; do
     [ -r "$controller/subsysnqn" ] || continue
-    grep -qE '^nqn\.2026-10\.(lab\.mmgt(\.6x2|2):|io\.lmcache\.mmg\.ns6x8:)' "$controller/subsysnqn" || continue
+    grep -qE '^nqn\.2026-10\.(lab\.mmgt(\.6x2|2):|io\.lmcache\.)' "$controller/subsysnqn" || continue
     queue_count=$(cat "$controller/queue_count")
     [ "$queue_count" -gt 0 ] || continue
     total=$((total + queue_count - 1))

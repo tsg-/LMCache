@@ -115,15 +115,15 @@ fi
 
 COLLECTOR_CHECKS="${COLLECTOR_CHECKS-\
 mmgt:acc_stats.prom:90 mmgt:mmgt_nic.prom:15 mmgt:numa_stats.prom:15 \
-mmgt:pcm_memory.prom:15 mmgt:pcm_pcie.prom:15 mmgt:nvme_stats.prom:45 \
+mmgt:pcm_memory.prom:15 mmgt:pcm_pcie.prom:15 mmgt:nvme_stats.prom:45 mmgt:rdma_hwcounters.prom:15 \
 mmgt2:acc_stats.prom:90 mmgt2:mmgt_nic.prom:15 mmgt2:numa_stats.prom:15 \
-mmgt2:pcm_memory.prom:15 mmgt2:pcm_pcie.prom:15 mmgt2:nvme_stats.prom:45 \
-mmgi0:acc_stats.prom:90 mmgi0:nvmeof_qp.prom:90 \
-mmgi1:acc_stats.prom:90 mmgi1:nvmeof_qp.prom:90 \
-mmgi2:acc_stats.prom:90 mmgi2:nvmeof_qp.prom:90 \
-mmgi3:acc_stats.prom:90 mmgi3:nvmeof_qp.prom:90 \
-mmgi4:acc_stats.prom:90 mmgi4:nvmeof_qps.prom:30 \
-mmgi5:acc_stats.prom:90 mmgi5:nvmeof_qps.prom:30}"
+mmgt2:pcm_memory.prom:15 mmgt2:pcm_pcie.prom:15 mmgt2:nvme_stats.prom:45 mmgt2:rdma_hwcounters.prom:15 \
+mmgi0:acc_stats.prom:90 mmgi0:nvmeof_qp.prom:90 mmgi0:acc_transport.prom:30 mmgi0:rdma_hwcounters.prom:15 \
+mmgi1:acc_stats.prom:90 mmgi1:nvmeof_qp.prom:90 mmgi1:acc_transport.prom:30 mmgi1:rdma_hwcounters.prom:15 \
+mmgi2:acc_stats.prom:90 mmgi2:nvmeof_qp.prom:90 mmgi2:acc_transport.prom:30 mmgi2:rdma_hwcounters.prom:15 \
+mmgi3:acc_stats.prom:90 mmgi3:nvmeof_qp.prom:90 mmgi3:acc_transport.prom:30 mmgi3:rdma_hwcounters.prom:15 mmgi3:nvme_stats.prom:45 \
+mmgi4:acc_stats.prom:90 mmgi4:nvmeof_qps.prom:30 mmgi4:acc_transport.prom:30 mmgi4:rdma_hwcounters.prom:15 \
+mmgi5:acc_stats.prom:90 mmgi5:nvmeof_qps.prom:30 mmgi5:acc_transport.prom:30 mmgi5:rdma_hwcounters.prom:15}"
 echo "== collector freshness =="
 now="$(date +%s)"
 for host in mmgt mmgt2 mmgi0 mmgi1 mmgi2 mmgi3 mmgi4 mmgi5; do
@@ -139,13 +139,18 @@ for host in mmgt mmgt2 mmgi0 mmgi1 mmgi2 mmgi3 mmgi4 mmgi5; do
     done
     [ -n "$specs" ] || continue
     ssh_host "$host"
-    mtimes="$(ssh "${SSH_OPTIONS[@]}" -o BatchMode=yes -o ConnectTimeout=6 \
-        "$SSH_TARGET" "stat -c '%n %Y' $paths" 2>/dev/null || true)"
+    # A collector that fails still rewrites its file, so freshness alone cannot detect it.
+    snapshot="$(ssh "${SSH_OPTIONS[@]}" -o BatchMode=yes -o ConnectTimeout=6 \
+        "$SSH_TARGET" "stat -c '%n %Y' $paths; grep -H '_collector_success 0\$' $paths" \
+        2>/dev/null || true)"
     for spec in $specs; do
         path="$textfile_dir/${spec%%:*}"
-        mtime="$(awk -v path="$path" '$1 == path {print $2}' <<<"$mtimes")"
+        mtime="$(awk -v path="$path" '$1 == path {print $2; exit}' <<<"$snapshot")"
         if [ -z "$mtime" ] || [ "$((now - mtime))" -gt "${spec##*:}" ]; then
             echo "  $host: stale or missing ${spec%%:*}"
+            failures=$((failures + 1))
+        elif grep -qF "$path:" <<<"$snapshot"; then
+            echo "  $host: ${spec%%:*} reports a failed collection"
             failures=$((failures + 1))
         fi
     done
