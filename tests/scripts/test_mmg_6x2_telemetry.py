@@ -42,6 +42,14 @@ EMITTER = INSTRUMENTATION / "profiles/6x2/host/bin/emit-nvmeof-qps"
             ],
             0,
         ),
+        (
+            [
+                ("nqn.2026-10.io.lmcache.goal6.goal6-4i5c-20261020h:d0-a0", 3),
+                ("nqn.2026-10.io.lmcache.goal6.goal6-4i5c-20261020h:d3-a4", 3),
+                ("nqn.2026-10.unrelated:test", 3),
+            ],
+            4,
+        ),
     ],
 )
 def test_qp_emitter_counts_only_workload_io_queues(

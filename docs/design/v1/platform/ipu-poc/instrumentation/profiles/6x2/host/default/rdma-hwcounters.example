@@ -1,0 +1,2 @@
+# Textfile directory used by the mmgi4/mmgi5 profile exporters.
+OUT_DIR=/var/lib/lmcache-6x2/textfile

@@ -4,3 +4,8 @@ Description=Refresh PCM PCIe/DDIO textfile for node_exporter
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/pcm_pcie_textfile.sh
+TimeoutStartSec=8s
+TimeoutStopSec=2s
+# PCM visits every CPU; under load the FIFO-50 irdma CEQ threads starve it past its timeout.
+CPUSchedulingPolicy=fifo
+CPUSchedulingPriority=51

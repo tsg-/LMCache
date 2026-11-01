@@ -15,6 +15,7 @@ ExecStart=/usr/local/bin/node_exporter \
     --collector.systemd \
     --no-collector.wifi \
     --no-collector.bonding \
+    --no-collector.infiniband \
     --no-collector.zfs
 Restart=on-failure
 RestartSec=5s
