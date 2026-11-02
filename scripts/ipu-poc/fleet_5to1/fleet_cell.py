@@ -49,7 +49,7 @@ def wait_until(t):
         time.sleep(min(1.0, t - time.time()))
 
 
-def bench_cmd(py, repo, adapter, prefix, in_flight, extra, out):
+def bench_cmd(py, profile, adapter, prefix, in_flight, extra, out):
     return [
         "numactl",
         "--cpunodebind=1",
@@ -62,7 +62,7 @@ def bench_cmd(py, repo, adapter, prefix, in_flight, extra, out):
         "--l2-adapter",
         json.dumps(adapter, sort_keys=True),
         "--kvcache-shape-profile",
-        f"{repo}/{PROFILE_REL}",
+        profile,
         "--key-prefix",
         prefix,
         "--in-flight",
@@ -89,7 +89,7 @@ def run_lmc(a, host, outdir):
     seed = subprocess.run(
         bench_cmd(
             a.py,
-            a.repo,
+            a.profile or f"{a.repo}/{PROFILE_REL}",
             adapter,
             prefix,
             a.in_flight,
@@ -133,7 +133,7 @@ def run_lmc(a, host, outdir):
         p = subprocess.Popen(
             bench_cmd(
                 a.py,
-                a.repo,
+                a.profile or f"{a.repo}/{PROFILE_REL}",
                 adapter,
                 prefix,
                 a.in_flight,
@@ -239,7 +239,7 @@ def run_fio(a, host):
             "--group_reporting=1",
             "--invalidate=1",
             "--output-format=json",
-            "--bs=256k",
+            f"--bs={a.bs}",
             *(["--rw=randread"] if a.read_only else ["--rw=randrw", "--rwmixread=83"]),
             "--time_based=1",
             f"--runtime={a.dur}",
@@ -275,6 +275,8 @@ def main():
     ap.add_argument("--py", default="")
     ap.add_argument("--repo", default="")
     ap.add_argument("--read-only", action="store_true")
+    ap.add_argument("--profile", default="", help="KV shape profile path")
+    ap.add_argument("--bs", default="256k", help="fio block size")
     ap.add_argument("--pythonpath", default="/root/dig5to1/lmc_copy:/root/dig5to1/mod")
     a = ap.parse_args()
     # fs_uring holds one fd per in-flight read; a 1024 soft limit caps in-flight

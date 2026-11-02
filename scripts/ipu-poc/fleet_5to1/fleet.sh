@@ -1,18 +1,18 @@
 #!/bin/bash
-# Usage: [PYPATH=...] [RO=1] fleet.sh <mode> <name> [dur] [adapter-json] [in_flight] [retention] [trim_every]
+# Usage: [PYPATH=...] [RO=1] [PROFILE=path] [BS=256k] fleet.sh <mode> <name> [dur] [adapter-json] [in_flight] [retention] [trim_every]
 # Launches one synchronized cell on all six initiators, waits, prints the sum.
 set -u
 MODE=$1; NAME=$2; DUR=${3:-600}; ADAPTER=${4:-}; IF=${5:-16}; RET=${6:-20000}; TRIM=${7:-30}
 PYPATH=${PYPATH:-/root/dig5to1/lmc_copy:/root/dig5to1/mod}
 HOSTS="mmgi0 mmgi1 mmgi2 mmgi3 mmgi4 mmgi5"
-START=$(( $(date +%s) + 120 ))
+START=$(( $(date +%s) + ${START_DELAY:-120} ))
 SSH="ssh -o BatchMode=yes -o ControlPath=none -o ServerAliveInterval=30"
 nuse() { $SSH mmgt /home/ssd-span-duration-runner/nuse.sh; }
 echo "nuse_before $(nuse)"
 for h in $HOSTS; do
   case $h in mmgi4|mmgi5) R=/root/LMCache;; *) R=/root/anthropic/LMCache;; esac
   $SSH $h "python3 -I /root/dig5to1/fleet_cell.py $MODE --name $NAME --start-at $START --dur $DUR \
-    --adapter '$ADAPTER' --in-flight $IF --retention $RET --trim-every $TRIM --py $R/.venv-bench-l2/bin/python --repo $R --pythonpath $PYPATH ${RO:+--read-only}" \
+    --adapter '$ADAPTER' --in-flight $IF --retention $RET --trim-every $TRIM --py $R/.venv-bench-l2/bin/python --repo $R --pythonpath $PYPATH ${RO:+--read-only} ${PROFILE:+--profile $PROFILE} --bs ${BS:-256k}" \
     > /tmp/dig5to1/fleet-$NAME-$h.log 2>&1 &
 done
 wait
