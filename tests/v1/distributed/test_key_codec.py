@@ -55,3 +55,19 @@ def test_storage_key_matches_the_generic_template(
     key = ObjectKey(bytes(range(16)), "a/b/c", rank, group, salt, tags=tags)
     template = "{model}@{rank}@{group}@{hash}{suffix}"
     assert encode_storage_key(key) == format_storage_key(key, template)
+
+
+def test_storage_keys_sharing_model_rank_group_stay_distinct() -> None:
+    """Keys differing only in hash, salt or tags encode to their own names."""
+    template = "{model}@{rank}@{group}@{hash}{suffix}"
+    keys = [
+        ObjectKey(chunk_hash.to_bytes(16, "big"), "org/model", 5, 2, salt, tags=tags)
+        for chunk_hash in range(3)
+        for salt in ("", "tenant")
+        for tags in ({}, {"lora": "a1"})
+    ]
+    names = [encode_storage_key(key) for key in keys]
+    assert len(set(names)) == len(keys)
+    for key, name in zip(keys, names, strict=True):
+        assert name == format_storage_key(key, template)
+        assert decode_storage_key(name) == key
