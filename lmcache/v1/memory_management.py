@@ -678,6 +678,12 @@ class TensorMemoryObj(MemoryObj):
         # paths must reset this to None along with the rest of the
         # per-allocation metadata.
         self._used_size_override: Optional[int] = None
+        # byte_array view cache, rebuilt when the buffer address or logical
+        # size changes (allocators may reassign raw_data; set_used_size
+        # narrows the size).
+        self._byte_view_ptr = -1
+        self._byte_view_len = -1
+        self._byte_view = memoryview(b"")
         # Calculate the prefix sum of the group sizes
         # If there are two groups, the prefix sum will be
         # [0, size_of_group_1, size_of_group_1 + size_of_group_2]
@@ -881,6 +887,10 @@ class TensorMemoryObj(MemoryObj):
         # the metadata length.
         num_bytes = self.get_size()
         ptr = self.raw_data.data_ptr()
+        # Building the view costs ~2 us of ctypes work per call; hot L2 load
+        # paths reuse the same objects every submit.
+        if ptr == self._byte_view_ptr and num_bytes == self._byte_view_len:
+            return self._byte_view
         # ctypes does not cache (c_ubyte * N) array types -- each `*` builds a
         # fresh heap type. With this property accessed once per remote put/get,
         # uncached creation leaks ~1-2 kB per call (heap-type metadata is held
@@ -890,7 +900,10 @@ class TensorMemoryObj(MemoryObj):
         arr_type = _get_cached_ubyte_array_type(num_bytes)
         ubyte_ptr = ctypes.cast(ptr, ctypes.POINTER(ctypes.c_ubyte))
         byte_array = arr_type.from_address(ctypes.addressof(ubyte_ptr.contents))
-        return memoryview(byte_array)
+        self._byte_view = memoryview(byte_array)
+        self._byte_view_ptr = ptr
+        self._byte_view_len = num_bytes
+        return self._byte_view
 
     @property
     def data_ptr(self) -> int:

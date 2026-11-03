@@ -420,6 +420,38 @@ def test_byte_array_caches_ctypes_array_type():
         allocator.close()
 
 
+def test_byte_array_reused_until_buffer_or_size_changes():
+    """``byte_array`` returns the same view while the buffer and size are
+    unchanged, and a fresh, correctly sized view after either changes."""
+    allocator = MixedMemoryAllocator(1 << 22)
+    obj = allocator.allocate(torch.Size([4096]), torch.uint8)
+    assert isinstance(obj, TensorMemoryObj)
+    try:
+        first = obj.byte_array
+        assert obj.byte_array is first
+        assert len(first) == 4096
+
+        obj.set_used_size(1024)
+        narrowed = obj.byte_array
+        assert narrowed is not first
+        assert len(narrowed) == 1024
+        assert obj.byte_array is narrowed
+
+        obj.raw_data[:4] = torch.tensor([1, 2, 3, 4], dtype=torch.uint8)
+        assert bytes(obj.byte_array[:4]) == b"\x01\x02\x03\x04"
+
+        replacement = torch.full((4096,), 7, dtype=torch.uint8)
+        original = obj.raw_data
+        obj.raw_data = replacement
+        rebuilt = obj.byte_array
+        assert rebuilt is not narrowed
+        assert bytes(rebuilt[:2]) == b"\x07\x07"
+        obj.raw_data = original
+    finally:
+        obj.ref_count_down()
+        allocator.close()
+
+
 def test_memory_obj_metadata_to_and_from_dict():
     shape1 = torch.Size([128, 10])
     dtype1 = torch.float
