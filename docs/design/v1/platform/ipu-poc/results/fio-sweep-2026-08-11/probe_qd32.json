@@ -1,0 +1,90 @@
+{
+ "context": {
+  "run": "qdprobe32 surface=remote_xfs devices=/mnt/lmcache-stage2/fio-sweep",
+  "host": "I-P00599-B15-P14",
+  "kernel": "5.14.0-427.13.1.el9_4.x86_64",
+  "fio": "fio-3.35",
+  "surface": "remote_xfs",
+  "devices": "/mnt/lmcache-stage2/fio-sweep",
+  "bs_list": "144k",
+  "qd_read": "32 qd_confirm=32 reps=1",
+  "runtime": "12 ramp=4 numjobs=1",
+  "mix_bs": "144k mix_ratios=83 90",
+  "date_utc": "2026-08-11T14:16:24Z",
+  "cells_attempted": "2",
+  "cells_failed": "0",
+  "corpus_before": "874592",
+  "corpus_after": "874592",
+  "finished_utc": "2026-08-11T14:16:59Z"
+ },
+ "cells": [
+  {
+   "cell": "read_remote_xfs_bs144k_qd32_rep1",
+   "kind": "read",
+   "requested_read_pct": 100,
+   "surface": "remote_xfs",
+   "bs": "144k",
+   "bs_bytes": 147456,
+   "qd": 32,
+   "rep": 1,
+   "outstanding_bytes": 4718592,
+   "read_gbps": 94.556931,
+   "write_gbps": 0.0,
+   "total_gbps": 94.556931,
+   "read_iops": 80154.237147,
+   "write_iops": 0.0,
+   "achieved_read_pct": 100.0,
+   "read_lat_mean_ms": 0.391156159767,
+   "read_lat_p99_ms": 0.733184,
+   "write_lat_p99_ms": 0.0,
+   "devices_touched": [
+    "md0",
+    "nvme2n1",
+    "nvme3n2"
+   ],
+   "counter_read_ratio": 0.9839965180672908,
+   "bracket_elapsed_sec": 16.44367265701294,
+   "bracket_overrun": false,
+   "fabric_errors": {
+    "RetransSegs": 0,
+    "Nak Sequence Error": 0,
+    "RTO": 0,
+    "RNR received": 0,
+    "Rcvd Out of order packets": 0,
+    "InProtoErrors": 0
+   },
+   "fabric_counters_missing": [],
+   "bound": "capacity",
+   "accepted": true,
+   "reject_reason": ""
+  }
+ ],
+ "summary": [
+  {
+   "surface": "remote_xfs",
+   "kind": "read",
+   "requested_read_pct": 100,
+   "bs": "144k",
+   "bs_bytes": 147456,
+   "qd": 32,
+   "reps": 1,
+   "bound": "capacity",
+   "total_gbps_mean": 94.556931,
+   "total_gbps_min": 94.556931,
+   "total_gbps_max": 94.556931,
+   "spread_pct": 0.0,
+   "read_gbps_mean": 94.556931,
+   "write_gbps_mean": 0.0,
+   "achieved_read_pct_mean": 100.0,
+   "read_lat_p99_ms_max": 0.733184,
+   "read_iops_mean": 80154.237147,
+   "bracket_overruns": 0,
+   "counter_ratios": [
+    0.984
+   ]
+  }
+ ],
+ "accepted": 1,
+ "total": 1,
+ "corpus_unchanged": true
+}

@@ -1,0 +1,69 @@
+<svg width="624" height="196" viewBox="0 0 624 196" xmlns="http://www.w3.org/2000/svg" font-family="Helvetica, Arial, sans-serif">
+  <!--
+    Setup strip for the 2-page mkp1/mkp2 brief. Authored at 624x196 px so that
+    at 96 dpi it is exactly 6.5 x 2.04 in (the document text column) and the
+    12 px labels land at 9 pt on the page, matching body copy. The full
+    architecture-a-mev-hardware-topology.svg is 1400 units wide; scaled to this
+    column its labels fall to about 5 pt, which is why this exists separately.
+
+    The RAID0 and the filesystem live on the INITIATOR, not the target: mkp1
+    assembles md0 across the two remote namespaces and lays XFS on top, while
+    mkp2 exports raw namespaces with one NQN per drive. See
+    results/mkp1-fsnative-sustained-2026-08-04.md, host table.
+
+    There is no accelerator on either host today: the LMCache client drives the
+    path from 4 KiB-aligned host DRAM, so no GPU or TPU box appears here.
+
+    Every string is budgeted to its box at 10.5 px Helvetica (about 5.4 px per
+    character); the inner boxes are 160-164 px, so nothing here exceeds 30
+    characters. Widen a box before lengthening a label; SVG will not wrap.
+
+    Fills follow the shared role palette: green = DRAM, blue = media, orange =
+    network hardware, white = kernel software.
+  -->
+  <defs>
+    <marker id="arrowR" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="#222222" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="624" height="196" fill="#ffffff"/>
+
+  <!-- Initiator: mkp1. Owns the block stack: md0 stripe, then XFS. -->
+  <rect x="2" y="12" width="180" height="120" rx="5" fill="#fdf1e2" stroke="#222222" stroke-width="1"/>
+  <text x="92" y="30" text-anchor="middle" font-size="12" font-weight="bold" fill="#000000">Initiator</text>
+  <text x="92" y="44" text-anchor="middle" font-size="10.5" fill="#333333">Xeon SPR 6430 + MEV-100 IPU</text>
+  <rect x="12" y="52" width="160" height="21" rx="3" fill="#e8f3e6" stroke="#222222" stroke-width="0.8"/>
+  <text x="92" y="66" text-anchor="middle" font-size="10.5" fill="#000000">LMCache client, host DRAM</text>
+  <rect x="12" y="77" width="160" height="21" rx="3" fill="#ffffff" stroke="#222222" stroke-width="0.8"/>
+  <text x="92" y="91" text-anchor="middle" font-size="10.5" fill="#000000">XFS on RAID0 md0 stripe</text>
+  <rect x="12" y="102" width="160" height="21" rx="3" fill="#ffffff" stroke="#222222" stroke-width="0.8"/>
+  <text x="92" y="116" text-anchor="middle" font-size="10.5" fill="#000000">nvme-rdma, O_DIRECT 4 KiB</text>
+
+  <!-- STORE: bytes move initiator to target -->
+  <line x1="186" y1="52" x2="434" y2="52" stroke="#222222" stroke-width="1.2" marker-end="url(#arrowR)"/>
+  <text x="310" y="46" text-anchor="middle" font-size="11" font-weight="bold" fill="#000000">STORE</text>
+  <text x="310" y="66" text-anchor="middle" font-size="10" fill="#333333">NVMe-oF WRITE, target <tspan font-size="10" font-weight="bold" fill="#000000">RDMA-READs</tspan></text>
+
+  <!-- RETRIEVE: bytes move target to initiator -->
+  <line x1="434" y1="104" x2="186" y2="104" stroke="#222222" stroke-width="1.2" marker-end="url(#arrowR)"/>
+  <text x="310" y="98" text-anchor="middle" font-size="11" font-weight="bold" fill="#000000">RETRIEVE</text>
+  <text x="310" y="118" text-anchor="middle" font-size="10" fill="#333333">NVMe-oF READ, target <tspan font-size="10" font-weight="bold" fill="#000000">RDMA-WRITEs</tspan></text>
+
+  <!-- Target: mkp2. Raw namespaces only, no filesystem. -->
+  <rect x="438" y="12" width="184" height="120" rx="5" fill="#fdf1e2" stroke="#222222" stroke-width="1"/>
+  <text x="530" y="30" text-anchor="middle" font-size="12" font-weight="bold" fill="#000000">NVMe-oF target</text>
+  <text x="530" y="44" text-anchor="middle" font-size="10.5" fill="#333333">Xeon SPR 6430 + MEV-100 IPU</text>
+  <rect x="448" y="52" width="164" height="21" rx="3" fill="#dceaf7" stroke="#222222" stroke-width="0.8"/>
+  <text x="530" y="66" text-anchor="middle" font-size="10.5" fill="#000000">2x PM9A3 1.92 TB, Gen4 x4</text>
+  <rect x="448" y="77" width="164" height="21" rx="3" fill="#ffffff" stroke="#222222" stroke-width="0.8"/>
+  <text x="530" y="91" text-anchor="middle" font-size="10.5" fill="#000000">raw ns, one NQN per drive</text>
+  <rect x="448" y="102" width="164" height="21" rx="3" fill="#ffffff" stroke="#222222" stroke-width="0.8"/>
+  <text x="530" y="116" text-anchor="middle" font-size="10.5" fill="#000000">nvmet-rdma, no filesystem</text>
+
+  <!-- The link under test -->
+  <rect x="176" y="144" width="268" height="20" rx="3" fill="#fdf1e2" stroke="#222222" stroke-width="0.8"/>
+  <text x="310" y="158" text-anchor="middle" font-size="10.5" fill="#000000">Falcon RDMA offload, 1x 100 GbE, MTU 4096</text>
+
+  <text x="310" y="182" text-anchor="middle" font-size="10" fill="#666666">No cache logic runs on the IPU</text>
+</svg>
