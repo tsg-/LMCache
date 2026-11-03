@@ -22,6 +22,8 @@ FIO = "/root/goal5-overnight/bin/fio"
 FIO_ENGINE = "/root/goal5-overnight/bin/fio-libaio.so"
 PROFILE_REL = "scripts/ipu-poc/models/mixtral_8x22b_fp8.yaml"
 SEED_SUBMITS = 256
+# Loopback ports the 6x2 telemetry stack tunnels into Prometheus (job lmcache_bench_6x2).
+METRICS_PORT = {"mmgi0": 9101, "mmgi1": 9102, "mmgi2": 9103, "mmgi3": 9104, "mmgi4": 9105, "mmgi5": 9106}
 
 
 def host_name():
@@ -123,6 +125,9 @@ def run_lmc(a, host, outdir):
             str(a.retention),
             "--no-skip-verify",
         ]
+    port = METRICS_PORT[host] if a.metrics_port < 0 else a.metrics_port
+    if port:
+        extra += ["--serve-metrics", str(port)]
     t0 = time.time()
     # wait4 gives the bench child's own rusage; RUSAGE_CHILDREN would also
     # count the fstrim children the trim thread reaps meanwhile.
@@ -275,6 +280,8 @@ def main():
     ap.add_argument("--py", default="")
     ap.add_argument("--repo", default="")
     ap.add_argument("--read-only", action="store_true")
+    ap.add_argument("--metrics-port", type=int, default=-1,
+                    help="bench l2 --serve-metrics port; -1 = per-host 6x2 port, 0 = off")
     ap.add_argument("--profile", default="", help="KV shape profile path")
     ap.add_argument("--bs", default="256k", help="fio block size")
     ap.add_argument("--pythonpath", default="/root/dig5to1/lmc_copy:/root/dig5to1/mod")
