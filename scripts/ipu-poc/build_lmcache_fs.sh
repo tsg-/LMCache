@@ -38,7 +38,7 @@ if [ "${NO_LIBURING:-0}" != 1 ]; then
   fi
   DEFS+=(-DLMCACHE_HAVE_LIBURING=1)
   INCS+=(-I"$PREFIX/include")
-  LIBS+=("$PREFIX/lib/liburing.a")
+  LIBS+=("$PREFIX/lib/liburing.a" -Wl,--exclude-libs,liburing.a)
 fi
 if [ "${LMCACHE_FS_FAULT_INJECTION:-0}" = 1 ]; then
   DEFS+=(-DLMCACHE_FS_FAULT_INJECTION=1)

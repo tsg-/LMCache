@@ -100,7 +100,13 @@ def _compiler() -> list[str]:
     Returns:
         The command words, or an empty list when the compiler is not found.
     """
-    words = shlex.split(os.environ.get("CC", "cc"))
+    try:
+        words = shlex.split(os.environ.get("CC", "cc"))
+    except ValueError as exc:
+        logger.warning(
+            "lmcache_fs: cannot parse $CC (%s); treating as no compiler", exc
+        )
+        return []
     if not words or shutil.which(words[0]) is None:
         return []
     return words
@@ -197,7 +203,7 @@ def _find_liburing() -> list[tuple[Path, Path]]:
         return []
     explicit = os.environ.get("LMCACHE_LIBURING_DIR", "")
     if not explicit and os.environ.get("LMCACHE_WITH_LIBURING") != "1":
-        logger.warning(
+        logger.info(
             "lmcache_fs: io_uring engine compiled out "
             "(set LMCACHE_WITH_LIBURING=1 or LMCACHE_LIBURING_DIR to enable)"
         )
@@ -221,7 +227,7 @@ def _find_liburing() -> list[tuple[Path, Path]]:
     if explicit:
         logger.warning(
             "lmcache_fs: LMCACHE_LIBURING_DIR=%s has no usable liburing >= 2.2 "
-            "(need include/liburing.h and lib/liburing.a); "
+            "(need include/liburing.h and lib/ or lib64/liburing.a); "
             "io_uring engine compiled out",
             explicit,
         )
@@ -282,6 +288,11 @@ def build_common_cpp(
                 include_dirs=[str(ROOT_DIR / d) for d in spec.include_dirs]
                 + extra_includes,
                 extra_objects=extra_objects,
+                # Keep the static liburing symbols out of the .so's dynamic
+                # table so they cannot interpose another liburing in-process.
+                extra_link_args=(
+                    ["-Wl,--exclude-libs,liburing.a"] if extra_objects else []
+                ),
                 extra_compile_args={
                     "cxx": (
                         (profile.extra_cxx_flags_for(spec) if profile else [])
