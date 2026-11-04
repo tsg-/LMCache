@@ -34,6 +34,12 @@ static constexpr const char* TMP_EXT = ".tmp";
 // docs/design/v1/distributed/l2_adapters/fs_native_read_depth.md.
 static constexpr size_t kDefaultReadMaxBytesInFlight = size_t{1536} << 20;
 
+// Descriptors kept free for the store lanes and the process when sizing
+// num_workers x io_depth against RLIMIT_NOFILE.
+static constexpr size_t kReadFdMargin = 1024;
+
+class UringReader;
+
 // Per-worker connection state for the FS connector.
 // Each worker maintains its own I/O buffer for O_DIRECT.
 struct WorkerFSConn {
@@ -46,6 +52,9 @@ struct WorkerFSConn {
   size_t read_ahead_size = 0;
   // 0 keeps every object directly under base_path.
   size_t num_shard_dirs = 0;
+  // The worker's ring under the io_uring engine, claimed at its first get;
+  // store and delete lane workers never run gets and never get one.
+  UringReader* reader = nullptr;
 };
 
 class FSConnector : public ConnectorBase<WorkerFSConn> {
@@ -69,20 +78,39 @@ class FSConnector : public ConnectorBase<WorkerFSConn> {
   // store_workers / delete_workers > 0 give those operations dedicated
   //   worker lanes, so their blocking metadata work does not queue ahead of
   //   loads in the shared num_workers pool.
+  // read_engine: "pool" runs reads as above.  "io_uring" gives each of the
+  //   num_workers shared workers its own ring and pipelines a whole batch
+  //   through it; the read pool is not started, and the byte budget
+  //   (read_max_bytes_in_flight, 0 = kDefaultReadMaxBytesInFlight) applies
+  //   whatever num_read_workers is.  Construction fails if the engine is
+  //   compiled out, a ring cannot be created, or num_workers x io_depth +
+  //   kReadFdMargin exceeds the RLIMIT_NOFILE soft limit.  "auto" is
+  //   "io_uring" where that works, lowering io_depth to fit the descriptor
+  //   limit, and "pool" otherwise.
+  // io_depth: reads in flight per ring, in [1, 4096]; ignored by the pool.
   FSConnector(std::string base_path, int num_workers,
               std::string relative_tmp_dir = "", bool use_odirect = false,
               size_t read_ahead_size = 0, int num_read_workers = 0,
               size_t read_max_bytes_in_flight = 0, size_t num_shard_dirs = 0,
               size_t recycle_max_files = 0, int store_workers = 0,
-              int delete_workers = 0);
+              int delete_workers = 0, std::string read_engine = "pool",
+              unsigned io_depth = 64);
   ~FSConnector() override;
 
-  // The byte budget in force, or 0 when there is no read pool.
+  // The byte budget in force, or 0 on the legacy path, which has none.
   size_t read_budget_bytes() const;
 
-  // The most bytes the read pool has had in flight at once; 0 when there is
-  // no read pool or nothing has been read.
+  // The most bytes the engine in use has had in flight at once; 0 on the
+  // legacy path or before anything has been read.
   size_t read_peak_bytes() const;
+
+  // The read engine in use: "io_uring", "pool", or "legacy" (the pool
+  // engine with num_read_workers 0, reading on the worker threads).
+  std::string read_engine() const;
+
+  // Reads in flight per ring under the io_uring engine, after any lowering
+  // for RLIMIT_NOFILE; 0 under the other engines.
+  unsigned io_depth() const;
 
  protected:
   WorkerFSConn create_connection() override;
@@ -158,6 +186,15 @@ class FSConnector : public ConnectorBase<WorkerFSConn> {
   // soon as the byte budget has room, and wait for all of them.
   void do_batch_get_pooled(const Request& req);
 
+  // Read a tile through the worker's ring; objects the ring does not take
+  // (see do_batch_get_uring in connector.cpp) are read synchronously
+  // under the same budget.
+  void do_batch_get_uring(WorkerFSConn& conn, const Request& req);
+
+  // Picks the engine for read_engine and builds its rings; leaves
+  // readers_ empty when the pool is to be used.
+  void select_read_engine(const std::string& read_engine, unsigned io_depth);
+
   void start_read_pool(int num_read_workers);
   void stop_read_pool();
   void read_thread_main(WorkerFSConn& conn);
@@ -187,6 +224,22 @@ class FSConnector : public ConnectorBase<WorkerFSConn> {
   ReadTask* read_queue_head_ = nullptr;
   ReadTask* read_queue_tail_ = nullptr;
   bool read_stop_ = false;
+
+  // io_uring engine.  Its own self-locking budget, so no ring read ever
+  // takes read_mu_; only one engine is active per connector.  readers_ is
+  // filled before start_workers() and never changes after, and is empty
+  // unless the engine is io_uring.
+  ReadBudget uring_budget_;
+#ifdef LMCACHE_HAVE_LIBURING
+  std::vector<std::unique_ptr<UringReader>> readers_;
+#endif
+  std::atomic<size_t> next_reader_{0};
+  bool use_uring_ = false;
+  unsigned io_depth_ = 0;  // effective, 0 unless use_uring_
+  std::string read_engine_;
+#ifdef LMCACHE_FS_FAULT_INJECTION
+  unsigned fault_delay_ms_ = 0;
+#endif
 };
 
 }  // namespace connector

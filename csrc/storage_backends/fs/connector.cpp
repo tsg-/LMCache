@@ -1,13 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "connector.h"
+#include <sys/resource.h>
 #include <cerrno>
 #include <cstdint>
 #include <cstdio>
+#include <exception>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include "../keys.h"
+#include "fault_injection.h"
+#include "uring_reader.h"
 
 namespace lmcache {
 namespace connector {
@@ -224,7 +228,8 @@ FSConnector::FSConnector(std::string base_path, int num_workers,
                          size_t read_ahead_size, int num_read_workers,
                          size_t read_max_bytes_in_flight, size_t num_shard_dirs,
                          size_t recycle_max_files, int store_workers,
-                         int delete_workers)
+                         int delete_workers, std::string read_engine,
+                         unsigned io_depth)
     : ConnectorBase(num_workers, lane_config(store_workers, delete_workers)),
       base_path_(std::move(base_path)),
       relative_tmp_dir_(std::move(relative_tmp_dir)),
@@ -235,10 +240,25 @@ FSConnector::FSConnector(std::string base_path, int num_workers,
       recycle_max_files_(recycle_max_files),
       read_budget_(
           effective_read_budget(num_read_workers, read_max_bytes_in_flight),
-          read_mu_) {
+          read_mu_),
+      uring_budget_(read_max_bytes_in_flight == 0 ? kDefaultReadMaxBytesInFlight
+                                                  : read_max_bytes_in_flight) {
   if (num_read_workers < 0) {
     throw std::runtime_error("num_read_workers must be >= 0");
   }
+  if (read_engine != "auto" && read_engine != "io_uring" &&
+      read_engine != "pool") {
+    throw std::invalid_argument(
+        "read_engine must be one of auto, io_uring, pool; got '" + read_engine +
+        "'");
+  }
+  if (io_depth < 1 || io_depth > 4096) {
+    throw std::invalid_argument("io_depth must be in [1, 4096], got " +
+                                std::to_string(io_depth));
+  }
+#ifdef LMCACHE_FS_FAULT_INJECTION
+  fault_delay_ms_ = fs_fault_delay_ms_from_env();
+#endif
 
   // Create base directory
   std::filesystem::create_directories(base_path_);
@@ -284,15 +304,97 @@ FSConnector::FSConnector(std::string base_path, int num_workers,
     }
   }
 
-  // Readers first.  On failure join whatever started: the destructor does
-  // not run for a half-built object.
+  // Rings or readers first, before any worker can take a get.  On failure
+  // join whatever started: the destructor does not run for a half-built
+  // object.
   try {
-    start_read_pool(num_read_workers);
+    select_read_engine(read_engine, io_depth);
+    if (use_uring_) {
+      read_engine_ = "io_uring";
+    } else {
+      start_read_pool(num_read_workers);
+      read_engine_ = num_read_workers > 0 ? "pool" : "legacy";
+    }
     start_workers();  // IMPORTANT: call at END of constructor
   } catch (...) {
     close();
     throw;
   }
+}
+
+void FSConnector::select_read_engine(const std::string& read_engine,
+                                     unsigned io_depth) {
+  if (read_engine == "pool") {
+    return;
+  }
+  const bool forced = read_engine == "io_uring";
+#ifndef LMCACHE_HAVE_LIBURING
+  (void)io_depth;
+  if (forced) {
+    throw std::runtime_error(
+        "read_engine io_uring requested, but lmcache_fs was built without "
+        "liburing, so the io_uring engine is compiled out");
+  }
+#else
+  const uint64_t workers = static_cast<uint64_t>(num_workers_);
+  struct rlimit nofile;
+  if (::getrlimit(RLIMIT_NOFILE, &nofile) == 0 &&
+      nofile.rlim_cur != RLIM_INFINITY) {
+    const uint64_t soft = static_cast<uint64_t>(nofile.rlim_cur);
+    const uint64_t need = workers * io_depth + kReadFdMargin;
+    if (need > soft) {
+      if (forced) {
+        throw std::runtime_error(
+            "read_engine io_uring: num_workers x io_depth + " +
+            std::to_string(kReadFdMargin) + " = " + std::to_string(workers) +
+            " x " + std::to_string(io_depth) + " + " +
+            std::to_string(kReadFdMargin) + " = " + std::to_string(need) +
+            " open files exceeds the RLIMIT_NOFILE soft limit of " +
+            std::to_string(soft) +
+            "; raise the limit or lower io_depth or num_workers");
+      }
+      const uint64_t fit =
+          soft > kReadFdMargin ? (soft - kReadFdMargin) / workers : 0;
+      if (fit == 0) {
+        fprintf(stderr,
+                "[LMCache FS] read_engine auto: RLIMIT_NOFILE soft limit %llu "
+                "leaves no descriptors for %llu io_uring workers; using the "
+                "read pool\n",
+                static_cast<unsigned long long>(soft),
+                static_cast<unsigned long long>(workers));
+        return;
+      }
+      fprintf(stderr,
+              "[LMCache FS] read_engine auto: io_depth lowered from %u to "
+              "%llu so %llu workers fit RLIMIT_NOFILE %llu\n",
+              io_depth, static_cast<unsigned long long>(fit),
+              static_cast<unsigned long long>(workers),
+              static_cast<unsigned long long>(soft));
+      io_depth = static_cast<unsigned>(fit);
+    }
+  }
+  // All rings or none: a worker without one could not serve gets.
+  try {
+    readers_.reserve(workers);
+    for (uint64_t i = 0; i < workers; ++i) {
+      readers_.push_back(
+          std::make_unique<UringReader>(io_depth, uring_budget_));
+    }
+  } catch (const std::exception& e) {
+    readers_.clear();
+    if (forced) {
+      throw std::runtime_error(
+          std::string("read_engine io_uring is unavailable: ") + e.what());
+    }
+    fprintf(stderr,
+            "[LMCache FS] read_engine auto: io_uring is unavailable (%s); "
+            "using the read pool\n",
+            e.what());
+    return;
+  }
+  use_uring_ = true;
+  io_depth_ = io_depth;
+#endif
 }
 
 FSConnector::~FSConnector() { close(); }
@@ -324,6 +426,11 @@ void FSConnector::do_single_get(WorkerFSConn& conn, const std::string& key,
     throw std::runtime_error("open for read failed: " + file_path.string() +
                              ": " + strerror(errno));
   }
+#ifdef LMCACHE_FS_FAULT_INJECTION
+  if (fault_delay_ms_ > 0) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(fault_delay_ms_));
+  }
+#endif
 
   try {
     size_t n;
@@ -437,26 +544,118 @@ bool FSConnector::do_single_delete(WorkerFSConn& conn, const std::string& key) {
 // ---------------------------------------------------------------
 
 size_t FSConnector::read_budget_bytes() const {
-  return read_budget_.max_bytes();
+  return use_uring_ ? uring_budget_.max_bytes() : read_budget_.max_bytes();
 }
 
 size_t FSConnector::read_peak_bytes() const {
-  return read_budget_.peak_bytes();
+  return use_uring_ ? uring_budget_.peak_bytes() : read_budget_.peak_bytes();
 }
 
+std::string FSConnector::read_engine() const { return read_engine_; }
+
+unsigned FSConnector::io_depth() const { return io_depth_; }
+
 size_t FSConnector::choose_num_tiles(Op op, size_t num_items) const {
-  if (op != Op::BATCH_TILE_GET || read_threads_.empty()) {
+  if (op != Op::BATCH_TILE_GET || (read_threads_.empty() && !use_uring_)) {
     return ConnectorBase::choose_num_tiles(op, num_items);
   }
   return 1;
 }
 
 void FSConnector::do_batch_get(WorkerFSConn& conn, const Request& req) {
+  if (use_uring_) {
+    do_batch_get_uring(conn, req);
+    return;
+  }
   if (read_threads_.empty()) {
     ConnectorBase::do_batch_get(conn, req);
     return;
   }
   do_batch_get_pooled(req);
+}
+
+// The ring takes every object except those the synchronous path must keep
+// handling as today: longer than kMaxRingReadBytes, empty, or buffered
+// with read_ahead_size in effect.  Those are read after the ring batch,
+// one at a time, each reserved in uring_budget_ like a ring read.  A
+// misaligned O_DIRECT buffer or a bad key fails that key alone.
+void FSConnector::do_batch_get_uring(WorkerFSConn& conn, const Request& req) {
+#ifdef LMCACHE_HAVE_LIBURING
+  if (conn.reader == nullptr) {
+    const size_t index = next_reader_.fetch_add(1);
+    if (index >= readers_.size()) {
+      throw std::logic_error("more get workers than io_uring rings");
+    }
+    conn.reader = readers_[index].get();
+  }
+  auto& results = req.batch->per_key_results;
+  const size_t num_keys = req.keys.size();
+  std::vector<ReadItem> items;
+  std::vector<size_t> ring_keys;  // key index of items[j]
+  std::vector<size_t> sync_keys;
+  items.reserve(num_keys);
+  ring_keys.reserve(num_keys);
+  for (size_t i = 0; i < num_keys; ++i) {
+    results[req.start_idx + i] = 0;
+    const size_t len = req.buf_lens[i];
+    try {
+      int flags = O_RDONLY;
+      const bool direct =
+          conn.use_odirect &&
+          try_enable_odirect(flags, req.buf_ptrs[i], len, conn.disk_block_size);
+      const bool read_ahead =
+          !direct && conn.read_ahead_size > 0 && len > conn.read_ahead_size;
+      if (len == 0 || len > kMaxRingReadBytes || read_ahead) {
+        sync_keys.push_back(i);
+        continue;
+      }
+      items.push_back(ReadItem{object_path(conn, key_to_filename(req.keys[i])),
+                               req.buf_ptrs[i], len, flags,
+                               direct ? conn.disk_block_size : 0});
+      ring_keys.push_back(i);
+    } catch (const std::exception& e) {
+      fprintf(stderr, "[LMCache GET] key %s failed: %s\n", req.keys[i].c_str(),
+              e.what());
+    }
+  }
+
+  std::vector<uint8_t> ok(items.size(), 0);
+  std::exception_ptr engine_failure;
+  try {
+    conn.reader->read_batch(items, ok.data(), stop_);
+  } catch (...) {
+    engine_failure = std::current_exception();
+  }
+  for (size_t j = 0; j < items.size(); ++j) {
+    results[req.start_idx + ring_keys[j]] = ok[j];
+  }
+
+  for (size_t i : sync_keys) {
+    if (is_stopping()) {
+      break;
+    }
+    const size_t len = req.buf_lens[i];
+    uint64_t start_ns = 0;
+    uring_budget_.reserve(&len, 1, true, &start_ns);
+    uint8_t key_ok = 1;
+    try {
+      do_single_get(conn, req.keys[i], req.buf_ptrs[i], len,
+                    req.batch_chunk_num_bytes);
+    } catch (const std::exception& e) {
+      key_ok = 0;
+      fprintf(stderr, "[LMCache GET] key %s failed: %s\n", req.keys[i].c_str(),
+              e.what());
+    }
+    uring_budget_.release(len, 1, &start_ns, 1);
+    results[req.start_idx + i] = key_ok;
+  }
+
+  if (engine_failure) {
+    std::rethrow_exception(engine_failure);
+  }
+#else
+  ConnectorBase::do_batch_get(conn, req);
+#endif
 }
 
 void FSConnector::on_workers_stopped() { stop_read_pool(); }

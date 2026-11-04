@@ -140,3 +140,51 @@ class TestFSNativeLayoutAndLaneValidation:
     def test_constructor_rejects(self, field):
         with pytest.raises(ValueError, match=field):
             FSNativeL2AdapterConfig(base_path="/data", **{field: -1})
+
+
+class TestFSNativeReadEngine:
+    def test_defaults_keep_the_pool_and_depth_64(self):
+        cfg, _ = _from_dict()
+        assert cfg.read_engine == "pool"
+        assert cfg.io_depth == 64
+        direct = FSNativeL2AdapterConfig(base_path="/data")
+        assert direct.read_engine == "pool"
+        assert direct.io_depth == 64
+
+    @pytest.mark.parametrize("engine", ["auto", "io_uring", "pool"])
+    def test_from_dict_reads_engine_and_depth(self, engine):
+        cfg, _ = _from_dict(read_engine=engine, io_depth=16)
+        assert cfg.read_engine == engine
+        assert cfg.io_depth == 16
+
+    @pytest.mark.parametrize("depth", [1, 4096])
+    def test_depth_limits_are_accepted(self, depth):
+        assert _from_dict(io_depth=depth)[0].io_depth == depth
+
+    @pytest.mark.parametrize("bad", ["bogus", "", "POOL", 1, None])
+    def test_from_dict_rejects_engine(self, bad):
+        with pytest.raises(ValueError, match="read_engine"):
+            FSNativeL2AdapterConfig.from_dict({**BASE, "read_engine": bad})
+
+    @pytest.mark.parametrize("bad", [0, 4097, -1, "8", True, 1.5, None])
+    def test_from_dict_rejects_depth(self, bad):
+        with pytest.raises(ValueError, match="io_depth"):
+            FSNativeL2AdapterConfig.from_dict({**BASE, "io_depth": bad})
+
+    def test_constructor_rejects(self):
+        with pytest.raises(ValueError, match="read_engine"):
+            FSNativeL2AdapterConfig(base_path="/data", read_engine="bogus")
+        with pytest.raises(ValueError, match="io_depth"):
+            FSNativeL2AdapterConfig(base_path="/data", io_depth=0)
+
+    @pytest.mark.parametrize("engine", ["auto", "io_uring"])
+    def test_budget_without_read_pool_is_not_ignored_under_io_uring(self, engine):
+        _, warnings = _from_dict(
+            read_engine=engine, num_read_workers=0, read_max_bytes_in_flight=1 << 30
+        )
+        assert warnings == []
+
+    def test_help_names_both_fields(self):
+        help_text = FSNativeL2AdapterConfig.help()
+        assert "read_engine" in help_text
+        assert "io_depth" in help_text

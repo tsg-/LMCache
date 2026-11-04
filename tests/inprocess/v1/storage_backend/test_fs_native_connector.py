@@ -3,12 +3,17 @@
 
 # Standard
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 import array
 import ctypes
+import hashlib
 import os
 import select
+import shutil
+import struct
+import subprocess
 import sys
+import textwrap
 import time
 
 # Third Party
@@ -182,6 +187,65 @@ def _aligned_pairs(
     return sources, dests, keep
 
 
+def _has_io_uring() -> bool:
+    """True when the extension carries the io_uring read engine."""
+    _import_fs_client()
+    # First Party
+    from lmcache import lmcache_fs
+
+    return bool(lmcache_fs.has_io_uring())
+
+
+def _has_fault_injection() -> bool:
+    """True when the extension was built with LMCACHE_FS_FAULT_INJECTION."""
+    _import_fs_client()
+    # First Party
+    from lmcache import lmcache_fs
+
+    return bool(lmcache_fs.has_fault_injection())
+
+
+# The io_uring engine needs num_workers x io_depth + 1024 descriptors under
+# the soft RLIMIT_NOFILE, and many hosts default the soft limit to 1024.
+_RING_TEST_NOFILE = 65536
+
+
+@pytest.fixture
+def nofile_for_rings() -> Iterator[None]:
+    """Raise the soft RLIMIT_NOFILE (up to the hard limit) for io_uring
+    clients, as serving processes such as vLLM do, and restore it after."""
+    try:
+        # Standard
+        import resource
+    except ImportError:
+        yield
+        return
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    want = _RING_TEST_NOFILE if hard == resource.RLIM_INFINITY else hard
+    want = min(want, _RING_TEST_NOFILE)
+    if soft != resource.RLIM_INFINITY and soft < want:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (want, hard))
+    try:
+        yield
+    finally:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+
+
+@pytest.fixture(params=["pool", "io_uring"])
+def engine(request: pytest.FixtureRequest, nofile_for_rings: None) -> str:
+    """Each read engine; io_uring is skipped when it is compiled out."""
+    if request.param == "io_uring" and not _has_io_uring():
+        pytest.skip("lmcache_fs was built without the io_uring engine")
+    return request.param
+
+
+def _expected_engine(engine: str, num_read_workers: int) -> str:
+    """The engine a client reports for a forced engine and pool size."""
+    if engine == "io_uring":
+        return "io_uring"
+    return "pool" if num_read_workers > 0 else "legacy"
+
+
 @pytest.mark.parametrize(
     "num_read_workers,read_max_bytes_in_flight",
     [
@@ -195,10 +259,11 @@ def _aligned_pairs(
 )
 def test_reads_return_identical_bytes(
     tmp_path: Path,
+    engine: str,
     num_read_workers: int,
     read_max_bytes_in_flight: int,
 ) -> None:
-    """Neither the pool nor the budget may change the bytes returned.
+    """Neither the engine nor the budget may change the bytes returned.
 
     A budget below one object size must still take that object.
     """
@@ -219,9 +284,17 @@ def test_reads_return_identical_bytes(
         writer.close()
 
     reader = LMCacheFSClient(
-        str(tmp_path), 2, "", True, 0, num_read_workers, read_max_bytes_in_flight
+        str(tmp_path),
+        2,
+        "",
+        True,
+        0,
+        num_read_workers,
+        read_max_bytes_in_flight,
+        read_engine=engine,
     )
     try:
+        assert reader.read_engine() == _expected_engine(engine, num_read_workers)
         if read_max_bytes_in_flight:
             assert reader.read_budget_bytes() == read_max_bytes_in_flight
         future_id = reader.submit_batch_get(keys, dests)
@@ -234,6 +307,399 @@ def test_reads_return_identical_bytes(
             assert bytes(dest) == bytes(sources[index]), f"object {index} differs"
     finally:
         reader.close()
+
+
+def _read_batches(
+    reader: Any,
+    keys: list[str],
+    dests: list[memoryview],
+    batch_size: int,
+    timeout: float = 30.0,
+) -> list[tuple[int, bool, str, list[bool] | None]]:
+    """Submit every batch at once, then wait for all of their completions.
+
+    Args:
+        reader: An open LMCacheFSClient.
+        keys: Keys to read, in batch order.
+        dests: One destination per key.
+        batch_size: Keys per submitted batch; the last may be shorter.
+        timeout: Seconds to wait for every completion.
+
+    Returns:
+        The completions, in submission order.
+
+    Raises:
+        TimeoutError: If a batch does not complete in time.
+    """
+    future_ids = [
+        reader.submit_batch_get(
+            keys[start : start + batch_size], dests[start : start + batch_size]
+        )
+        for start in range(0, len(keys), batch_size)
+    ]
+    completions: dict[int, tuple[int, bool, str, list[bool] | None]] = {}
+    deadline = time.monotonic() + timeout
+    while len(completions) < len(future_ids):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(
+                f"{len(future_ids) - len(completions)} batches did not complete"
+            )
+        for completion in reader.drain_completions():
+            completions[completion[0]] = completion
+        select.select([reader.event_fd()], [], [], min(remaining, 0.1))
+    return [completions[future_id] for future_id in future_ids]
+
+
+@pytest.mark.parametrize("io_depth", [1, 2, 64])
+def test_uring_round_trip_batch_sizes(
+    tmp_path: Path, io_depth: int, nofile_for_rings: None
+) -> None:
+    """Batches smaller than, equal to and three times the ring depth, with
+    mixed object sizes, return every byte through the ring."""
+    if not _has_io_uring():
+        pytest.skip("lmcache_fs was built without the io_uring engine")
+    LMCacheFSClient = _import_fs_client()
+    block_size = os.statvfs(tmp_path).f_bsize
+    sizes = [4 << 10, 64 << 10, 256 << 10, 1 << 20]
+    counts = [1, io_depth, 3 * io_depth]
+    total = sum(counts)
+    keys = [f"test_model@00000000@0@{i:016x}" for i in range(total)]
+    sources: list[memoryview] = []
+    dests: list[memoryview] = []
+    keep: list[bytearray] = []
+    for index in range(total):
+        size = sizes[index % len(sizes)]
+        source_raw, source = _aligned_memoryview(size, block_size)
+        dest_raw, dest = _aligned_memoryview(size, block_size)
+        keep.extend((source_raw, dest_raw))
+        source[:] = (bytes([index % 251]) * 64 + os.urandom(64)) * (size // 128)
+        sources.append(source)
+        dests.append(dest)
+
+    writer = LMCacheFSClient(str(tmp_path), 2, "", True, 0)
+    try:
+        _write_corpus(writer, keys, sources)
+    finally:
+        writer.close()
+
+    reader = LMCacheFSClient(
+        str(tmp_path), 1, "", True, 0, read_engine="io_uring", io_depth=io_depth
+    )
+    try:
+        assert reader.read_engine() == "io_uring"
+        assert reader.io_depth() == io_depth
+        start = 0
+        for count in counts:
+            done = _read_batches(
+                reader, keys[start : start + count], dests[start : start + count], count
+            )
+            assert done[0][1], done[0][2]
+            assert list(done[0][3] or []) == [True] * count
+            start += count
+        for index, dest in enumerate(dests):
+            assert bytes(dest) == bytes(sources[index]), f"object {index} differs"
+    finally:
+        reader.close()
+
+
+def test_budget_many_batches_progress(tmp_path: Path, engine: str) -> None:
+    """Sixteen concurrent 56-object batches against a budget of four objects
+    all finish, and bytes in flight never exceed the budget."""
+    LMCacheFSClient = _import_fs_client()
+    size = 64 << 10
+    budget = 256 << 10
+    batches = 16
+    batch_size = 56
+    count = batches * batch_size
+    keys = [f"test_model@00000000@0@{i:016x}" for i in range(count)]
+    sources, dests, _keep_alive = _aligned_pairs(count, size, 4096)
+    writer = LMCacheFSClient(str(tmp_path), 4)
+    try:
+        _write_corpus(writer, keys, sources)
+    finally:
+        writer.close()
+
+    reader = LMCacheFSClient(
+        str(tmp_path), 8, "", False, 0, 16, budget, read_engine=engine
+    )
+    try:
+        assert reader.read_engine() == engine
+        assert reader.read_budget_bytes() == budget
+        for done in _read_batches(reader, keys, dests, batch_size, timeout=60.0):
+            assert done[1], done[2]
+            assert list(done[3] or []) == [True] * batch_size
+        assert 0 < reader.read_peak_bytes() <= budget
+        for index, dest in enumerate(dests):
+            assert bytes(dest) == bytes(sources[index]), f"object {index} differs"
+    finally:
+        reader.close()
+
+
+def _fill_large(view: memoryview, seed: int) -> None:
+    """Fill a large buffer quickly with bytes that differ at every MiB, so a
+    misplaced chunk is caught, without a Python loop per byte."""
+    chunk = os.urandom(1 << 20)
+    step = 1 << 20
+    for offset in range(0, len(view), step):
+        end = min(offset + step, len(view))
+        view[offset:end] = chunk[: end - offset]
+        struct.pack_into("<QQ", view, offset, seed, offset)
+
+
+def _digest(view: memoryview) -> bytes:
+    return hashlib.sha256(view).digest()
+
+
+def test_mixed_path_batch_round_trip(tmp_path: Path, engine: str) -> None:
+    """One batch mixing an O_DIRECT read, a buffered read of an unaligned
+    length and a 1.5 GiB read (the synchronous fallback under io_uring)
+    returns every key correctly."""
+    large = 3 << 29  # 1.5 GiB
+    if shutil.disk_usage(tmp_path).free < large + (2 << 30):
+        pytest.skip("needs about 3.5 GiB free under the test directory")
+    LMCacheFSClient = _import_fs_client()
+    block_size = os.statvfs(tmp_path).f_bsize
+    sizes = [block_size * 5, block_size * 3 + 100, large]
+    keys = [f"test_model@00000000@0@{i:016x}" for i in range(len(sizes))]
+    sources: list[memoryview] = []
+    dests: list[memoryview] = []
+    keep: list[bytearray] = []
+    for index, size in enumerate(sizes):
+        source_raw, source = _aligned_memoryview(size, block_size)
+        dest_raw, dest = _aligned_memoryview(size, block_size)
+        keep.extend((source_raw, dest_raw))
+        _fill_large(source, index + 1)
+        sources.append(source)
+        dests.append(dest)
+
+    writer = LMCacheFSClient(str(tmp_path), 3, "", True, 0)
+    try:
+        future_id = writer.submit_batch_set(keys, sources)
+        stored = _wait_for_completion(writer, future_id, timeout=120.0)
+        assert stored[1], stored[2]
+    finally:
+        writer.close()
+
+    reader = LMCacheFSClient(str(tmp_path), 2, "", True, 0, 4, read_engine=engine)
+    try:
+        assert reader.read_engine() == engine
+        future_id = reader.submit_batch_get(keys, dests)
+        done = _wait_for_completion(reader, future_id, timeout=120.0)
+        assert done[1], done[2]
+        assert list(done[3] or []) == [True] * len(keys)
+        for index, dest in enumerate(dests):
+            assert _digest(dest) == _digest(sources[index]), f"object {index} differs"
+    finally:
+        reader.close()
+
+
+def test_missing_key_fails_only_that_key(tmp_path: Path, engine: str) -> None:
+    """A missing object fails alone, and the same worker's next batch loads."""
+    LMCacheFSClient = _import_fs_client()
+    size = 4 << 10
+    present = "test_model@00000000@0@aaaaaaaaaaaaaaaa"
+    absent = "test_model@00000000@0@bbbbbbbbbbbbbbbb"
+    sources, dests, _keep_alive = _aligned_pairs(6, size, 4096)
+
+    writer = LMCacheFSClient(str(tmp_path), 1)
+    try:
+        _write_corpus(writer, [present], [sources[0]])
+    finally:
+        writer.close()
+
+    # One worker, so both batches run on the same ring.
+    reader = LMCacheFSClient(str(tmp_path), 1, "", False, 0, 4, read_engine=engine)
+    try:
+        first = _read_batches(reader, [present, absent, present], dests[:3], 3)[0]
+        assert list(first[3] or []) == [True, False, True]
+        second = _read_batches(reader, [present] * 3, dests[3:], 3)[0]
+        assert second[1], second[2]
+        assert list(second[3] or []) == [True, True, True]
+        for dest in (dests[0], dests[2], *dests[3:]):
+            assert bytes(dest) == bytes(sources[0])
+    finally:
+        reader.close()
+
+
+def test_alignment_both_misaligned_reads_buffered(tmp_path: Path, engine: str) -> None:
+    """A read whose address and length are both unaligned is buffered and
+    succeeds; an aligned length at an unaligned address fails that key
+    where O_DIRECT exists."""
+    LMCacheFSClient = _import_fs_client()
+    block_size = os.statvfs(tmp_path).f_bsize
+    odd = block_size * 2 + 17
+    even = block_size * 2
+    keys = [
+        "test_model@00000000@0@cccccccccccccccc",
+        "test_model@00000000@0@dddddddddddddddd",
+    ]
+    _odd_src_raw, odd_src = _misaligned_memoryview(odd, block_size)
+    _even_src_raw, even_src = _aligned_memoryview(even, block_size)
+    _odd_dst_raw, odd_dst = _misaligned_memoryview(odd, block_size)
+    _even_dst_raw, even_dst = _misaligned_memoryview(even, block_size)
+    _fill(odd_src)
+    _fill(even_src)
+
+    writer = LMCacheFSClient(str(tmp_path), 1, "", True, 0)
+    try:
+        _write_corpus(writer, keys, [odd_src, even_src])
+    finally:
+        writer.close()
+
+    reader = LMCacheFSClient(str(tmp_path), 1, "", True, 0, 4, read_engine=engine)
+    try:
+        done = _read_batches(reader, keys, [odd_dst, even_dst], 2)[0]
+        expect_even = not hasattr(os, "O_DIRECT")
+        assert list(done[3] or []) == [True, expect_even]
+        assert bytes(odd_dst) == bytes(odd_src)
+    finally:
+        reader.close()
+
+
+def test_auto_without_ring_falls_back_to_pool(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nofile_for_rings: None
+) -> None:
+    """auto uses the read pool when no ring can be created.
+
+    Without the engine compiled in this always holds.  With it, the ring
+    failure is injected, which needs a build with LMCACHE_FS_FAULT_INJECTION=1
+    (``LMCACHE_FS_FAULT_INJECTION=1 bash scripts/ipu-poc/build_lmcache_fs.sh .``).
+    """
+    LMCacheFSClient = _import_fs_client()
+    if _has_io_uring():
+        if not _has_fault_injection():
+            pytest.skip("needs a LMCACHE_FS_FAULT_INJECTION=1 build of lmcache_fs")
+        monkeypatch.setenv("LMCACHE_FS_FAULT", "queue_init_error")
+    reader = LMCacheFSClient(str(tmp_path), 2, "", False, 0, 4, read_engine="auto")
+    try:
+        assert reader.read_engine() == "pool"
+        assert reader.io_depth() == 0
+        assert reader.read_budget_bytes() == 1536 << 20
+    finally:
+        reader.close()
+
+
+def test_forced_io_uring_without_ring_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nofile_for_rings: None
+) -> None:
+    """io_uring fails construction when no ring can be created.
+
+    With the engine compiled in, the failure is injected and needs a
+    LMCACHE_FS_FAULT_INJECTION=1 build, as above.
+    """
+    LMCacheFSClient = _import_fs_client()
+    if _has_io_uring():
+        if not _has_fault_injection():
+            pytest.skip("needs a LMCACHE_FS_FAULT_INJECTION=1 build of lmcache_fs")
+        monkeypatch.setenv("LMCACHE_FS_FAULT", "queue_init_error")
+    with pytest.raises(RuntimeError, match="io_uring"):
+        LMCacheFSClient(str(tmp_path), 2, "", False, 0, 4, read_engine="io_uring")
+
+
+@pytest.mark.parametrize(
+    "read_engine,io_depth", [("bogus", 64), ("pool", 0), ("pool", 4097)]
+)
+def test_bad_engine_arguments_are_rejected(
+    tmp_path: Path, read_engine: str, io_depth: int
+) -> None:
+    """An unknown engine or an io_depth outside [1, 4096] is a ValueError."""
+    LMCacheFSClient = _import_fs_client()
+    with pytest.raises(ValueError, match="read_engine|io_depth"):
+        LMCacheFSClient(str(tmp_path), 1, read_engine=read_engine, io_depth=io_depth)
+
+
+def _run_child(code: str, tmp_path: Path) -> subprocess.CompletedProcess[str]:
+    """Run `code` in a fresh interpreter that can import lmcache.
+
+    Resource limits are process-wide, so tests that lower them run here.
+    """
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(p for p in sys.path if p)
+    env["FS_TEST_DIR"] = str(tmp_path)
+    return subprocess.run(
+        [sys.executable, "-c", textwrap.dedent(code)],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+
+def test_nofile_limit_lowers_depth_or_raises(tmp_path: Path) -> None:
+    """With RLIMIT_NOFILE below num_workers x io_depth + 1024, auto lowers
+    the depth (or uses the pool when even depth 1 does not fit) and a
+    forced io_uring fails construction naming the numbers."""
+    if not _has_io_uring():
+        pytest.skip("lmcache_fs was built without the io_uring engine")
+    child = _run_child(
+        """
+        import os, resource
+        from lmcache.lmcache_fs import LMCacheFSClient
+        base = os.environ["FS_TEST_DIR"]
+        _, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (2048, hard))
+        c = LMCacheFSClient(base, 4, read_engine="auto", io_depth=4096)
+        print("auto", c.read_engine(), c.io_depth())
+        c.close()
+        try:
+            LMCacheFSClient(base, 4, read_engine="io_uring", io_depth=4096)
+            print("forced ok")
+        except RuntimeError as e:
+            print("forced raised", e)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (1030, hard))
+        c = LMCacheFSClient(base, 8, "", False, 0, 4, read_engine="auto")
+        print("tight", c.read_engine(), c.io_depth())
+        c.close()
+        """,
+        tmp_path,
+    )
+    assert child.returncode == 0, child.stderr
+    lines = child.stdout.splitlines()
+    assert lines[0] == "auto io_uring 256"
+    assert lines[1].startswith("forced raised")
+    assert "RLIMIT_NOFILE" in lines[1] and "2048" in lines[1] and "4096" in lines[1]
+    assert lines[2] == "tight pool 0"
+
+
+def test_emfile_at_open_throttles_instead_of_failing(tmp_path: Path) -> None:
+    """When opens hit EMFILE while reads are in flight, the ring stops
+    refilling until one completes rather than failing keys."""
+    if not _has_io_uring() or not os.path.isdir("/proc/self/fd"):
+        pytest.skip("needs the io_uring engine and /proc/self/fd")
+    child = _run_child(
+        """
+        import ctypes, os, resource, select, time
+        from lmcache.lmcache_fs import LMCacheFSClient
+        base = os.environ["FS_TEST_DIR"]
+        n, size = 64, 64 << 10
+        srcs = [bytearray(os.urandom(size)) for _ in range(n)]
+        dsts = [bytearray(size) for _ in range(n)]
+        keys = [f"test_model@00000000@0@{i:016x}" for i in range(n)]
+        def wait(c, fid):
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                for comp in c.drain_completions():
+                    if comp[0] == fid:
+                        return comp
+                select.select([c.event_fd()], [], [], 0.1)
+            raise TimeoutError
+        w = LMCacheFSClient(base, 2)
+        assert wait(w, w.submit_batch_set(keys, [memoryview(s) for s in srcs]))[1]
+        w.close()
+        _, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (min(hard, 65536), hard))
+        c = LMCacheFSClient(base, 1, read_engine="io_uring", io_depth=64)
+        top = max(int(f) for f in os.listdir("/proc/self/fd"))
+        resource.setrlimit(resource.RLIMIT_NOFILE, (top + 4, hard))
+        comp = wait(c, c.submit_batch_get(keys, [memoryview(d) for d in dsts]))
+        print(comp[1], sum(comp[3]), all(d == s for d, s in zip(dsts, srcs)))
+        c.close()
+        """,
+        tmp_path,
+    )
+    assert child.returncode == 0, child.stderr
+    assert child.stdout.split() == ["True", "64", "True"]
 
 
 def test_pooled_read_tolerates_one_missing_object(tmp_path: Path) -> None:

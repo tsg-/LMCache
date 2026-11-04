@@ -42,6 +42,13 @@ DEFAULT_NUM_READ_WORKERS = 256
 # Shard directories are created up front; this bounds start-up work.
 MAX_SHARD_DIRS = 65536
 
+# Read engines the native connector accepts; "pool" stays the default until
+# the io_uring engine's benchmarks are in.
+READ_ENGINES = ("auto", "io_uring", "pool")
+DEFAULT_READ_ENGINE = "pool"
+DEFAULT_IO_DEPTH = 64
+MAX_IO_DEPTH = 4096
+
 
 def _validate_non_negative_int(name: str, raw: object) -> int:
     """Return ``raw`` if it is a non-negative ``int``.
@@ -54,6 +61,36 @@ def _validate_non_negative_int(name: str, raw: object) -> int:
     """
     if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
         raise ValueError(f"{name} must be a non-negative integer, got {raw!r}")
+    return raw
+
+
+def _validate_read_engine(raw: object) -> str:
+    """Return ``raw`` if it names a read engine.
+
+    Raises:
+        ValueError: If ``raw`` is not one of ``READ_ENGINES``.
+    """
+    if not isinstance(raw, str) or raw not in READ_ENGINES:
+        raise ValueError(
+            f"read_engine must be one of {', '.join(READ_ENGINES)}, got {raw!r}"
+        )
+    return raw
+
+
+def _validate_io_depth(raw: object) -> int:
+    """Return ``raw`` if it is an ``int`` in [1, MAX_IO_DEPTH].
+
+    Raises:
+        ValueError: If ``raw`` is a bool, not an int, or out of range.
+    """
+    if (
+        isinstance(raw, bool)
+        or not isinstance(raw, int)
+        or not 1 <= raw <= MAX_IO_DEPTH
+    ):
+        raise ValueError(
+            f"io_depth must be an integer in [1, {MAX_IO_DEPTH}], got {raw!r}"
+        )
     return raw
 
 
@@ -91,6 +128,15 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
       (default 0 = unlink on delete).
     - store_workers / delete_workers: dedicated worker threads
       for stores / deletes (default 0 = shared num_workers pool).
+    - read_engine: "pool" (default) reads through the read pool above;
+      "io_uring" gives each of the num_workers workers an io_uring and
+      fails adapter creation if that is unavailable; "auto" uses io_uring
+      where available and the pool otherwise.  Under io_uring the read
+      pool is not started, num_workers bounds how many batches read at
+      once, and read_max_bytes_in_flight applies (0 = 1536 MiB) whatever
+      num_read_workers is.
+    - io_depth: reads in flight per io_uring worker, 1 to 4096
+      (default 64); ignored by the pool.
     """
 
     def __init__(
@@ -107,14 +153,18 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
         recycle_max_files: int = 0,
         store_workers: int = 0,
         delete_workers: int = 0,
+        read_engine: str = DEFAULT_READ_ENGINE,
+        io_depth: int = DEFAULT_IO_DEPTH,
     ):
         """Build the config; see the class docstring for each field.
 
         Raises:
             ValueError: If ``num_read_workers``, ``read_max_bytes_in_flight``,
                 ``recycle_max_files``, ``store_workers`` or
-                ``delete_workers`` is not a non-negative integer, or
-                ``num_shard_dirs`` is not an integer in [0, 65536].
+                ``delete_workers`` is not a non-negative integer,
+                ``num_shard_dirs`` is not an integer in [0, 65536],
+                ``read_engine`` is not one of ``READ_ENGINES``, or
+                ``io_depth`` is not an integer in [1, 4096].
         """
         self.base_path = base_path
         self.num_workers = num_workers
@@ -142,7 +192,15 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
         self.delete_workers = _validate_non_negative_int(
             "delete_workers", delete_workers
         )
-        if num_read_workers == 0 and read_max_bytes_in_flight > 0:
+        self.read_engine = _validate_read_engine(read_engine)
+        self.io_depth = _validate_io_depth(io_depth)
+        # Under io_uring (or auto, which may pick it) the budget applies
+        # whatever num_read_workers is.
+        if (
+            read_engine == "pool"
+            and num_read_workers == 0
+            and read_max_bytes_in_flight > 0
+        ):
             logger.warning(
                 "fs_native: read_max_bytes_in_flight=%d is ignored because "
                 "num_read_workers=0 selects the legacy read path.",
@@ -199,6 +257,8 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
             recycle_max_files=d.get("recycle_max_files", 0),
             store_workers=d.get("store_workers", 0),
             delete_workers=d.get("delete_workers", 0),
+            read_engine=d.get("read_engine", DEFAULT_READ_ENGINE),
+            io_depth=d.get("io_depth", DEFAULT_IO_DEPTH),
         )
 
     @classmethod
@@ -232,7 +292,11 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
             "- recycle_max_files (int): deleted files kept for "
             "in-place reuse (default 0 = unlink)\n"
             "- store_workers / delete_workers (int): dedicated "
-            "worker threads (default 0 = shared pool)"
+            "worker threads (default 0 = shared pool)\n"
+            "- read_engine (str): auto, io_uring or pool "
+            "(default pool); io_uring fails if unavailable\n"
+            "- io_depth (int): reads in flight per io_uring "
+            "worker, 1 to 4096 (default 64); ignored by the pool"
         )
 
 
@@ -272,18 +336,24 @@ def _create_fs_native_l2_adapter(
         config.recycle_max_files,
         config.store_workers,
         config.delete_workers,
+        config.read_engine,
+        config.io_depth,
     )
     effective_read_budget = native_client.read_budget_bytes()
+    read_engine = native_client.read_engine()
+    io_depth = native_client.io_depth()
     logger.info(
         "Created FS native L2 adapter: %s (workers=%d, odirect=%s, "
         "read_ahead=%s, num_read_workers=%d, "
-        "read_max_bytes_in_flight=%d)",
+        "read_max_bytes_in_flight=%d, read_engine=%s, io_depth=%d)",
         config.base_path,
         config.num_workers,
         config.use_odirect,
         config.read_ahead_size,
         config.num_read_workers,
         effective_read_budget,
+        read_engine,
+        io_depth,
     )
     residency = MemoryResidency.REMOTE if config.shared else MemoryResidency.LOCAL
     memory_tags = MemoryTags(MemorySegment.STORAGE, residency)
@@ -304,6 +374,8 @@ def _create_fs_native_l2_adapter(
             "recycle_max_files": config.recycle_max_files,
             "store_workers": config.store_workers,
             "delete_workers": config.delete_workers,
+            "read_engine": read_engine,
+            "io_depth": io_depth,
             "pad_buffers_to_alignment": config.use_odirect,
         },
     )
