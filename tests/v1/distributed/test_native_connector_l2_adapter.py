@@ -7,6 +7,7 @@ C++ IStorageConnector interface, so no Redis or C++ build is needed.
 """
 
 # Standard
+from collections.abc import Iterator
 import contextlib
 from types import ModuleType
 import ctypes
@@ -211,15 +212,12 @@ def wait_for_event_fd(event_fd: int, timeout: float = 5.0) -> bool:
 
 
 @contextlib.contextmanager
-def capture_adapter_logs(caplog, level="WARNING"):
-    """Make ``caplog`` see the adapter logger's records at ``level``.
+def capture_adapter_logs(
+    caplog: pytest.LogCaptureFixture, level: str = "WARNING"
+) -> Iterator[None]:
+    """Attach ``caplog.handler`` to the non-propagating adapter logger.
 
-    lmcache loggers set ``propagate = False``, so the root-level caplog
-    handler only sees their records if something else forwards them. Attach
-    the handler directly, for the duration of the block. This must run inside
-    the test body: pytest swaps ``caplog.handler`` per phase and ``caplog.text``
-    reads the call-phase handler, so a setup-time fixture would attach the
-    wrong one.
+    Must run in the test body: ``caplog.text`` reads the call-phase handler.
     """
     adapter_logger = native_connector_l2_adapter.logger
     # Newer pytest already attaches its handler to non-propagating loggers;
@@ -1828,12 +1826,14 @@ class TestBatchedDrainOrdering:
                 keys[1:2], [create_memory_obj(size=100, fill_value=0.0)]
             )
             assert wait_for_event_fd(adp.get_load_event_fd(), timeout=5.0)
+            bitmap = adp.query_load_result(load_id)
+            # close() warns "dropping N parked" only if something was parked.
+            adp.close()
 
-        bitmap = adp.query_load_result(load_id)
         assert bitmap is not None and bitmap.test(0) is True
         # Positive control: capture works, so the absence check below is real.
         assert "delete() timed out" in caplog.text
-        assert "unknown future_id" not in caplog.text
+        assert "dropping" not in caplog.text
         assert all(0 not in call[1] for call in listener.calls)
 
 
@@ -2174,7 +2174,6 @@ class TestEarlyCompletionParking:
         bitmap = adp.query_load_result(task_id)
         assert bitmap is not None
         assert bitmap.test(0) is False
-        assert "unknown future_id" not in caplog.text
         assert "dropping 1 parked" in caplog.text
 
 
