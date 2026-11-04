@@ -6,6 +6,16 @@
 namespace py = pybind11;
 
 PYBIND11_MODULE(lmcache_fs, m) {
+  m.def(
+      "has_io_uring",
+      []() {
+#ifdef LMCACHE_HAVE_LIBURING
+        return true;
+#else
+        return false;
+#endif
+      },
+      "True when the extension was built with the io_uring read engine.");
   py::class_<lmcache::connector::FSConnector>(m, "LMCacheFSClient")
       .def(py::init<std::string, int, std::string, bool, size_t, int, size_t,
                     size_t, size_t, int, int>(),

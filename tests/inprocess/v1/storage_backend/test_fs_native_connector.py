@@ -8,6 +8,7 @@ import array
 import ctypes
 import os
 import select
+import sys
 import time
 
 # Third Party
@@ -780,3 +781,13 @@ def test_raw_submit_accepts_unaligned_arrays(tmp_path: Path) -> None:
         assert on_disk == sorted(encode_fs_filename(k) for k in keys)
     finally:
         client.close()
+
+
+def test_module_reports_io_uring_support() -> None:
+    _import_fs_client()
+    # First Party
+    from lmcache import lmcache_fs
+
+    assert isinstance(lmcache_fs.has_io_uring(), bool)
+    if sys.platform == "linux" and os.environ.get("LMCACHE_EXPECT_IO_URING") == "1":
+        assert lmcache_fs.has_io_uring()
