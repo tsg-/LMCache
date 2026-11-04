@@ -1,10 +1,11 @@
 #!/bin/bash
-# Usage: [LOGDIR=...] PYPATH=... PROFILE=... fleet_np_ro.sh <name> <nproc> <dur> <adapter-json> <in_flight>
-# Read-only fleet cell with <nproc> bench l2 processes per initiator, each on its
+# Usage: [LOGDIR=...] [MIXED=1 RET=n] PYPATH=... PROFILE=... fleet_np_ro.sh <name> <nproc> <dur> <adapter-json> <in_flight>
+# Fleet cell with <nproc> bench l2 processes per initiator (read-only, or 5:1 with MIXED=1), each on its
 # own seeded corpus. p0 serves the per-host 6x2 metrics port; the rest serve none.
 set -u
 NAME=$1; NP=$2; DUR=$3; ADAPTER=$4; IF=$5
 PYPATH=${PYPATH:?}; PROFILE=${PROFILE:?}
+ROFLAG=--read-only; [ -n "${MIXED:-}" ] && ROFLAG=
 HOSTS="mmgi0 mmgi1 mmgi2 mmgi3 mmgi4 mmgi5"
 # Seeding scales with NP; give every process time to seed before the shared start.
 START=$(( $(date +%s) + ${START_DELAY:-120} ))
@@ -15,7 +16,7 @@ for h in $HOSTS; do
   for p in $(seq 0 $((NP - 1))); do
     MP=-1; [ "$p" -gt 0 ] && MP=0
     $SSH $h "python3 -I /root/dig5to1/fleet_cell.py lmc --name ${NAME}_p$p --start-at $START --dur $DUR \
-      --adapter '$ADAPTER' --in-flight $IF --retention 20000 --trim-every 100000 --read-only \
+      --adapter '$ADAPTER' --in-flight $IF --retention ${RET:-20000} --trim-every 100000 $ROFLAG \
       --profile $PROFILE --metrics-port $MP \
       --py $R/.venv-bench-l2/bin/python --repo $R --pythonpath $PYPATH" \
       > $L/fleet-${NAME}_p$p-$h.log 2>&1 &
@@ -43,10 +44,10 @@ for h in ["mmgi0", "mmgi1", "mmgi2", "mmgi3", "mmgi4", "mmgi5"]:
         if "error" in r:
             line.append(f"p{p} ERROR {r['error'][:120]}")
         ld = r.get("Load", {})
-        hsum += ld.get("gbps", 0)
+        hsum += ld.get("gbps", 0) + r.get("Store", {}).get("gbps", 0)
         if "start" in ld:
             starts.append(ld["start"]); ends.append(ld["end"])
-        line.append(f"p{p}={ld.get('gbps', 0):.1f}")
+        line.append(f"p{p}={ld.get('gbps', 0):.1f}+{r.get('Store', {}).get('gbps', 0):.1f}")
         cores += r.get("cpu", {}).get("cores", 0)
     total += hsum
     mt = open(f"{sys.argv[3]}/mt-{name}-{h}.log").read().split("\n")
@@ -56,5 +57,5 @@ for h in ["mmgi0", "mmgi1", "mmgi2", "mmgi3", "mmgi4", "mmgi5"]:
     print("   " + " ".join(line[1:]))
 skew = round(max(starts) - min(starts), 2) if starts else None
 span = round(min(ends) - max(starts), 1) if starts else None
-print(f"FLEET {name}: np={np_} read {total:.1f} Gb/s, start_skew={skew}s overlap={span}s")
+print(f"FLEET {name}: np={np_} read+write {total:.1f} Gb/s, start_skew={skew}s overlap={span}s")
 PY
