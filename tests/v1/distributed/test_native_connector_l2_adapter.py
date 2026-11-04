@@ -1631,3 +1631,150 @@ class TestPadBuffersToAlignment:
             assert adp_padded.get_usage().total_bytes_used == 4096
         finally:
             adp_padded.close()
+
+
+# =============================================================================
+# Batched-drain ordering tests
+# =============================================================================
+
+
+class HeldCompletionConnector(MockNativeConnector):
+    """MockNativeConnector that delivers all pending completions at once.
+
+    Completions accumulate silently until ``release()`` signals the eventfd,
+    so the adapter's demux thread sees every queued completion in a single
+    ``drain_completions`` call.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.held = True
+
+    def _push_completion(self, fid, ok, error, result_bools):
+        with self._lock:
+            self._completions.append((fid, ok, error, result_bools))
+        if not self.held:
+            self._efd.notify()
+
+    def pending_count(self) -> int:
+        with self._lock:
+            return len(self._completions)
+
+    def release(self) -> None:
+        self.held = False
+        self._efd.notify()
+
+
+class _RecordingListener:
+    def __init__(self, names: dict[ObjectKey, int]):
+        self._names = names
+        self.calls: list[tuple] = []
+
+    def on_l2_keys_stored(self, keys, sizes):
+        self.calls.append(("stored", [self._names[k] for k in keys], list(sizes)))
+
+    def on_l2_keys_accessed(self, keys):
+        self.calls.append(("accessed", [self._names[k] for k in keys]))
+
+    def on_l2_keys_deleted(self, keys):
+        self.calls.append(("deleted", [self._names[k] for k in keys]))
+
+
+@pytest.fixture
+def held_adapter():
+    client = HeldCompletionConnector()
+    adp = NativeConnectorL2Adapter(client, _MEMORY_TAGS)
+    yield adp, client
+    client.held = False
+    adp.close()
+
+
+def _run_batched_drain(adp, client, ops) -> None:
+    """Submit ``ops`` in order, then release them as one drain.
+
+    ``ops`` is a list of ``("store" | "delete", keys)``. Deletes block, so
+    they run on helper threads that are started one at a time.
+    """
+    threads: list[threading.Thread] = []
+    for kind, keys in ops:
+        before = client.pending_count()
+        if kind == "store":
+            adp.submit_store_task(keys, [create_memory_obj(size=100) for _ in keys])
+        else:
+            t = threading.Thread(target=adp.delete, args=(keys,))
+            t.start()
+            threads.append(t)
+        deadline = 5.0
+        while client.pending_count() == before and deadline > 0:
+            threading.Event().wait(0.005)
+            deadline -= 0.005
+        assert client.pending_count() == before + 1
+    client.release()
+    for t in threads:
+        t.join(timeout=10)
+        assert not t.is_alive()
+    # Wait for the store completions (delete() already returned).
+    store_fd = adp.get_store_event_fd()
+    if any(kind == "store" for kind, _ in ops):
+        assert wait_for_event_fd(store_fd, timeout=5.0)
+
+
+# Captured from the pre-refactor demux loop.
+GOLDEN_LISTENER_CALLS: list[tuple] = [
+    ("stored", [0, 1], [400, 400]),
+    ("accessed", [0]),
+    ("deleted", [0]),
+]
+
+
+class TestBatchedDrainOrdering:
+    def test_store_then_delete_same_key_in_one_drain(self, held_adapter):
+        adp, client = held_adapter
+        k = create_object_key(1)
+        _run_batched_drain(adp, client, [("store", [k]), ("delete", [k])])
+        assert adp._key_sizes.get(k) is None
+        assert adp.get_usage().total_bytes_used == 0
+
+    def test_delete_then_store_same_key_in_one_drain(self, held_adapter):
+        adp, client = held_adapter
+        k = create_object_key(1)
+        _run_batched_drain(adp, client, [("delete", [k]), ("store", [k])])
+        assert adp._key_sizes.get(k) == 400
+        assert adp.get_usage().total_bytes_used == 400
+
+    def test_store_delete_store_same_key_in_one_drain(self, held_adapter):
+        adp, client = held_adapter
+        k = create_object_key(1)
+        _run_batched_drain(
+            adp, client, [("store", [k]), ("delete", [k]), ("store", [k])]
+        )
+        assert adp._key_sizes.get(k) == 400
+        assert adp.get_usage().total_bytes_used == 400
+
+    def test_listener_calls_match_previous_loop(self, held_adapter):
+        adp, client = held_adapter
+        keys = [create_object_key(i) for i in range(3)]
+        names = {k: i for i, k in enumerate(keys)}
+        listener = _RecordingListener(names)
+        adp.register_listener(listener)
+
+        adp.submit_store_task(keys[:2], [create_memory_obj(size=100) for _ in range(2)])
+        adp.submit_lookup_and_lock_task(keys, {0: _EMPTY_LAYOUT})
+        load_id = adp.submit_load_task(
+            keys[:1], [create_memory_obj(size=100, fill_value=0.0)]
+        )
+        deleter = threading.Thread(target=adp.delete, args=(keys[:1],))
+        deleter.start()
+        deadline = 5.0
+        while client.pending_count() < 4 and deadline > 0:
+            threading.Event().wait(0.005)
+            deadline -= 0.005
+        assert client.pending_count() == 4
+        client.release()
+        deleter.join(timeout=10)
+        assert not deleter.is_alive()
+        assert wait_for_event_fd(adp.get_load_event_fd(), timeout=5.0)
+        bitmap = adp.query_load_result(load_id)
+        assert bitmap is not None and bitmap.test(0) is True
+
+        assert listener.calls == GOLDEN_LISTENER_CALLS

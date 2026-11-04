@@ -22,6 +22,7 @@ from __future__ import annotations
 
 # Standard
 from collections import defaultdict
+from dataclasses import dataclass, field
 from functools import cache
 from typing import Any
 import ctypes
@@ -63,6 +64,40 @@ def _cached_ubyte_array_type(num_bytes: int) -> "type[ctypes.Array[ctypes.c_ubyt
         The cached ``ctypes.Array`` subclass for the given length.
     """
     return ctypes.c_ubyte * num_bytes
+
+
+def _build_bitmap(result_bools: list[bool]) -> Bitmap:
+    """Return a Bitmap with bit ``i`` set where ``result_bools[i]`` is true.
+
+    Args:
+        result_bools: Per-key results reported by the native connector.
+
+    Returns:
+        A Bitmap of ``len(result_bools)`` bits.
+    """
+    bitmap = Bitmap(len(result_bools))
+    for i, flag in enumerate(result_bools):
+        if flag:
+            bitmap.set(i)
+    return bitmap
+
+
+@dataclass
+class _Notifications:
+    """Listener work collected under the lock and fired after release.
+
+    Sizes are kept parallel to their keys so ``_notify_keys_*`` can update
+    byte accounting in one shot. ``delete_done_events`` are set only after
+    ``_notify_keys_deleted`` so a woken ``delete()`` caller sees updated
+    usage.
+    """
+
+    keys_stored: list[ObjectKey] = field(default_factory=list)
+    sizes_stored: list[int] = field(default_factory=list)
+    keys_accessed: list[ObjectKey] = field(default_factory=list)
+    keys_deleted: list[ObjectKey] = field(default_factory=list)
+    sizes_deleted: list[int] = field(default_factory=list)
+    delete_done_events: list[threading.Event] = field(default_factory=list)
 
 
 def _object_key_to_string(key: ObjectKey) -> str:
@@ -476,126 +511,147 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
             if not completions:
                 continue
 
-            # Collect listener notifications to fire after
-            # releasing the lock. Sizes are collected in parallel so
-            # ``_notify_keys_*`` can update the base class's byte
-            # accounting in one shot.
-            keys_stored: list[ObjectKey] = []
-            sizes_stored: list[int] = []
-            keys_accessed: list[ObjectKey] = []
-            keys_deleted: list[ObjectKey] = []
-            sizes_deleted: list[int] = []
-            # Events for synchronous ``delete()`` callers. We set these
-            # AFTER firing ``_notify_keys_deleted`` below so that when
-            # the caller unblocks and calls ``get_usage()``, the base
-            # class's byte counters already reflect the deletion.
-            delete_done_events: list[threading.Event] = []
+            # Bitmaps for completions that carry per-key results are
+            # built before taking the lock; the ones that need the
+            # pending entry's ``num_keys`` are built in
+            # ``_route_completion``.
+            bitmaps = [
+                _build_bitmap(result_bools) if result_bools is not None else None
+                for _, _, _, result_bools in completions
+            ]
 
+            out = _Notifications()
             with self._lock:
-                for (
-                    future_id,
-                    ok,
-                    error,
-                    result_bools,
-                ) in completions:
-                    fid = int(future_id)
-                    entry = self._pending_ops.pop(fid, None)
-                    if entry is None:
-                        logger.warning(
-                            "Received completion for unknown future_id=%d",
-                            fid,
-                        )
-                        continue
-
-                    (
-                        op_type,
-                        task_id,
-                        num_keys,
-                        lookup_keys,
-                    ) = entry
-
-                    if op_type == self._OP_STORE:
-                        store_info = self._pending_store_sizes.pop(fid, None)
-                        task_bytes = 0
-                        if ok and store_info is not None:
-                            store_keys, sizes = store_info
-                            for key, size in zip(store_keys, sizes, strict=True):
-                                # First-store wins for byte accounting:
-                                # a re-store of an existing key adds 0
-                                # bytes (the backend already holds it).
-                                # We still notify the listener for every
-                                # store so LRU policies can ``move_to_end``
-                                # on re-store — passing size=0 in that
-                                # case is a no-op for the base counters.
-                                if key not in self._key_sizes:
-                                    self._key_sizes[key] = size
-                                    keys_stored.append(key)
-                                    sizes_stored.append(size)
-                                    task_bytes += size
-                                else:
-                                    keys_stored.append(key)
-                                    sizes_stored.append(0)
-                        self._completed_stores[task_id] = L2StoreResult(ok, task_bytes)
-                        self._store_efd.notify()
-
-                    elif op_type == self._OP_LOOKUP:
-                        bitmap = Bitmap(num_keys)
-                        if ok and result_bools is not None:
-                            for i, found in enumerate(result_bools):
-                                if found:
-                                    bitmap.set(i)
-                                    if lookup_keys is not None:
-                                        self._locked_keys[lookup_keys[i]] += 1
-                        self._completed_lookups[task_id] = bitmap
-                        self._lookup_efd.notify()
-
-                    elif op_type == self._OP_LOAD:
-                        bitmap = Bitmap(num_keys)
-                        loaded_keys: list[ObjectKey] = []
-                        if result_bools is not None:
-                            for i, loaded in enumerate(result_bools):
-                                if loaded:
-                                    bitmap.set(i)
-                                    if lookup_keys is not None:
-                                        loaded_keys.append(lookup_keys[i])
-                        elif ok:
-                            # Fallback for connectors that
-                            # do not report per-key results
-                            for i in range(num_keys):
-                                bitmap.set(i)
-                            if lookup_keys is not None:
-                                loaded_keys.extend(lookup_keys)
-                        keys_accessed.extend(loaded_keys)
-                        self._completed_loads[task_id] = bitmap
-                        self._load_efd.notify()
-
-                    elif op_type == self._OP_DELETE:
-                        if result_bools is not None and lookup_keys is not None:
-                            for i, deleted in enumerate(result_bools):
-                                if not deleted:
-                                    continue
-                                key = lookup_keys[i]
-                                # Only notify (with size) for keys we've
-                                # actually accounted for via a prior store.
-                                if key in self._key_sizes:
-                                    sizes_deleted.append(self._key_sizes.pop(key))
-                                    keys_deleted.append(key)
-                        evt = self._pending_delete_events.pop(task_id, None)
-                        if evt is not None:
-                            delete_done_events.append(evt)
+                for (future_id, ok, error, result_bools), bitmap in zip(
+                    completions, bitmaps, strict=True
+                ):
+                    self._route_completion(
+                        int(future_id), ok, error, result_bools, bitmap, out
+                    )
 
             # Fire listener notifications outside the lock so a slow
             # listener cannot stall further demux iterations.
-            if keys_stored:
-                self._notify_keys_stored(keys_stored, sizes_stored)
-            if keys_accessed:
-                self._notify_keys_accessed(keys_accessed)
-            if keys_deleted:
-                self._notify_keys_deleted(keys_deleted, sizes_deleted)
+            if out.keys_stored:
+                self._notify_keys_stored(out.keys_stored, out.sizes_stored)
+            if out.keys_accessed:
+                self._notify_keys_accessed(out.keys_accessed)
+            if out.keys_deleted:
+                self._notify_keys_deleted(out.keys_deleted, out.sizes_deleted)
             # Unblock any synchronous ``delete()`` callers only AFTER
             # ``_notify_keys_deleted`` has updated the base class byte
             # accounting, so ``get_usage()`` never briefly reports stale
             # (too-high) usage in the window between ``delete()``
             # returning and the notify running.
-            for evt in delete_done_events:
+            for evt in out.delete_done_events:
                 evt.set()
+
+    def _route_completion(
+        self,
+        fid: int,
+        ok: bool,
+        error: str,
+        result_bools: list[bool] | None,
+        bitmap: Bitmap | None,
+        out: _Notifications,
+    ) -> None:
+        """Apply the state transitions for one native completion.
+
+        Must be called under ``_lock``. Pops the pending entry for
+        ``fid``, updates byte/lock accounting, publishes the result and
+        signals the matching eventfd. Listener work is only recorded in
+        ``out``; the caller fires it after releasing the lock.
+
+        Args:
+            fid: Native future id of the completion.
+            ok: Whether the native operation succeeded.
+            error: Native error text (unused on success).
+            result_bools: Per-key results, or None if the connector
+                reports none.
+            bitmap: Bitmap pre-built from ``result_bools`` outside the
+                lock, or None when ``result_bools`` is None.
+            out: Accumulator for listener notifications and delete events.
+        """
+        entry = self._pending_ops.pop(fid, None)
+        if entry is None:
+            logger.warning(
+                "Received completion for unknown future_id=%d",
+                fid,
+            )
+            return
+
+        (
+            op_type,
+            task_id,
+            num_keys,
+            lookup_keys,
+        ) = entry
+
+        if op_type == self._OP_STORE:
+            store_info = self._pending_store_sizes.pop(fid, None)
+            task_bytes = 0
+            if ok and store_info is not None:
+                store_keys, sizes = store_info
+                for key, size in zip(store_keys, sizes, strict=True):
+                    # First-store wins for byte accounting:
+                    # a re-store of an existing key adds 0
+                    # bytes (the backend already holds it).
+                    # We still notify the listener for every
+                    # store so LRU policies can ``move_to_end``
+                    # on re-store — passing size=0 in that
+                    # case is a no-op for the base counters.
+                    if key not in self._key_sizes:
+                        self._key_sizes[key] = size
+                        out.keys_stored.append(key)
+                        out.sizes_stored.append(size)
+                        task_bytes += size
+                    else:
+                        out.keys_stored.append(key)
+                        out.sizes_stored.append(0)
+            self._completed_stores[task_id] = L2StoreResult(ok, task_bytes)
+            self._store_efd.notify()
+
+        elif op_type == self._OP_LOOKUP:
+            if ok and result_bools is not None and bitmap is not None:
+                if lookup_keys is not None:
+                    for i, found in enumerate(result_bools):
+                        if found:
+                            self._locked_keys[lookup_keys[i]] += 1
+            else:
+                bitmap = Bitmap(num_keys)
+            self._completed_lookups[task_id] = bitmap
+            self._lookup_efd.notify()
+
+        elif op_type == self._OP_LOAD:
+            loaded_keys: list[ObjectKey] = []
+            if result_bools is not None and bitmap is not None:
+                if lookup_keys is not None:
+                    for i, loaded in enumerate(result_bools):
+                        if loaded:
+                            loaded_keys.append(lookup_keys[i])
+            else:
+                bitmap = Bitmap(num_keys)
+                if ok:
+                    # Fallback for connectors that
+                    # do not report per-key results
+                    for i in range(num_keys):
+                        bitmap.set(i)
+                    if lookup_keys is not None:
+                        loaded_keys.extend(lookup_keys)
+            out.keys_accessed.extend(loaded_keys)
+            self._completed_loads[task_id] = bitmap
+            self._load_efd.notify()
+
+        elif op_type == self._OP_DELETE:
+            if result_bools is not None and lookup_keys is not None:
+                for i, deleted in enumerate(result_bools):
+                    if not deleted:
+                        continue
+                    key = lookup_keys[i]
+                    # Only notify (with size) for keys we've
+                    # actually accounted for via a prior store.
+                    if key in self._key_sizes:
+                        out.sizes_deleted.append(self._key_sizes.pop(key))
+                        out.keys_deleted.append(key)
+            evt = self._pending_delete_events.pop(task_id, None)
+            if evt is not None:
+                out.delete_done_events.append(evt)
