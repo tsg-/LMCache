@@ -303,6 +303,10 @@ void UringReader::read_batch(std::vector<ReadItem>& items, uint8_t* ok,
             const int err = errno;
             if ((err == EMFILE || err == ENFILE) && in_ring > 0) {
               for (size_t k = i; k < end; ++k) b.unreserve(k);
+  #ifdef LMCACHE_FS_FAULT_INJECTION
+              fprintf(stderr, "[LMCache GET] io_uring open hit %s; throttling\n",
+                      std::strerror(err));
+  #endif
               throttled = true;
               break;
             }

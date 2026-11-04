@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Failure-path tests for the fs_native io_uring read engine.
 
-These need an extension built with LMCACHE_FS_FAULT_INJECTION=1 (CI builds it
-with ``LMCACHE_FS_FAULT_INJECTION=1 bash scripts/ipu-poc/build_lmcache_fs.sh .``)
-and skip otherwise.  Every case runs in a fresh interpreter, so the
+These need an extension built with LMCACHE_FS_FAULT_INJECTION=1 (CI builds
+it with ``LMCACHE_FS_FAULT_INJECTION=1 bash scripts/ipu-poc/build_lmcache_fs.sh
+.``) and skip otherwise.  Every case runs in a fresh interpreter, so the
 LMCACHE_FS_FAULT environment variable and RLIMIT_NOFILE changes stay isolated.
 """
 
@@ -113,9 +113,9 @@ def test_resubmitted_and_partial_reads_return_the_data(
 
 def test_submit_error_mid_batch_fails_keys_and_recovers(tmp_path: Path) -> None:
     """A failed io_uring_submit with requests accepted fails the unfinished
-    keys of that batch after reaping them, recreates the ring so the next batch on the
-    same client succeeds, leaks no descriptor, and returns all bytes of a
-    small (4-read) budget.
+    keys of that batch after reaping them, recreates the ring so the next
+    batch on the same client succeeds, leaks no descriptor, and returns all
+    bytes of a small (4-read) budget.
 
     O_DIRECT keeps completions asynchronous so some request is still
     accepted at the second submit; the fault fires once per ring, so batches
@@ -150,6 +150,7 @@ def test_submit_error_mid_batch_fails_keys_and_recovers(tmp_path: Path) -> None:
             raise SystemExit(0)
         comp, attempt = failed
         print("failed", comp[1], sum(comp[3] or []), c.read_bytes_in_flight())
+        print("message", comp[2])
         for d in dsts:
             d[:] = bytes(len(d))
         again = wait(c, c.submit_batch_get(keys, dsts))
@@ -169,6 +170,8 @@ def test_submit_error_mid_batch_fails_keys_and_recovers(tmp_path: Path) -> None:
     # Reads reaped before the fault keep their result; the rest fail.
     failed = [line for line in out if line.startswith("failed")]
     assert failed and failed[0].split()[1:2] == ["False"], child.stdout
+    # The injected -EIO surfaced as the engine's own error, not a stray miss.
+    assert "io_uring read engine error: io_uring submit" in child.stdout
     assert int(failed[0].split()[2]) < 32 and failed[0].split()[3] == "0"
     assert "again True 32 True" in out, child.stdout
     assert "fds 0 inflight 0" in out, child.stdout
@@ -209,17 +212,16 @@ def test_close_with_reads_in_flight(tmp_path: Path) -> None:
         c = LMCacheFSClient(base, 1, read_engine="io_uring", io_depth=4)
         ids = [c.submit_batch_get(keys, [memoryview(d) for d in ds])
                for ds in dsts]
+        deadline = time.monotonic() + 10
+        while c.read_bytes_in_flight() == 0 and time.monotonic() < deadline:
+            time.sleep(0.001)
+        busy = c.read_bytes_in_flight() > 0
         seen = Counter(comp[0] for comp in c.drain_completions())
         t = time.monotonic()
         c.close()
         elapsed = time.monotonic() - t
-        try:
-            seen.update(comp[0] for comp in c.drain_completions())
-        except Exception:
-            pass
-        print(len(set(ids)), max(seen.values(), default=0),
-              set(seen) <= set(ids), c.read_bytes_in_flight(),
-              elapsed < 30)
+        print(busy, max(seen.values(), default=0), set(seen) <= set(ids),
+              c.read_bytes_in_flight(), elapsed < 30)
         """,
         tmp_path,
         fault="cqe_short",
@@ -227,7 +229,7 @@ def test_close_with_reads_in_flight(tmp_path: Path) -> None:
     )
     assert child.returncode == 0, child.stderr
     out = child.stdout.split()
-    assert out[0] == "64"
+    assert out[0] == "True", "no read was in flight when close() ran"
     assert int(out[1]) <= 1
     assert out[2:] == ["True", "0", "True"]
 
@@ -253,7 +255,6 @@ def test_error_paths_return_the_byte_budget(tmp_path: Path) -> None:
         print("missing", sum(comp[3]), c.read_bytes_in_flight())
         c.close()
         # EMFILE requeue under the same small budget
-        c = client(8)
         _, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
         resource.setrlimit(resource.RLIMIT_NOFILE, (min(hard, 65536), hard))
         c = client(8)
@@ -270,3 +271,4 @@ def test_error_paths_return_the_byte_budget(tmp_path: Path) -> None:
     lines = child.stdout.splitlines()
     assert lines[0] == "missing 15 0"
     assert lines[1] == "emfile True 16 0 True"
+    assert "io_uring open hit Too many open files; throttling" in child.stderr
