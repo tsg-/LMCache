@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 import logging
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -81,124 +82,131 @@ _PROBE_SRC = (
     "void probe(struct io_uring_sqe *sqe) { io_uring_sqe_set_data64(sqe, 1); }\n"
 )
 
+_SYSTEM_PREFIXES: list[tuple[str, list[str]]] = [
+    (
+        "/usr/include",
+        ["/usr/lib/x86_64-linux-gnu", "/usr/lib/aarch64-linux-gnu"]
+        + ["/usr/lib64", "/usr/lib"],
+    ),
+    ("/usr/local/include", ["/usr/local/lib", "/usr/local/lib64"]),
+]
 
-def _compiler() -> str | None:
-    """Return a C compiler path, honouring ``$CC``."""
-    return shutil.which(os.environ.get("CC", "cc"))
+
+def _compiler() -> list[str]:
+    """Return the C compiler command from ``$CC`` (default ``cc``).
+
+    Returns:
+        The command words, or an empty list when the compiler is not found.
+    """
+    words = shlex.split(os.environ.get("CC", "cc"))
+    if not words or shutil.which(words[0]) is None:
+        return []
+    return words
 
 
-def _probe(inc_dir: Path, archive: Path | None) -> bool:
-    """Compile the probe against ``inc_dir``; also link ``-shared`` if given.
+def _header_has_set_data64(inc_dir: Path) -> bool:
+    """Check that ``liburing.h`` in ``inc_dir`` declares liburing 2.2 APIs.
 
     Args:
         inc_dir: Directory containing ``liburing.h``.
-        archive: Archive to link into a shared object, or ``None`` to only
-            check that the header declares ``io_uring_sqe_set_data64``.
 
     Returns:
-        True when the probe compiles (and links).
+        True when a probe using ``io_uring_sqe_set_data64`` compiles.
     """
     cc = _compiler()
-    if cc is None:
+    if not cc:
         return False
     with tempfile.TemporaryDirectory() as tmp:
         src = Path(tmp) / "probe.c"
         src.write_text(_PROBE_SRC)
-        cmd = [cc, "-I", str(inc_dir)]
-        if archive is None:
-            cmd += ["-fsyntax-only", str(src)]
-        else:
-            cmd += ["-fPIC", "-shared", str(src), str(archive), "-o"]
-            cmd += [str(Path(tmp) / "probe.so")]
+        cmd = [*cc, "-I", str(inc_dir), "-fsyntax-only", str(src)]
         return subprocess.run(cmd, capture_output=True, check=False).returncode == 0
 
 
 def _archive_is_pic(archive: Path) -> bool:
-    """Return True if a static archive can be linked into a shared object.
+    """Return True if ``readelf -r`` shows the archive is position-independent.
 
-    Uses ``readelf -r``: absolute 32-bit relocations (``R_X86_64_32``) mean the
-    archive was built without ``-fPIC``. Without ``readelf``, falls back to a
-    ``-shared`` link probe.
+    Absolute 32-bit relocations (``R_X86_64_32``) mean the archive was built
+    without ``-fPIC``. Without ``readelf`` the archive cannot be verified and
+    is rejected.
 
     Args:
         archive: Path to a ``liburing.a``.
 
     Returns:
-        True when no non-PIC relocations are present.
+        True when readelf ran and no non-PIC relocations are present.
     """
     readelf = shutil.which("readelf")
     if readelf is None:
-        logger.warning("lmcache_fs: readelf not found, using a link probe for PIC")
-        return _probe(archive.parent.parent / "include", archive)
+        logger.warning(
+            "lmcache_fs: readelf not found; cannot verify that %s is "
+            "position-independent; io_uring engine compiled out",
+            archive,
+        )
+        return False
     proc = subprocess.run(
         [readelf, "-r", str(archive)], capture_output=True, text=True, check=False
     )
     if proc.returncode != 0:
+        logger.warning("lmcache_fs: readelf failed on %s, skipping", archive)
         return False
-    return re.search(r"R_X86_64_32(?!S)\b|R_X86_64_32S\b", proc.stdout) is None
+    if re.search(r"R_X86_64_32(?!S)\b|R_X86_64_32S\b", proc.stdout):
+        logger.warning("lmcache_fs: %s is not position-independent, skipping", archive)
+        return False
+    return True
 
 
-def _liburing_search_candidates() -> list[tuple[Path, Path]] | None:
-    """List ``(include_dir, archive)`` candidates, or ``None`` if not opted in.
+def _liburing_candidates(explicit: str) -> list[tuple[Path, Path]]:
+    """List ``(include_dir, archive)`` pairs from one install prefix each.
 
-    Linking is opt-in: ``LMCACHE_LIBURING_DIR`` (expects ``include/`` and
-    ``lib/``) or ``LMCACHE_WITH_LIBURING=1`` (system directories).
+    Args:
+        explicit: Value of ``LMCACHE_LIBURING_DIR`` or an empty string to
+            search the system prefixes.
+
+    Returns:
+        Candidate pairs in search order.
     """
-    override = os.environ.get("LMCACHE_LIBURING_DIR")
-    if override:
-        base = Path(override)
-        return [(base / "include", base / "lib" / "liburing.a")]
-    if os.environ.get("LMCACHE_WITH_LIBURING") != "1":
-        return None
+    if explicit:
+        base = Path(explicit)
+        return [
+            (base / "include", base / lib / "liburing.a") for lib in ("lib", "lib64")
+        ]
     return [
         (Path(inc), Path(lib) / "liburing.a")
-        for inc in ("/usr/include", "/usr/local/include")
-        for lib in (
-            "/usr/lib/x86_64-linux-gnu",
-            "/usr/lib/aarch64-linux-gnu",
-            "/usr/lib64",
-            "/usr/lib",
-            "/usr/local/lib",
-        )
+        for inc, libs in _SYSTEM_PREFIXES
+        for lib in libs
     ]
 
 
-def _find_liburing() -> tuple[Path, Path] | None:
+def _find_liburing() -> list[tuple[Path, Path]]:
     """Locate ``liburing.h`` and a PIC ``liburing.a`` of version 2.2 or newer.
 
-    Logs why the engine is compiled out or a candidate was rejected.
+    Linking is opt-in via ``LMCACHE_LIBURING_DIR`` (an install prefix with
+    ``include/`` and ``lib/``) or ``LMCACHE_WITH_LIBURING=1`` (system
+    prefixes). Logs why the engine is compiled out or a candidate was
+    rejected.
 
     Returns:
-        ``(include_dir, archive)`` or ``None`` when the engine is compiled out.
+        A one-element list ``[(include_dir, archive)]``, or an empty list when
+        the engine is compiled out.
     """
     if not sys.platform.startswith("linux"):
         logger.warning("lmcache_fs: not Linux; io_uring engine compiled out")
-        return None
-    candidates = _liburing_search_candidates()
-    if candidates is None:
+        return []
+    explicit = os.environ.get("LMCACHE_LIBURING_DIR", "")
+    if not explicit and os.environ.get("LMCACHE_WITH_LIBURING") != "1":
         logger.warning(
             "lmcache_fs: io_uring engine compiled out "
             "(set LMCACHE_WITH_LIBURING=1 or LMCACHE_LIBURING_DIR to enable)"
         )
-        return None
-    explicit = os.environ.get("LMCACHE_LIBURING_DIR")
-    for inc_dir, archive in candidates:
-        has_header = (inc_dir / "liburing.h").is_file()
-        has_archive = archive.is_file()
-        if not (has_header and has_archive):
-            if explicit:
-                logger.warning(
-                    "lmcache_fs: LMCACHE_LIBURING_DIR=%s is invalid "
-                    "(need %s and %s); io_uring engine compiled out",
-                    explicit,
-                    inc_dir / "liburing.h",
-                    archive,
-                )
+        return []
+    for inc_dir, archive in _liburing_candidates(explicit):
+        if not ((inc_dir / "liburing.h").is_file() and archive.is_file()):
             continue
-        if _compiler() is None:
+        if not _compiler():
             logger.warning("lmcache_fs: no C compiler to probe %s, skipping", archive)
             continue
-        if not _probe(inc_dir, None):
+        if not _header_has_set_data64(inc_dir):
             logger.warning(
                 "lmcache_fs: %s is older than liburing 2.2 "
                 "(no io_uring_sqe_set_data64), skipping",
@@ -206,17 +214,21 @@ def _find_liburing() -> tuple[Path, Path] | None:
             )
             continue
         if not _archive_is_pic(archive):
-            logger.warning(
-                "lmcache_fs: %s is not position-independent, skipping", archive
-            )
             continue
-        return inc_dir, archive
-    if not explicit:
+        return [(inc_dir, archive)]
+    if explicit:
+        logger.warning(
+            "lmcache_fs: LMCACHE_LIBURING_DIR=%s has no usable liburing >= 2.2 "
+            "(need include/liburing.h and lib/liburing.a); "
+            "io_uring engine compiled out",
+            explicit,
+        )
+    else:
         logger.warning(
             "lmcache_fs: no usable liburing >= 2.2 PIC archive found "
             "in system dirs; io_uring engine compiled out"
         )
-    return None
+    return []
 
 
 def _fs_liburing_build_args() -> tuple[list[str], list[str], list[str]]:
@@ -228,9 +240,7 @@ def _fs_liburing_build_args() -> tuple[list[str], list[str], list[str]]:
     defines: list[str] = []
     include_dirs: list[str] = []
     objects: list[str] = []
-    found = _find_liburing()
-    if found is not None:
-        inc_dir, archive = found
+    for inc_dir, archive in _find_liburing():
         defines.append("-DLMCACHE_HAVE_LIBURING=1")
         include_dirs.append(str(inc_dir))
         objects.append(str(archive))
