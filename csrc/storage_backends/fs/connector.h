@@ -111,6 +111,10 @@ class FSConnector : public ConnectorBase<WorkerFSConn> {
   // legacy path or before anything has been read.
   size_t read_peak_bytes() const;
 
+  // Bytes reserved in the budget of the engine in use and not yet released;
+  // 0 when no read is in flight, and always on the legacy path.
+  size_t read_bytes_in_flight() const;
+
   // The read engine in use: "io_uring", "pool", or "legacy" (the pool
   // engine with num_read_workers 0, reading on the worker threads).
   std::string read_engine() const;

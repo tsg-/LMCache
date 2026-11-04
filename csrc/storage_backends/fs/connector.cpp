@@ -583,6 +583,11 @@ size_t FSConnector::read_peak_bytes() const {
   return use_uring_ ? uring_budget_.peak_bytes() : read_budget_.peak_bytes();
 }
 
+size_t FSConnector::read_bytes_in_flight() const {
+  return use_uring_ ? uring_budget_.bytes_in_flight()
+                    : read_budget_.bytes_in_flight();
+}
+
 std::string FSConnector::read_engine() const { return read_engine_; }
 
 unsigned FSConnector::io_depth() const { return io_depth_; }

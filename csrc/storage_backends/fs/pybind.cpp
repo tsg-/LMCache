@@ -44,6 +44,10 @@ PYBIND11_MODULE(lmcache_fs, m) {
       .def("read_peak_bytes", &lmcache::connector::FSConnector::read_peak_bytes,
            "Most bytes the read engine has had in flight at once; 0 on the "
            "legacy path.")
+      .def("read_bytes_in_flight",
+           &lmcache::connector::FSConnector::read_bytes_in_flight,
+           "Bytes reserved in the read budget and not yet released; 0 when "
+           "no read is in flight.")
       .def("read_engine", &lmcache::connector::FSConnector::read_engine,
            "The read engine in use: 'io_uring', 'pool' or 'legacy'.")
       .def("io_depth", &lmcache::connector::FSConnector::io_depth,

@@ -123,5 +123,10 @@ size_t ReadBudget::peak_bytes() const {
   return peak_bytes_;
 }
 
+size_t ReadBudget::bytes_in_flight() const {
+  std::lock_guard<std::mutex> lk(mu_);
+  return bytes_in_flight_;
+}
+
 }  // namespace connector
 }  // namespace lmcache

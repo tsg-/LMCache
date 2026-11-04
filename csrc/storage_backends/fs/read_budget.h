@@ -91,6 +91,9 @@ class ReadBudget {
   // The most bytes ever in flight at once.
   size_t peak_bytes() const;
 
+  // The bytes reserved and not yet released.
+  size_t bytes_in_flight() const;
+
  private:
   // Requires mu_.
   bool admits(size_t len) const;
