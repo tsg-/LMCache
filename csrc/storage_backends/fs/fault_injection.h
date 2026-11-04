@@ -21,6 +21,7 @@ namespace connector {
 //   cqe_eintr           the first CQE of each read reports -EINTR.
 //   wait_error_forever  every CQE wait returns -EIO.
 //   queue_init_error    io_uring_queue_init returns -EPERM.
+//   read_unsupported    the IORING_OP_READ probe reports unsupported.
 enum class FsFault {
   kNone,
   kSubmitPartial,
@@ -29,6 +30,7 @@ enum class FsFault {
   kCqeEintr,
   kWaitErrorForever,
   kQueueInitError,
+  kReadUnsupported,
 };
 
 inline FsFault fs_fault_from_env() {
@@ -42,6 +44,7 @@ inline FsFault fs_fault_from_env() {
     return FsFault::kWaitErrorForever;
   }
   if (std::strcmp(v, "queue_init_error") == 0) return FsFault::kQueueInitError;
+  if (std::strcmp(v, "read_unsupported") == 0) return FsFault::kReadUnsupported;
   return FsFault::kNone;
 }
 

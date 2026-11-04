@@ -83,6 +83,8 @@ class UringReader {
   struct Batch;
 
   int queue_init();
+  // True when the ring's kernel supports IORING_OP_READ.
+  bool read_supported();
   int submit(unsigned accepted);
   int wait(io_uring_cqe** cqe);
   // Takes a CQE apart for the batch; false for a request it does not know.

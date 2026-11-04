@@ -162,6 +162,13 @@ UringReader::UringReader(unsigned io_depth, ReadBudget& budget)
   if (rc < 0) {
     throw engine_error("queue_init", -rc);
   }
+  // Kernels 5.1-5.5 create rings but reject IORING_OP_READ, which would fail
+  // every read, so refuse such a ring up front.
+  if (!read_supported()) {
+    io_uring_queue_exit(&ring_);
+    throw std::runtime_error(
+        "io_uring: the kernel does not support IORING_OP_READ");
+  }
   usable_ = true;
 }
 
@@ -170,6 +177,17 @@ UringReader::~UringReader() {
 }
 
 bool UringReader::usable() const { return usable_; }
+
+bool UringReader::read_supported() {
+  #ifdef LMCACHE_FS_FAULT_INJECTION
+  if (fs_fault_from_env() == FsFault::kReadUnsupported) return false;
+  #endif
+  struct io_uring_probe* probe = io_uring_get_probe_ring(&ring_);
+  if (probe == nullptr) return false;
+  const bool ok = io_uring_opcode_supported(probe, IORING_OP_READ) != 0;
+  io_uring_free_probe(probe);
+  return ok;
+}
 
 int UringReader::queue_init() {
   #ifdef LMCACHE_FS_FAULT_INJECTION

@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Failure-path tests for the fs_native io_uring read engine.
 
-These need an extension built with LMCACHE_FS_FAULT_INJECTION=1 (CI builds
-it with ``LMCACHE_FS_FAULT_INJECTION=1 bash scripts/ipu-poc/build_lmcache_fs.sh
-.``) and skip otherwise.  Every case runs in a fresh interpreter, so the
+These need an extension built with ``LMCACHE_WITH_LIBURING=1
+LMCACHE_FS_FAULT_INJECTION=1`` and skip otherwise.  No CI job builds that
+yet.  Every case runs in a fresh interpreter, so the
 LMCACHE_FS_FAULT environment variable and RLIMIT_NOFILE changes stay isolated.
 """
 
@@ -121,6 +121,10 @@ def test_submit_error_mid_batch_fails_keys_and_recovers(tmp_path: Path) -> None:
     accepted at the second submit; the fault fires once per ring, so batches
     repeat until one reports it.
     """
+    try:
+        os.close(os.open(tmp_path / "probe", os.O_CREAT | os.O_WRONLY | os.O_DIRECT))
+    except OSError as exc:
+        pytest.skip(f"O_DIRECT open fails on {tmp_path}: {exc}")
     child = _run(
         """
         n, size = 32, 256 << 10
@@ -275,3 +279,44 @@ def test_error_paths_return_the_byte_budget(tmp_path: Path) -> None:
     assert lines[0] == "missing 15 0"
     assert lines[1] == "emfile True 16 0 True"
     assert "io_uring open hit Too many open files; throttling" in child.stderr
+
+
+def test_auto_falls_back_when_read_is_unsupported(tmp_path: Path) -> None:
+    """A kernel that creates rings but rejects IORING_OP_READ makes auto use
+    the read pool with a warning naming the reason, and reads still return
+    the stored bytes."""
+    child = _run(
+        """
+        n, size = 8, 64 << 10
+        keys, srcs = corpus(n, size)
+        dsts = [bytearray(size) for _ in range(n)]
+        c = LMCacheFSClient(base, 1, "", False, 0, 4, read_engine="auto")
+        comp = wait(c, c.submit_batch_get(keys, [memoryview(d) for d in dsts]))
+        print(c.read_engine(), comp[1], sum(comp[3]),
+              all(d == s for d, s in zip(dsts, srcs)))
+        c.close()
+        """,
+        tmp_path,
+        fault="read_unsupported",
+    )
+    assert child.returncode == 0, child.stderr
+    assert child.stdout.split() == ["pool", "True", "8", "True"]
+    assert "IORING_OP_READ" in child.stderr
+
+
+def test_forced_io_uring_raises_when_read_is_unsupported(tmp_path: Path) -> None:
+    """A forced io_uring engine refuses construction, naming IORING_OP_READ."""
+    child = _run(
+        """
+        try:
+            LMCacheFSClient(base, 1, read_engine="io_uring")
+            print("CONSTRUCTED")
+        except RuntimeError as e:
+            print("raised", e)
+        """,
+        tmp_path,
+        fault="read_unsupported",
+    )
+    assert child.returncode == 0, child.stderr
+    assert child.stdout.startswith("raised"), child.stdout
+    assert "IORING_OP_READ" in child.stdout
