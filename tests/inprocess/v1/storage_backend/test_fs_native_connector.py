@@ -4,6 +4,7 @@
 # Standard
 from pathlib import Path
 from typing import Any
+import array
 import ctypes
 import os
 import select
@@ -11,6 +12,14 @@ import time
 
 # Third Party
 import pytest
+
+# First Party
+from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.key_codec import (
+    encode_fs_filename,
+    encode_storage_key,
+    encode_tags,
+)
 
 
 def _import_fs_client() -> type:
@@ -546,5 +555,228 @@ def test_misaligned_store_keeps_the_pooled_file_reusable(tmp_path: Path) -> None
 
         _store(client, "test_model@00000000@0@" + "c" * 16, view)
         assert _data_path(tmp_path, "c" * 16).stat().st_ino == inode
+    finally:
+        client.close()
+
+
+_RAW_SIZE = 4096
+_MAX_U64 = 2**64 - 1
+
+
+def _raw_keys(
+    salt: str, tags: dict[str, str], rank: int, group: int, hash_len: int
+) -> list[ObjectKey]:
+    return [
+        ObjectKey(
+            bytes([i + 1]) * hash_len,
+            "test_model",
+            rank,
+            group,
+            salt,
+            tags=tags,
+        )
+        for i in range(3)
+    ]
+
+
+def _raw_call(
+    client: Any,
+    method: str,
+    keys: list[ObjectKey],
+    views: list[memoryview],
+    **overrides: Any,
+) -> int:
+    """Submit ``keys`` through a raw method, letting tests override arguments."""
+    ident = keys[0].identity
+    args: dict[str, Any] = {
+        "model_name": ident.model_name,
+        "cache_salt": ident.cache_salt,
+        "tags_token": encode_tags(ident.tags),
+        "kv_ranks": array.array("Q", [k.kv_rank for k in keys]),
+        "object_group_ids": array.array("Q", [k.object_group_id for k in keys]),
+        "chunk_hashes": b"".join(k.chunk_hash for k in keys),
+        "hash_len": len(ident.chunk_hash),
+        "buf_ptrs": array.array("Q", [_buffer_addr(v) for v in views]),
+        "buf_lens": array.array("Q", [len(v) for v in views]),
+    }
+    args.update(overrides)
+    return getattr(client, method)(*args.values())
+
+
+def _raw_views(n: int = 3) -> tuple[list[bytearray], list[memoryview]]:
+    raws = [bytearray(_RAW_SIZE) for _ in range(n)]
+    views = [memoryview(r) for r in raws]
+    for i, v in enumerate(views):
+        v[:] = bytes([i + 7]) * _RAW_SIZE
+    return raws, views
+
+
+@pytest.mark.parametrize("hash_len", [8, 16, 32])
+@pytest.mark.parametrize("group", [0, _MAX_U64])
+@pytest.mark.parametrize("rank", [0, _MAX_U64])
+@pytest.mark.parametrize("tags", [{}, {"lora": "a1"}])
+@pytest.mark.parametrize("salt", ["", "tenant"])
+def test_raw_store_writes_canonical_filenames(
+    tmp_path: Path,
+    salt: str,
+    tags: dict[str, str],
+    rank: int,
+    group: int,
+    hash_len: int,
+) -> None:
+    """The raw path names files exactly as the Python key codec does."""
+    LMCacheFSClient = _import_fs_client()
+    keys = _raw_keys(salt, tags, rank, group, hash_len)
+    _raws, views = _raw_views()
+    client = LMCacheFSClient(str(tmp_path), 2, num_shard_dirs=0)
+    try:
+        done = _wait_for_completion(
+            client, _raw_call(client, "submit_batch_set_raw", keys, views)
+        )
+        assert done[1], done[2]
+        on_disk = sorted(p.name for p in tmp_path.glob("*.data"))
+        assert on_disk == sorted(encode_fs_filename(k) for k in keys)
+    finally:
+        client.close()
+
+
+def test_raw_store_string_load_round_trip(tmp_path: Path) -> None:
+    """Objects stored through the raw path load through the string path."""
+    LMCacheFSClient = _import_fs_client()
+    keys = _raw_keys("tenant", {"lora": "a1"}, 3, 5, 16)
+    _raws, views = _raw_views()
+    client = LMCacheFSClient(str(tmp_path), 2, num_shard_dirs=0)
+    try:
+        done = _wait_for_completion(
+            client, _raw_call(client, "submit_batch_set_raw", keys, views)
+        )
+        assert done[1], done[2]
+        dest = [bytearray(_RAW_SIZE) for _ in keys]
+        fid = client.submit_batch_get(
+            [encode_storage_key(k) for k in keys], [memoryview(d) for d in dest]
+        )
+        done = _wait_for_completion(client, fid)
+        assert done[1], done[2]
+        assert [bytes(d) for d in dest] == [bytes(v) for v in views]
+    finally:
+        client.close()
+
+
+def test_string_store_raw_load_round_trip(tmp_path: Path) -> None:
+    """Objects stored through the string path load through the raw path."""
+    LMCacheFSClient = _import_fs_client()
+    keys = _raw_keys("", {"lora": "a1"}, 3, 5, 16)
+    _raws, views = _raw_views()
+    client = LMCacheFSClient(str(tmp_path), 2, num_shard_dirs=0)
+    try:
+        fid = client.submit_batch_set([encode_storage_key(k) for k in keys], views)
+        done = _wait_for_completion(client, fid)
+        assert done[1], done[2]
+        dest = [bytearray(_RAW_SIZE) for _ in keys]
+        dviews = [memoryview(d) for d in dest]
+        done = _wait_for_completion(
+            client, _raw_call(client, "submit_batch_get_raw", keys, dviews)
+        )
+        assert done[1], done[2]
+        assert [bytes(d) for d in dest] == [bytes(v) for v in views]
+    finally:
+        client.close()
+
+
+def _bad_overrides(bad: str, keys: list[ObjectKey]) -> dict[str, Any]:
+    ranks = [k.kv_rank for k in keys]
+    be = (ctypes.c_uint64.__ctype_be__ * len(keys))(*ranks)
+    two_d = memoryview(array.array("Q", ranks * 2)).cast("B").cast("Q", (2, len(keys)))
+    strided = memoryview(array.array("Q", ranks * 2))[::2]
+    return {
+        "len_mismatch": {"object_group_ids": array.array("Q", [0, 0])},
+        "fmt_d": {"kv_ranks": array.array("d", [float(r) for r in ranks])},
+        "fmt_q": {"kv_ranks": array.array("q", ranks)},
+        "fmt_be": {"kv_ranks": memoryview(be)},
+        "two_d": {"kv_ranks": two_d},
+        "noncontig": {"kv_ranks": strided},
+        "empty": {
+            "kv_ranks": array.array("Q"),
+            "object_group_ids": array.array("Q"),
+            "buf_ptrs": array.array("Q"),
+            "buf_lens": array.array("Q"),
+            "chunk_hashes": b"",
+        },
+        "hash_len_0": {"hash_len": 0},
+        "hash_len_mismatch": {"hash_len": 7},
+        "at_in_model": {"model_name": "a@b"},
+        "at_in_salt": {"cache_salt": "a@b"},
+        "at_in_token": {"tags_token": "x1-a@b"},
+    }[bad]
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "len_mismatch",
+        "fmt_d",
+        "fmt_q",
+        "fmt_be",
+        "two_d",
+        "noncontig",
+        "empty",
+        "hash_len_0",
+        "hash_len_mismatch",
+        "at_in_model",
+        "at_in_salt",
+        "at_in_token",
+    ],
+)
+@pytest.mark.parametrize("method", ["submit_batch_get_raw", "submit_batch_set_raw"])
+def test_raw_submit_rejects_bad_arguments(
+    tmp_path: Path, method: str, bad: str
+) -> None:
+    """Malformed raw arguments raise ValueError and submit nothing."""
+    LMCacheFSClient = _import_fs_client()
+    keys = _raw_keys("", {}, 1, 0, 16)
+    _raws, views = _raw_views()
+    client = LMCacheFSClient(str(tmp_path), 2, num_shard_dirs=0)
+    try:
+        with pytest.raises(ValueError):
+            _raw_call(client, method, keys, views, **_bad_overrides(bad, keys))
+        time.sleep(0.05)
+        assert client.drain_completions() == []
+        assert not list(tmp_path.rglob("*.data"))
+    finally:
+        client.close()
+
+
+def test_raw_submit_accepts_unaligned_arrays(tmp_path: Path) -> None:
+    """Array buffers at odd addresses are copied, not dereferenced in place."""
+    LMCacheFSClient = _import_fs_client()
+    keys = _raw_keys("", {}, 1, 2, 16)
+    _raws, views = _raw_views()
+
+    def unaligned(values: list[int]) -> memoryview:
+        raw = bytearray(8 * len(values) + 1)
+        raw[1:] = array.array("Q", values).tobytes()
+        view = memoryview(raw)[1:].cast("Q")
+        assert ctypes.addressof(ctypes.c_char.from_buffer(raw)) % 8 == 0
+        return view
+
+    client = LMCacheFSClient(str(tmp_path), 2, num_shard_dirs=0)
+    try:
+        # raw+1 is 8-byte unaligned whenever the bytearray start is aligned.
+        done = _wait_for_completion(
+            client,
+            _raw_call(
+                client,
+                "submit_batch_set_raw",
+                keys,
+                views,
+                kv_ranks=unaligned([k.kv_rank for k in keys]),
+                object_group_ids=unaligned([k.object_group_id for k in keys]),
+                buf_ptrs=unaligned([_buffer_addr(v) for v in views]),
+                buf_lens=unaligned([len(v) for v in views]),
+            ),
+        )
+        assert done[1], done[2]
+        on_disk = sorted(p.name for p in tmp_path.glob("*.data"))
+        assert on_disk == sorted(encode_fs_filename(k) for k in keys)
     finally:
         client.close()
