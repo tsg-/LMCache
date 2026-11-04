@@ -1188,6 +1188,9 @@ def test_delayed_read_never_returns_new_object(
         _raw2, fresh = _aligned_memoryview(size, 4096)
         fresh[:] = new
         _store(client, second, fresh)
+        # The load still holds K1's file, so K2 got a new one; if the load had
+        # already finished, K2 would have taken the parked file.
+        assert len(_pooled(tmp_path)) == 1, "the parked file was reused"
 
         loaded = _wait_for_completion(client, load)
         if loaded[1]:

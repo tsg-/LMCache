@@ -201,21 +201,24 @@ def test_unrecoverable_wait_aborts(tmp_path: Path) -> None:
 
 
 def test_close_with_reads_in_flight(tmp_path: Path) -> None:
-    """close() with 64 batches queued behind slow reads returns, delivers no
+    """close() with batches queued behind slow reads returns, delivers no
     completion twice, and leaves no bytes reserved."""
     child = _run(
         """
         from collections import Counter
-        n, size, batches = 8, 64 << 10, 64
+        n, size = 8, 64 << 10
         keys, srcs = corpus(n, size)
-        dsts = [[bytearray(size) for _ in range(n)] for _ in range(batches)]
         c = LMCacheFSClient(base, 1, read_engine="io_uring", io_depth=4)
-        ids = [c.submit_batch_get(keys, [memoryview(d) for d in ds])
-               for ds in dsts]
-        deadline = time.monotonic() + 10
-        while c.read_bytes_in_flight() == 0 and time.monotonic() < deadline:
-            time.sleep(0.001)
-        busy = c.read_bytes_in_flight() > 0
+        # Keep submitting until a read is seen holding the budget, so close()
+        # runs with reads in flight however fast the host drains them.
+        dsts, ids = [], []
+        busy = False
+        deadline = time.monotonic() + 60
+        while not busy and time.monotonic() < deadline:
+            ds = [bytearray(size) for _ in range(n)]
+            dsts.append(ds)
+            ids.append(c.submit_batch_get(keys, [memoryview(d) for d in ds]))
+            busy = c.read_bytes_in_flight() > 0
         seen = Counter(comp[0] for comp in c.drain_completions())
         t = time.monotonic()
         c.close()

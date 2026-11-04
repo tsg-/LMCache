@@ -154,7 +154,9 @@ worker's ring is full. So the engine adds a guard that also covers the pool:
   in the same acquisition that reserves its bytes, it records a monotonic
   timestamp in an ordered set of in-flight read start times. It unregisters
   when it releases its bytes. Synchronous fallback reads and read-pool reads
-  register the same way.
+  register the same way. With recycling on, legacy-path reads
+  (`num_read_workers=0`) register too: one zero-byte registration per tile,
+  before its first open, in a registry that never limits them.
 - Parking a deleted file records the monotonic time at which it was renamed
   into the pool.
 - The store path, before reusing a parked file, takes the budget mutex and

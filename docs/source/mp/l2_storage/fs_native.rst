@@ -59,6 +59,9 @@ I/O queue depth on a single Python thread.
   second client with ``recycle_max_files > 0`` on the same ``base_path``
   logs a warning and runs with recycling disabled (deletes unlink, stores
   create new files) and never touches the first client's pooled files.
+  A child created with ``fork()`` that does not call ``exec`` keeps the
+  lock until it exits, so a later client on that ``base_path`` runs
+  without recycling.
   A client without recycling that reads a ``base_path`` another client
   recycles is not protected and is unsupported: its loads can read
   another object's bytes.
