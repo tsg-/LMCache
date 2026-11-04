@@ -366,21 +366,23 @@ void UringReader::recover(Batch& b) {
   while (b.accepted > 0) {
     io_uring_cqe* cqe = nullptr;
     const int rc = wait(&cqe);
+    if (rc == -EINTR) continue;
     if (rc == 0) {
-      failing = false;
       const uint64_t user_data = io_uring_cqe_get_data64(cqe);
       io_uring_cqe_seen(&ring_, cqe);
-      // An unknown CQE is not counted: the request it stands for may still
-      // be in the kernel.
       if (user_data != 0 && user_data <= b.slots.size() &&
           b.slots[user_data - 1].state == State::kAccepted) {
+        failing = false;
         --b.accepted;
         b.finish(user_data - 1, false);
+        continue;
       }
-      continue;
+      // An unknown CQE retires nothing (the request it stands for may still
+      // be in the kernel), so it counts toward the abort like a failed wait.
+      last_error = EPROTO;
+    } else {
+      last_error = -rc;
     }
-    if (rc == -EINTR) continue;
-    last_error = -rc;
     const auto now = Clock::now();
     if (!failing) {
       failing = true;

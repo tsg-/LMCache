@@ -194,8 +194,8 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
         )
         self.read_engine = _validate_read_engine(read_engine)
         self.io_depth = _validate_io_depth(io_depth)
-        # Under io_uring (or auto, which may pick it) the budget applies
-        # whatever num_read_workers is.
+        # Under io_uring the budget applies whatever num_read_workers is;
+        # for auto the adapter factory warns once the engine is known.
         if (
             read_engine == "pool"
             and num_read_workers == 0
@@ -342,15 +342,32 @@ def _create_fs_native_l2_adapter(
     effective_read_budget = native_client.read_budget_bytes()
     read_engine = native_client.read_engine()
     io_depth = native_client.io_depth()
+    if (
+        config.read_engine == "auto"
+        and read_engine == "legacy"
+        and config.read_max_bytes_in_flight > 0
+    ):
+        logger.warning(
+            "fs_native: read_max_bytes_in_flight=%d is ignored because "
+            "read_engine auto fell back to the pool and num_read_workers=0 "
+            "selects the legacy read path.",
+            config.read_max_bytes_in_flight,
+        )
+    # The read pool is not started under io_uring, so its size is not shown.
+    pool_part = (
+        ""
+        if read_engine == "io_uring"
+        else f"num_read_workers={config.num_read_workers}, "
+    )
     logger.info(
         "Created FS native L2 adapter: %s (workers=%d, odirect=%s, "
-        "read_ahead=%s, num_read_workers=%d, "
-        "read_max_bytes_in_flight=%d, read_engine=%s, io_depth=%d)",
+        "read_ahead=%s, %sread_max_bytes_in_flight=%d, read_engine=%s, "
+        "io_depth=%d)",
         config.base_path,
         config.num_workers,
         config.use_odirect,
         config.read_ahead_size,
-        config.num_read_workers,
+        pool_part,
         effective_read_budget,
         read_engine,
         io_depth,

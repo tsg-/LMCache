@@ -627,9 +627,11 @@ def _run_child(code: str, tmp_path: Path) -> subprocess.CompletedProcess[str]:
 
 
 def test_nofile_limit_lowers_depth_or_raises(tmp_path: Path) -> None:
-    """With RLIMIT_NOFILE below num_workers x io_depth + 1024, auto lowers
-    the depth (or uses the pool when even depth 1 does not fit) and a
-    forced io_uring fails construction naming the numbers."""
+    """io_uring and auto raise the soft RLIMIT_NOFILE toward num_workers x
+    io_depth + 1024, never past the hard limit and never down, and pool
+    leaves it alone.  When even the raised limit is short, auto lowers the
+    depth (or uses the pool below a depth of 16) and a forced io_uring
+    fails construction naming the numbers."""
     if not _has_io_uring():
         pytest.skip("lmcache_fs was built without the io_uring engine")
     child = _run_child(
@@ -637,29 +639,52 @@ def test_nofile_limit_lowers_depth_or_raises(tmp_path: Path) -> None:
         import os, resource
         from lmcache.lmcache_fs import LMCacheFSClient
         base = os.environ["FS_TEST_DIR"]
-        _, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-        resource.setrlimit(resource.RLIMIT_NOFILE, (2048, hard))
-        c = LMCacheFSClient(base, 4, read_engine="auto", io_depth=4096)
-        print("auto", c.read_engine(), c.io_depth())
-        c.close()
+        N = resource.RLIMIT_NOFILE
+        def soft():
+            return resource.getrlimit(N)[0]
+        def show(tag, workers, engine, depth, *pool):
+            c = LMCacheFSClient(base, workers, "", False, 0, *pool,
+                                read_engine=engine, io_depth=depth)
+            print(tag, c.read_engine(), c.io_depth(), soft())
+            c.close()
+        _, hard = resource.getrlimit(N)
+        # Hard limit above the need: the soft limit is raised to the need.
+        resource.setrlimit(N, (2048, hard))
+        show("raise", 4, "auto", 512)
+        # Already enough: never lowered.
+        show("keep", 1, "auto", 64)
+        # pool never touches it.
+        resource.setrlimit(N, (1100, hard))
+        show("pool", 64, "pool", 64, 4)
+        # Hard limit below the need: raised to the hard limit, then fitted.
+        resource.setrlimit(N, (1100, 2048))
+        show("fit", 4, "auto", 4096)
         try:
             LMCacheFSClient(base, 4, read_engine="io_uring", io_depth=4096)
             print("forced ok")
         except RuntimeError as e:
             print("forced raised", e)
-        resource.setrlimit(resource.RLIMIT_NOFILE, (1030, hard))
-        c = LMCacheFSClient(base, 8, "", False, 0, 4, read_engine="auto")
-        print("tight", c.read_engine(), c.io_depth())
-        c.close()
+        # Fitted depth 16 is the auto floor; 12 is below it.
+        show("floor16", 64, "auto", 64)
+        show("floor12", 80, "auto", 64, 4)
+        # A forced io_uring takes any depth that fits, here 12 at 80 x 12.
+        show("forced12", 80, "io_uring", 12)
         """,
         tmp_path,
     )
     assert child.returncode == 0, child.stderr
     lines = child.stdout.splitlines()
-    assert lines[0] == "auto io_uring 256"
-    assert lines[1].startswith("forced raised")
-    assert "RLIMIT_NOFILE" in lines[1] and "2048" in lines[1] and "4096" in lines[1]
-    assert lines[2] == "tight pool 0"
+    assert lines[0] == "raise io_uring 512 3072"
+    assert lines[1] == "keep io_uring 64 3072"
+    assert lines[2] == "pool pool 0 1100"
+    assert lines[3] == "fit io_uring 256 2048"
+    assert lines[4].startswith("forced raised")
+    assert "RLIMIT_NOFILE" in lines[4] and "2048" in lines[4] and "4096" in lines[4]
+    assert lines[5] == "floor16 io_uring 16 2048"
+    assert lines[6] == "floor12 pool 0 2048"
+    assert lines[7] == "forced12 io_uring 12 2048"
+    assert "raised the RLIMIT_NOFILE soft limit from 2048 to 3072" in child.stderr
+    assert "below the auto floor of 16" in child.stderr
 
 
 def test_emfile_at_open_throttles_instead_of_failing(tmp_path: Path) -> None:

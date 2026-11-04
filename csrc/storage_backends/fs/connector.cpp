@@ -2,6 +2,7 @@
 
 #include "connector.h"
 #include <sys/resource.h>
+#include <algorithm>
 #include <cerrno>
 #include <cstdint>
 #include <cstdio>
@@ -112,6 +113,8 @@ static constexpr const char* POOL_PREFIX = ".pool-";
 // Far above observed load latency; see the constructor comment in connector.h.
 static constexpr std::chrono::milliseconds RECYCLE_QUARANTINE{1000};
 
+// Rings go only to workers that run gets (the shared pool), claimed at the
+// first get; adding a "retrieve" lane here needs a change to that hand-out.
 static WorkerPoolConfig lane_config(int store_workers, int delete_workers) {
   if (store_workers < 0 || delete_workers < 0) {
     throw std::invalid_argument(
@@ -340,8 +343,36 @@ void FSConnector::select_read_engine(const std::string& read_engine,
   struct rlimit nofile;
   if (::getrlimit(RLIMIT_NOFILE, &nofile) == 0 &&
       nofile.rlim_cur != RLIM_INFINITY) {
-    const uint64_t soft = static_cast<uint64_t>(nofile.rlim_cur);
+    uint64_t soft = static_cast<uint64_t>(nofile.rlim_cur);
     const uint64_t need = workers * io_depth + kReadFdMargin;
+    // Raise the soft limit toward what the rings need, never past the hard
+    // limit and never down.
+    if (need > soft) {
+      const uint64_t hard = nofile.rlim_max == RLIM_INFINITY
+                                ? need
+                                : static_cast<uint64_t>(nofile.rlim_max);
+      const uint64_t target = std::min(hard, need);
+      if (target > soft) {
+        struct rlimit raised = nofile;
+        raised.rlim_cur = static_cast<rlim_t>(target);
+        if (::setrlimit(RLIMIT_NOFILE, &raised) == 0) {
+          fprintf(stderr,
+                  "[LMCache FS] read_engine %s: raised the RLIMIT_NOFILE "
+                  "soft limit from %llu to %llu for %llu io_uring workers x "
+                  "io_depth %u\n",
+                  read_engine.c_str(), static_cast<unsigned long long>(soft),
+                  static_cast<unsigned long long>(target),
+                  static_cast<unsigned long long>(workers), io_depth);
+          soft = target;
+        } else {
+          fprintf(stderr,
+                  "[LMCache FS] read_engine %s: could not raise the "
+                  "RLIMIT_NOFILE soft limit from %llu to %llu: %s\n",
+                  read_engine.c_str(), static_cast<unsigned long long>(soft),
+                  static_cast<unsigned long long>(target), strerror(errno));
+        }
+      }
+    }
     if (need > soft) {
       if (forced) {
         throw std::runtime_error(
@@ -355,13 +386,14 @@ void FSConnector::select_read_engine(const std::string& read_engine,
       }
       const uint64_t fit =
           soft > kReadFdMargin ? (soft - kReadFdMargin) / workers : 0;
-      if (fit == 0) {
+      if (fit < kMinAutoIoDepth) {
         fprintf(stderr,
                 "[LMCache FS] read_engine auto: RLIMIT_NOFILE soft limit %llu "
-                "leaves no descriptors for %llu io_uring workers; using the "
-                "read pool\n",
+                "fits io_depth %llu for %llu io_uring workers, below the "
+                "auto floor of %u; using the read pool\n",
                 static_cast<unsigned long long>(soft),
-                static_cast<unsigned long long>(workers));
+                static_cast<unsigned long long>(fit),
+                static_cast<unsigned long long>(workers), kMinAutoIoDepth);
         return;
       }
       fprintf(stderr,

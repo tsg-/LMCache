@@ -38,6 +38,11 @@ static constexpr size_t kDefaultReadMaxBytesInFlight = size_t{1536} << 20;
 // num_workers x io_depth against RLIMIT_NOFILE.
 static constexpr size_t kReadFdMargin = 1024;
 
+// Under read_engine "auto", a depth that the descriptor limit forces below
+// this uses the read pool instead: a shallow ring would read slower than
+// the pool it replaces.
+static constexpr unsigned kMinAutoIoDepth = 16;
+
 class UringReader;
 
 // Per-worker connection state for the FS connector.
@@ -84,9 +89,11 @@ class FSConnector : public ConnectorBase<WorkerFSConn> {
   //   (read_max_bytes_in_flight, 0 = kDefaultReadMaxBytesInFlight) applies
   //   whatever num_read_workers is.  Construction fails if the engine is
   //   compiled out, a ring cannot be created, or num_workers x io_depth +
-  //   kReadFdMargin exceeds the RLIMIT_NOFILE soft limit.  "auto" is
-  //   "io_uring" where that works, lowering io_depth to fit the descriptor
-  //   limit, and "pool" otherwise.
+  //   kReadFdMargin exceeds the RLIMIT_NOFILE soft limit after raising it
+  //   (both io_uring and auto raise the soft limit toward that figure, up
+  //   to the hard limit, never down).  "auto" is "io_uring" where that
+  //   works, lowering io_depth to fit the limit, and "pool" otherwise or
+  //   when the fitted depth is below kMinAutoIoDepth.
   // io_depth: reads in flight per ring, in [1, 4096]; ignored by the pool.
   FSConnector(std::string base_path, int num_workers,
               std::string relative_tmp_dir = "", bool use_odirect = false,

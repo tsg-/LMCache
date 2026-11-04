@@ -126,13 +126,20 @@ lock-protected handoffs per read in the pool.
 
 Every read in flight holds an open file. The engine allows up to
 `num_workers x io_depth` open read files (4,096 at the defaults) on top of the
-store lanes and the process's own descriptors. At construction the connector
-reads `RLIMIT_NOFILE`. If `num_workers x io_depth` plus a margin of 1,024
-exceeds the soft limit, `auto` lowers the effective `io_depth` to fit and logs
-it, and an explicit `io_uring` setting fails construction with the numbers.
-An `EMFILE`/`ENFILE` at open time stops refilling that worker's ring until a
-read completes rather than failing the key, and fails the key only if the
-worker has nothing outstanding.
+store lanes and the process's own descriptors. At construction, under `auto`
+or `io_uring` only, the connector raises the `RLIMIT_NOFILE` soft limit to
+`min(hard, num_workers x io_depth + 1,024)` when it is below that, and logs
+the old and new values; it never lowers the limit and never touches it under
+`pool`. If the need still exceeds the (possibly raised) soft limit, `auto`
+lowers the effective `io_depth` to fit and logs it, or uses the read pool when
+the fitted depth would be below 16, since a ring that shallow reads slower
+than the pool; an explicit `io_uring` setting takes any depth of at least 1
+that fits and otherwise fails construction with the numbers. The 1,024 margin
+is an absolute figure, not a count of the descriptors the process already
+holds, so descriptors opened elsewhere can still exhaust the limit; the
+open-time throttle below covers that case. An `EMFILE`/`ENFILE` at open time
+stops refilling that worker's ring until a read completes rather than failing
+the key, and fails the key only if the worker has nothing outstanding.
 
 ### Recycling and slow reads
 

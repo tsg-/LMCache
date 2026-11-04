@@ -188,3 +188,81 @@ class TestFSNativeReadEngine:
         help_text = FSNativeL2AdapterConfig.help()
         assert "read_engine" in help_text
         assert "io_depth" in help_text
+
+
+class _StubFSClient:
+    """Stands in for LMCacheFSClient, reporting a chosen engine."""
+
+    engine = "pool"
+    depth = 0
+
+    def __init__(self, *args: object) -> None:
+        self.args = args
+
+    def read_budget_bytes(self) -> int:
+        return 1 << 30
+
+    def read_engine(self) -> str:
+        return self.engine
+
+    def io_depth(self) -> int:
+        return self.depth
+
+
+def _create_with_engine(cfg, engine: str, depth: int):
+    """Run the adapter factory against a stub client that reports `engine`;
+    return (info_calls, warning_calls)."""
+    # Standard
+    import sys
+    import types
+
+    stub_cls = type("Stub", (_StubFSClient,), {"engine": engine, "depth": depth})
+    fake_module = types.ModuleType("lmcache.lmcache_fs")
+    fake_module.LMCacheFSClient = stub_cls  # type: ignore[attr-defined]
+    # First Party
+    from lmcache.v1.distributed.l2_adapters import native_connector_l2_adapter
+
+    with (
+        patch.dict(sys.modules, {"lmcache.lmcache_fs": fake_module}),
+        patch.object(native_connector_l2_adapter, "NativeConnectorL2Adapter"),
+        patch.object(fs_native_l2_adapter.logger, "info") as info,
+        patch.object(fs_native_l2_adapter.logger, "warning") as warn,
+    ):
+        fs_native_l2_adapter._create_fs_native_l2_adapter(cfg)
+    return info.call_args_list, warn.call_args_list
+
+
+def _formatted(call) -> str:
+    return call[0][0] % tuple(call[0][1:])
+
+
+class TestFSNativeAdapterEngineReporting:
+    def test_auto_fallback_to_legacy_warns_budget_ignored(self):
+        cfg = FSNativeL2AdapterConfig(
+            base_path="/data",
+            read_engine="auto",
+            num_read_workers=0,
+            read_max_bytes_in_flight=1 << 30,
+        )
+        _, warnings = _create_with_engine(cfg, "legacy", 0)
+        assert len(warnings) == 1
+        assert "ignored" in warnings[0].args[0]
+
+    def test_auto_on_io_uring_does_not_warn(self):
+        cfg = FSNativeL2AdapterConfig(
+            base_path="/data",
+            read_engine="auto",
+            num_read_workers=0,
+            read_max_bytes_in_flight=1 << 30,
+        )
+        infos, warnings = _create_with_engine(cfg, "io_uring", 64)
+        assert warnings == []
+        line = _formatted(infos[-1])
+        assert "read_engine=io_uring" in line and "io_depth=64" in line
+        assert "num_read_workers" not in line
+
+    def test_pool_log_line_names_num_read_workers(self):
+        cfg = FSNativeL2AdapterConfig(base_path="/data", num_read_workers=8)
+        infos, _ = _create_with_engine(cfg, "pool", 0)
+        line = _formatted(infos[-1])
+        assert "num_read_workers=8" in line and "read_engine=pool" in line
