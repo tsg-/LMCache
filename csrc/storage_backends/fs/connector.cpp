@@ -234,7 +234,8 @@ FSConnector::FSConnector(std::string base_path, int num_workers,
       num_shard_dirs_(num_shard_dirs),
       recycle_max_files_(recycle_max_files),
       read_budget_(
-          effective_read_budget(num_read_workers, read_max_bytes_in_flight)) {
+          effective_read_budget(num_read_workers, read_max_bytes_in_flight),
+          read_mu_) {
   if (num_read_workers < 0) {
     throw std::runtime_error("num_read_workers must be >= 0");
   }
@@ -470,16 +471,16 @@ void FSConnector::do_batch_get_pooled(const Request& req) {
   std::vector<ReadTask> tasks(num_keys);
   std::vector<uint64_t> start_ns(num_keys);
 
-  // Each run of admitted objects is queued before the next reservation can
-  // block, so every reserved read is one a reader will finish and release.
-  // The budget lock and read_mu_ are never held together.
+  // The budget shares read_mu_, so each admitted run is reserved and queued
+  // in one critical section, and a blocking reservation releases read_mu_
+  // only after every earlier reserved read is queued for a reader.
+  std::unique_lock<std::mutex> lk(read_mu_);
   size_t queued = 0;
   try {
     while (queued < num_keys) {
-      const size_t admitted =
-          read_budget_.reserve(req.buf_lens.data() + queued, num_keys - queued,
-                               true, start_ns.data() + queued);
-      std::lock_guard<std::mutex> lk(read_mu_);
+      const size_t admitted = read_budget_.reserve_locked(
+          lk, req.buf_lens.data() + queued, num_keys - queued, true,
+          start_ns.data() + queued);
       for (size_t i = queued; i < queued + admitted; ++i) {
         tasks[i] = ReadTask{&req, i, &tile, nullptr, start_ns[i]};
         if (read_queue_tail_ != nullptr) {
@@ -493,19 +494,16 @@ void FSConnector::do_batch_get_pooled(const Request& req) {
       queued += admitted;
     }
   } catch (...) {
-    // Readers hold pointers into this frame, so the objects not queued
-    // fail and the queued ones are still waited for.
-    std::lock_guard<std::mutex> lk(read_mu_);
+    // Only reserve_locked() can throw, with read_mu_ still held and nothing
+    // reserved by the failed call.  Readers hold pointers into this frame,
+    // so the objects not queued fail and the queued ones are waited for.
     for (size_t i = queued; i < num_keys; ++i) {
       tile.ok[i] = 0;
     }
     tile.remaining -= num_keys - queued;
   }
-
-  {
-    std::unique_lock<std::mutex> lk(read_mu_);
-    tile.done_cv.wait(lk, [&tile] { return tile.remaining == 0; });
-  }
+  tile.done_cv.wait(lk, [&tile] { return tile.remaining == 0; });
+  lk.unlock();
 
   for (size_t i = 0; i < num_keys; ++i) {
     req.batch->per_key_results[req.start_idx + i] = tile.ok[i];
@@ -578,15 +576,13 @@ void FSConnector::read_thread_main(WorkerFSConn& conn) {
               key.c_str());
     }
 
-    // Released before the completion is recorded, while the tile cannot
-    // yet be done, so `task` is still alive here.
-    read_budget_.release(req.buf_lens[task->index], 1, &task->start_ns, 1);
-
     // The submitting worker may destroy `task` and its tile as soon as it
     // takes read_mu_ and sees remaining == 0, so nothing touches them
     // after the notify below; notifying under the lock keeps the tile
     // alive until then.
     lk.lock();
+    read_budget_.release_locked(lk, req.buf_lens[task->index], 1,
+                                &task->start_ns, 1);
     task->tile->ok[task->index] = ok;
     if (--task->tile->remaining == 0) {
       task->tile->done_cv.notify_one();

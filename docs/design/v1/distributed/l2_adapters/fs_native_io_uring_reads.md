@@ -21,9 +21,11 @@ connector uses the read pool and logs which engine it chose.
 The read pool runs each read as a blocking `do_single_get` (`::read` in a
 loop) on one of
 `num_read_workers` threads, and every read passes through one queue guarded by
-`read_mu_`. The submitting worker holds the lock across its whole enqueue loop
-for a batch, and each reader takes it once per object to record completion and
-pop its next task. At 64 KiB objects, about 370,000 objects per second per
+`read_mu_`, which also guards the byte budget (`ReadBudget`, sharing that
+mutex). The submitting worker holds the lock across its whole enqueue loop for
+a batch, releasing it only while it waits for budget room, and each reader
+takes it once per object to release its bytes, record completion and pop its
+next task. At 64 KiB objects, about 370,000 objects per second per
 host, that is roughly 0.4 million reader acquisitions per second plus the
 submitters' hold time, and adding readers adds contention instead of depth.
 

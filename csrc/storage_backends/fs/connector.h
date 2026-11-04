@@ -175,13 +175,14 @@ class FSConnector : public ConnectorBase<WorkerFSConn> {
   std::string pool_prefix_;
 
   // Read pool.  read_conns_ is sized once and never resized, so reader
-  // references stay valid.  read_budget_ has max_bytes() 0 without a pool
-  // and never 0 with one; it has its own lock, never held together with
-  // read_mu_.  Everything after read_mu_ is guarded by it.
-  ReadBudget read_budget_;
+  // references stay valid.  Everything after read_mu_ is guarded by it,
+  // read_budget_ included, so a reader releases its bytes, records its
+  // completion and pops its next task in one acquisition.  read_budget_
+  // has max_bytes() 0 without a pool and never 0 with one.
   std::vector<WorkerFSConn> read_conns_;
   std::vector<std::thread> read_threads_;
   std::mutex read_mu_;
+  ReadBudget read_budget_;
   std::condition_variable read_cv_;  // a task was queued, or stop
   ReadTask* read_queue_head_ = nullptr;
   ReadTask* read_queue_tail_ = nullptr;
