@@ -276,8 +276,12 @@ behaves exactly as today.
   `liburing-devel` packages and manylinux images do not reliably ship one. The
   wheel and image builds therefore compile liburing from a pinned release with
   `-fPIC` in a build step, and link that archive. Local builds may instead
-  point `LMCACHE_LIBURING_DIR` at an install; detection checks for the header
-  and a PIC archive and logs which it used.
+  point `LMCACHE_LIBURING_DIR` at an install; detection checks for the header,
+  a PIC archive and version 2.2 or newer, and logs which it used or why it
+  rejected a candidate. Linking is opt-in in PR A1: `setup.py` searches only
+  when `LMCACHE_LIBURING_DIR` or `LMCACHE_WITH_LIBURING=1` (system
+  directories) is set, so a build host that happens to have a PIC archive
+  does not link it by accident.
 - Runtime: no new dependency in wheels or images.
 - Licence: liburing is dual-licensed, MIT among them. Until LMCache
   maintainers confirm static linking under MIT is acceptable, PR 1 builds the

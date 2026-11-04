@@ -26,6 +26,12 @@ if [ "${NO_LIBURING:-0}" != 1 ]; then
     (cd "$SRC" && CFLAGS=-fPIC ./configure --prefix="$PREFIX" >/dev/null &&
       make -j"$(nproc)" -C src >/dev/null && make -C src install >/dev/null)
   fi
+  # liburing >= 2.2 is required (io_uring_sqe_set_data64).
+  if ! printf '#include <liburing.h>\nvoid p(struct io_uring_sqe *s){io_uring_sqe_set_data64(s,1);}\n' |
+    cc -x c -fsyntax-only -I"$PREFIX/include" - 2>/dev/null; then
+    echo "error: $PREFIX/include/liburing.h is older than liburing 2.2; remove $PREFIX and rerun" >&2
+    exit 1
+  fi
   DEFS+=(-DLMCACHE_HAVE_LIBURING=1)
   INCS+=(-I"$PREFIX/include")
   LIBS+=("$PREFIX/lib/liburing.a")
