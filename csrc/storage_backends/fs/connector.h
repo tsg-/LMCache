@@ -79,7 +79,12 @@ class FSConnector : public ConnectorBase<WorkerFSConn> {
   //   their own shard instead of unlinking them, and later stores of the same
   //   size overwrite a pooled file in place, so the SSD-visible footprint stops
   //   growing without discards. A pooled file is reused only after a 1 s
-  //   quarantine, so a load that opened it before the delete can finish.
+  //   quarantine and only if it was parked before every read still in
+  //   flight started, so no load of this connector can read the new
+  //   object's bytes through a file it opened before the delete.  Holds an
+  //   exclusive flock on base_path/.lmcache-recycle.lock for the
+  //   connector's life; if another connector holds it, this one logs a
+  //   warning and runs without recycling (see recycling_enabled()).
   // store_workers / delete_workers > 0 give those operations dedicated
   //   worker lanes, so their blocking metadata work does not queue ahead of
   //   loads in the shared num_workers pool.
@@ -123,6 +128,10 @@ class FSConnector : public ConnectorBase<WorkerFSConn> {
   // for RLIMIT_NOFILE; 0 under the other engines.
   unsigned io_depth() const;
 
+  // True when deletes park files for reuse: recycle_max_files > 0 and
+  // this connector holds base_path's recycle lock.
+  bool recycling_enabled() const;
+
  protected:
   WorkerFSConn create_connection() override;
   void do_single_get(WorkerFSConn& conn, const std::string& key, void* buf,
@@ -154,10 +163,16 @@ class FSConnector : public ConnectorBase<WorkerFSConn> {
   static std::filesystem::path object_path(const WorkerFSConn& conn,
                                            const std::string& filename);
 
+  struct ParkedFile {
+    std::string name;
+    // monotonic_ns() once the rename into the pool finished; 0 for a file
+    // adopted at construction.
+    uint64_t parked_ns;
+  };
+
   struct RecyclePool {
     std::mutex mu;
-    std::deque<std::pair<std::string, std::chrono::steady_clock::time_point>>
-        files;
+    std::deque<ParkedFile> files;  // in parking order
   };
 
   size_t pool_index(const std::string& filename) const;
@@ -166,8 +181,9 @@ class FSConnector : public ConnectorBase<WorkerFSConn> {
   // Moves an object into its pool. Returns false when the pool is full or the
   // rename fails; the caller then unlinks normally.
   bool recycle_into_pool(const std::filesystem::path& path, size_t index);
-  // Overwrites a quarantined pooled file and renames it to file_path.
-  // Returns false, with no visible change, when no pooled file is eligible.
+  // Overwrites a pooled file past its quarantine and parked before every
+  // read in flight started, and renames it to file_path.  Returns false,
+  // with no visible change, when no pooled file is eligible.
   bool store_into_recycled(WorkerFSConn& conn,
                            const std::filesystem::path& file_path, size_t index,
                            const void* buf, size_t len);
@@ -202,6 +218,15 @@ class FSConnector : public ConnectorBase<WorkerFSConn> {
   // under the same budget.
   void do_batch_get_uring(WorkerFSConn& conn, const Request& req);
 
+  // Takes base_path's recycle lock and adopts the pooled files left there;
+  // without the lock, sets recycle_max_files_ to 0 and logs why.
+  void init_recycling();
+  void release_recycle_lock();
+
+  // The earliest start time of any read in flight, across every budget a
+  // read can register in; UINT64_MAX when none is.
+  uint64_t oldest_read_start_ns() const;
+
   // Picks the engine for read_engine and builds its rings; leaves
   // readers_ empty when the pool is to be used.
   void select_read_engine(const std::string& read_engine, unsigned io_depth);
@@ -216,7 +241,8 @@ class FSConnector : public ConnectorBase<WorkerFSConn> {
   size_t disk_block_size_;
   size_t read_ahead_size_;
   size_t num_shard_dirs_;
-  size_t recycle_max_files_;
+  size_t recycle_max_files_;  // 0 when recycling is disabled
+  int recycle_lock_fd_ = -1;
   std::vector<std::unique_ptr<RecyclePool>> pools_;
   std::atomic<size_t> pooled_{0};
   std::atomic<uint64_t> pool_seq_{0};
@@ -245,6 +271,9 @@ class FSConnector : public ConnectorBase<WorkerFSConn> {
   std::vector<std::unique_ptr<UringReader>> readers_;
 #endif
   std::atomic<size_t> next_reader_{0};
+  // Legacy-path tiles register here, as zero-byte reads, only for the
+  // recycle guard; it never limits them, and is unused without recycling.
+  ReadBudget legacy_reads_{0};
   bool use_uring_ = false;
   unsigned io_depth_ = 0;  // effective, 0 unless use_uring_
   std::string read_engine_;

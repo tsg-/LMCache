@@ -7,7 +7,7 @@
 namespace lmcache {
 namespace connector {
 
-static uint64_t monotonic_ns() {
+uint64_t monotonic_ns() {
   return static_cast<uint64_t>(
       std::chrono::duration_cast<std::chrono::nanoseconds>(
           std::chrono::steady_clock::now().time_since_epoch())
@@ -54,8 +54,8 @@ size_t ReadBudget::reserve_locked(std::unique_lock<std::mutex>& held,
   size_t admitted = 0;
   size_t bytes = bytes_in_flight_;
   size_t reads = reads_in_flight_;
-  while (admitted < n && (reads < kMinReadsInFlight ||
-                          bytes + lens[admitted] <= max_bytes_)) {
+  while (admitted < n &&
+         (reads < kMinReadsInFlight || bytes + lens[admitted] <= max_bytes_)) {
     bytes += lens[admitted];
     ++reads;
     ++admitted;

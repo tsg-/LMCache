@@ -1134,6 +1134,114 @@ def test_misaligned_store_keeps_the_pooled_file_reusable(tmp_path: Path) -> None
         client.close()
 
 
+# Read paths for the delayed-read test: (read_engine, num_read_workers,
+# read_ahead_size).  A read_ahead_size below the object size sends io_uring
+# reads through its synchronous fallback.
+_RECYCLE_READ_PATHS = {
+    "legacy": ("pool", 0, 0),
+    "pool": ("pool", 2, 0),
+    "io_uring": ("io_uring", 0, 0),
+    "io_uring_fallback": ("io_uring", 0, 4096),
+}
+
+
+@pytest.mark.parametrize("read_path", sorted(_RECYCLE_READ_PATHS))
+def test_delayed_read_never_returns_new_object(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    nofile_for_rings: None,
+    read_path: str,
+) -> None:
+    """A load that opened K1 and is still reading after K1 is deleted and the
+    quarantine has passed returns K1's bytes or fails, never those of K2,
+    a same-size object stored meanwhile."""
+    LMCacheFSClient = _import_fs_client()
+    if not _has_fault_injection():
+        pytest.skip("needs a LMCACHE_FS_FAULT_INJECTION=1 build")
+    read_engine, num_read_workers, read_ahead_size = _RECYCLE_READ_PATHS[read_path]
+    if read_engine == "io_uring" and not _has_io_uring():
+        pytest.skip("lmcache_fs was built without the io_uring engine")
+    # Every read sleeps this long between opening its file and reading it.
+    monkeypatch.setenv("LMCACHE_FS_FAULT_DELAY_MS", "1500")
+    size = 8192
+    first = "test_model@00000000@0@" + "1" * 16
+    second = "test_model@00000000@0@" + "2" * 16
+    old = b"\x11" * size
+    new = b"\x22" * size
+    client = LMCacheFSClient(
+        str(tmp_path),
+        4,
+        read_ahead_size=read_ahead_size,
+        num_read_workers=num_read_workers,
+        recycle_max_files=8,
+        read_engine=read_engine,
+    )
+    try:
+        _raw, view = _aligned_memoryview(size, 4096)
+        view[:] = old
+        _store(client, first, view)
+        _dest_raw, dest = _aligned_memoryview(size, 4096)
+        load = client.submit_batch_get([first], [dest])
+        time.sleep(0.1)  # the load has opened K1 and is sleeping
+        assert _wait_for_completion(client, client.submit_batch_delete([first]))[1]
+        time.sleep(1.2)  # past the quarantine, before the load reads
+        _raw2, fresh = _aligned_memoryview(size, 4096)
+        fresh[:] = new
+        _store(client, second, fresh)
+
+        loaded = _wait_for_completion(client, load)
+        if loaded[1]:
+            assert bytes(dest) == old, "the load returned bytes other than K1's"
+        # K2 is intact whichever file it went to.
+        _dest2_raw, dest2 = _aligned_memoryview(size, 4096)
+        assert _submit_and_wait(client, "submit_batch_get", second, dest2)[1]
+        assert bytes(dest2) == new
+    finally:
+        client.close()
+
+
+def test_second_recycler_runs_without_recycling(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """A second recycling client on a base_path the first holds logs it,
+    runs with recycling disabled and never reuses the first's parked files."""
+    LMCacheFSClient = _import_fs_client()
+    size = 8192
+    _raw, view = _aligned_memoryview(size, 4096)
+    _fill(view)
+    keys = [f"test_model@00000000@0@{i:016x}" for i in (1, 2, 3)]
+    first = LMCacheFSClient(str(tmp_path), 1, recycle_max_files=8)
+    try:
+        assert first.recycling_enabled()
+        _store(first, keys[0], view)
+        assert _wait_for_completion(first, first.submit_batch_delete([keys[0]]))[1]
+        parked = _pooled(tmp_path)
+        assert len(parked) == 1
+
+        second = LMCacheFSClient(str(tmp_path), 1, recycle_max_files=8)
+        try:
+            assert not second.recycling_enabled()
+            assert "recycling disabled for" in capfd.readouterr().err
+            time.sleep(1.2)  # past the quarantine of the first's file
+            _store(second, keys[1], view)
+            # Its stores leave the first's parked file alone, and its deletes
+            # unlink instead of parking.
+            assert _pooled(tmp_path) == parked
+            assert _wait_for_completion(second, second.submit_batch_delete([keys[1]]))[
+                1
+            ]
+            assert _pooled(tmp_path) == parked
+            assert not list(tmp_path.glob("*.data"))
+        finally:
+            second.close()
+
+        # The first still recycles its own file.
+        _store(first, keys[2], view)
+        assert not _pooled(tmp_path)
+    finally:
+        first.close()
+
+
 _RAW_SIZE = 4096
 _MAX_U64 = 2**64 - 1
 

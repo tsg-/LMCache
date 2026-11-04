@@ -217,9 +217,6 @@ bool UringReader::handle_cqe(Batch& b, uint64_t user_data, int res) {
   const ReadItem& item = b.items[i];
   --b.accepted;
   #ifdef LMCACHE_FS_FAULT_INJECTION
-  if (fault_delay_ms_ > 0) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(fault_delay_ms_));
-  }
   if (fault_ == FsFault::kCqeEintr && !s.faulted && res > 0) {
     s.faulted = true;
     res = -EINTR;
@@ -304,7 +301,8 @@ void UringReader::read_batch(std::vector<ReadItem>& items, uint8_t* ok,
             if ((err == EMFILE || err == ENFILE) && in_ring > 0) {
               for (size_t k = i; k < end; ++k) b.unreserve(k);
   #ifdef LMCACHE_FS_FAULT_INJECTION
-              fprintf(stderr, "[LMCache GET] io_uring open hit %s; throttling\n",
+              fprintf(stderr,
+                      "[LMCache GET] io_uring open hit %s; throttling\n",
                       std::strerror(err));
   #endif
               throttled = true;
@@ -315,6 +313,14 @@ void UringReader::read_batch(std::vector<ReadItem>& items, uint8_t* ok,
             continue;
           }
           b.slots[i].fd = fd;
+  #ifdef LMCACHE_FS_FAULT_INJECTION
+          // Open and registered, not yet read: the window a recycled
+          // inode could be overwritten in.
+          if (fault_delay_ms_ > 0) {
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(fault_delay_ms_));
+          }
+  #endif
           b.prep(ring_, i);
           ++in_ring;
         }

@@ -53,5 +53,9 @@ PYBIND11_MODULE(lmcache_fs, m) {
       .def("io_depth", &lmcache::connector::FSConnector::io_depth,
            "Reads in flight per io_uring ring, after any lowering for "
            "RLIMIT_NOFILE; 0 when the io_uring engine is not in use.")
+      .def("recycling_enabled",
+           &lmcache::connector::FSConnector::recycling_enabled,
+           "True when deletes park files for reuse: recycle_max_files > 0 "
+           "and this client holds base_path's recycle lock.")
           LMCACHE_BIND_CONNECTOR_METHODS(lmcache::connector::FSConnector);
 }

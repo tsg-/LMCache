@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "connector.h"
+#include <sys/file.h>
 #include <sys/resource.h>
 #include <algorithm>
 #include <cerrno>
@@ -111,7 +112,9 @@ std::string FSConnector::shard_dir_name(const std::string& filename,
 // cannot collide with a stored object.
 static constexpr const char* POOL_PREFIX = ".pool-";
 // Far above observed load latency; see the constructor comment in connector.h.
-static constexpr std::chrono::milliseconds RECYCLE_QUARANTINE{1000};
+static constexpr uint64_t RECYCLE_QUARANTINE_NS = 1000000000ULL;
+// Held by the one connector allowed to recycle in a base_path.
+static constexpr const char* RECYCLE_LOCK_NAME = ".lmcache-recycle.lock";
 
 // Rings go only to workers that run gets (the shared pool), claimed at the
 // first get; adding a "retrieve" lane here needs a change to that hand-out.
@@ -149,10 +152,20 @@ bool FSConnector::recycle_into_pool(const std::filesystem::path& path,
     pooled_.fetch_sub(1);
     return false;
   }
+  // Stamped after the rename, under the pool lock so the deque stays in
+  // stamp order: a read that opened the old inode registered before its
+  // open and so before this stamp.
   auto& pool = *pools_[index];
   std::lock_guard<std::mutex> lock(pool.mu);
-  pool.files.emplace_back(std::move(name), std::chrono::steady_clock::now());
+  pool.files.push_back(ParkedFile{std::move(name), monotonic_ns()});
   return true;
+}
+
+uint64_t FSConnector::oldest_read_start_ns() const {
+  // Each budget takes its own lock; the store path holds none of them.
+  return std::min({read_budget_.oldest_start_ns(),
+                   uring_budget_.oldest_start_ns(),
+                   legacy_reads_.oldest_start_ns()});
 }
 
 bool FSConnector::store_into_recycled(WorkerFSConn& conn,
@@ -170,11 +183,16 @@ bool FSConnector::store_into_recycled(WorkerFSConn& conn,
     auto& pool = *pools_[index];
     std::lock_guard<std::mutex> lock(pool.mu);
     if (pool.files.empty() ||
-        std::chrono::steady_clock::now() - pool.files.front().second <
-            RECYCLE_QUARANTINE) {
+        monotonic_ns() - pool.files.front().parked_ns < RECYCLE_QUARANTINE_NS) {
       return false;
     }
-    name = std::move(pool.files.front().first);
+    // Read after the file was stamped, so a read missing from this figure
+    // registered after the park and could not have opened the old inode.
+    // A read in flight that started before the park may hold it open.
+    if (pool.files.front().parked_ns >= oldest_read_start_ns()) {
+      return false;
+    }
+    name = std::move(pool.files.front().name);
     pool.files.pop_front();
   }
   pooled_.fetch_sub(1);
@@ -271,28 +289,6 @@ FSConnector::FSConnector(std::string base_path, int num_workers,
                                         format_shard(i, num_shard_dirs_));
   }
 
-  if (recycle_max_files_ > 0) {
-    // Unique across processes, because an earlier process may have left
-    // pool files behind; those are adopted and immediately reusable.
-    pool_prefix_ =
-        std::string(POOL_PREFIX) + std::to_string(::getpid()) + "-" +
-        std::to_string(
-            std::chrono::steady_clock::now().time_since_epoch().count()) +
-        "-";
-    size_t pools = num_shard_dirs_ == 0 ? 1 : num_shard_dirs_;
-    for (size_t i = 0; i < pools; ++i) {
-      pools_.push_back(std::make_unique<RecyclePool>());
-      for (const auto& entry :
-           std::filesystem::directory_iterator(pool_dir(i))) {
-        std::string name = entry.path().filename().string();
-        if (name.rfind(POOL_PREFIX, 0) != 0) continue;
-        pools_[i]->files.emplace_back(std::move(name),
-                                      std::chrono::steady_clock::time_point{});
-        pooled_.fetch_add(1);
-      }
-    }
-  }
-
   // Create tmp directory if configured
   if (!relative_tmp_dir_.empty()) {
     auto tmp_path = std::filesystem::path(base_path_) / relative_tmp_dir_;
@@ -307,10 +303,13 @@ FSConnector::FSConnector(std::string base_path, int num_workers,
     }
   }
 
-  // Rings or readers first, before any worker can take a get.  On failure
-  // join whatever started: the destructor does not run for a half-built
-  // object.
+  // The recycle lock, then rings or readers, before any worker can take a
+  // request.  On failure release and join whatever started: the destructor
+  // does not run for a half-built object.
   try {
+    if (recycle_max_files_ > 0) {
+      init_recycling();
+    }
     select_read_engine(read_engine, io_depth);
     if (use_uring_) {
       read_engine_ = "io_uring";
@@ -322,6 +321,48 @@ FSConnector::FSConnector(std::string base_path, int num_workers,
   } catch (...) {
     close();
     throw;
+  }
+}
+
+void FSConnector::init_recycling() {
+  const auto lock_path = std::filesystem::path(base_path_) / RECYCLE_LOCK_NAME;
+  const int fd = ::open(lock_path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+  if (fd < 0 || ::flock(fd, LOCK_EX | LOCK_NB) != 0) {
+    const int err = errno;
+    if (fd >= 0) ::close(fd);
+    fprintf(stderr,
+            "[LMCache FS] recycling disabled for %s: %s %s (%s); deletes "
+            "unlink and stores create new files\n",
+            base_path_.c_str(),
+            err == EWOULDBLOCK ? "another connector holds" : "could not lock",
+            lock_path.c_str(), strerror(err));
+    recycle_max_files_ = 0;
+    return;
+  }
+  recycle_lock_fd_ = fd;
+  // Unique across processes, because an earlier process may have left
+  // pool files behind; those are adopted and immediately reusable.
+  pool_prefix_ =
+      std::string(POOL_PREFIX) + std::to_string(::getpid()) + "-" +
+      std::to_string(
+          std::chrono::steady_clock::now().time_since_epoch().count()) +
+      "-";
+  size_t pools = num_shard_dirs_ == 0 ? 1 : num_shard_dirs_;
+  for (size_t i = 0; i < pools; ++i) {
+    pools_.push_back(std::make_unique<RecyclePool>());
+    for (const auto& entry : std::filesystem::directory_iterator(pool_dir(i))) {
+      std::string name = entry.path().filename().string();
+      if (name.rfind(POOL_PREFIX, 0) != 0) continue;
+      pools_[i]->files.push_back(ParkedFile{std::move(name), 0});
+      pooled_.fetch_add(1);
+    }
+  }
+}
+
+void FSConnector::release_recycle_lock() {
+  if (recycle_lock_fd_ >= 0) {
+    ::close(recycle_lock_fd_);
+    recycle_lock_fd_ = -1;
   }
 }
 
@@ -592,6 +633,8 @@ std::string FSConnector::read_engine() const { return read_engine_; }
 
 unsigned FSConnector::io_depth() const { return io_depth_; }
 
+bool FSConnector::recycling_enabled() const { return recycle_max_files_ > 0; }
+
 size_t FSConnector::choose_num_tiles(Op op, size_t num_items) const {
   if (op != Op::BATCH_TILE_GET || (read_threads_.empty() && !use_uring_)) {
     return ConnectorBase::choose_num_tiles(op, num_items);
@@ -605,7 +648,22 @@ void FSConnector::do_batch_get(WorkerFSConn& conn, const Request& req) {
     return;
   }
   if (read_threads_.empty()) {
-    ConnectorBase::do_batch_get(conn, req);
+    if (recycle_max_files_ == 0) {
+      ConnectorBase::do_batch_get(conn, req);
+      return;
+    }
+    // One zero-byte registration for the whole tile, before any open: the
+    // recycle guard needs only the earliest start time.
+    const size_t no_bytes = 0;
+    uint64_t start_ns = 0;
+    legacy_reads_.reserve(&no_bytes, 1, true, &start_ns);
+    try {
+      ConnectorBase::do_batch_get(conn, req);
+    } catch (...) {
+      legacy_reads_.release(0, 1, &start_ns, 1);
+      throw;
+    }
+    legacy_reads_.release(0, 1, &start_ns, 1);
     return;
   }
   do_batch_get_pooled(req);
@@ -695,7 +753,12 @@ void FSConnector::do_batch_get_uring(WorkerFSConn& conn, const Request& req) {
 #endif
 }
 
-void FSConnector::on_workers_stopped() { stop_read_pool(); }
+// No store or delete runs once the workers are joined, so the next
+// connector on base_path may recycle.
+void FSConnector::on_workers_stopped() {
+  stop_read_pool();
+  release_recycle_lock();
+}
 
 void FSConnector::do_batch_get_pooled(const Request& req) {
   const size_t num_keys = req.keys.size();

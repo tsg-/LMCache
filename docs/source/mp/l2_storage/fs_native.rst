@@ -51,9 +51,17 @@ I/O queue depth on a single Python thread.
   in place and renames it into position.  Overwriting allocated blocks
   keeps the SSD-visible footprint flat under steady store and delete
   churn without ``fstrim``.  A pooled file is reused only after a 1 s
-  quarantine, so a load that opened it before the delete can finish; a
-  load still holding the file open after that could read another
-  object's bytes.  Pooled files left by an earlier process are adopted.
+  quarantine, and only if it was parked before every load still in
+  flight started, so a slow load that opened the file before the delete
+  returns the deleted object's bytes, never the next object's.  Pooled
+  files left by an earlier process are adopted.  The client holds an
+  exclusive lock on ``base_path/.lmcache-recycle.lock`` while it runs; a
+  second client with ``recycle_max_files > 0`` on the same ``base_path``
+  logs a warning and runs with recycling disabled (deletes unlink, stores
+  create new files) and never touches the first client's pooled files.
+  A client without recycling that reads a ``base_path`` another client
+  recycles is not protected and is unsupported: its loads can read
+  another object's bytes.
   Reuse needs a pooled file of the same size in the same shard, so mixed
   object sizes reuse less.  Recycled objects are not crash-safe: the
   overwrite is not synced before the rename, so after a power loss an

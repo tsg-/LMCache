@@ -19,6 +19,9 @@ static constexpr size_t kReadBudgetWakeSlices = 8;
 // two in flight bring to ~49.
 static constexpr size_t kMinReadsInFlight = 2;
 
+// steady_clock now, in ns: the clock of every ReadBudget start time.
+uint64_t monotonic_ns();
+
 // Bytes and reads in flight against the device, connector-wide, and the
 // monotonic start time of every read behind them.  Every read reserves here
 // before it opens its file and releases after it finishes, so the start

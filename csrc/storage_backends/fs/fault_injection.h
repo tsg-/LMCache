@@ -45,8 +45,9 @@ inline FsFault fs_fault_from_env() {
   return FsFault::kNone;
 }
 
-// LMCACHE_FS_FAULT_DELAY_MS: milliseconds slept before each io_uring CQE is
-// processed and before each synchronous do_single_get read; 0 when unset.
+// LMCACHE_FS_FAULT_DELAY_MS: milliseconds slept after each read opens its
+// file and before its bytes are read (before the io_uring SQE is prepared,
+// and before do_single_get reads); 0 when unset.
 inline unsigned fs_fault_delay_ms_from_env() {
   const char* v = std::getenv("LMCACHE_FS_FAULT_DELAY_MS");
   return v == nullptr ? 0u
