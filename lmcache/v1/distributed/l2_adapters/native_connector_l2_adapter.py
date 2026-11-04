@@ -21,6 +21,7 @@ Architecture:
 from __future__ import annotations
 
 # Standard
+from array import array
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from functools import cache
@@ -35,7 +36,7 @@ from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc, MemoryTags, ObjectKey
 from lmcache.v1.distributed.internal_api import L2StoreResult
-from lmcache.v1.distributed.key_codec import encode_storage_key
+from lmcache.v1.distributed.key_codec import encode_storage_key, encode_tags
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
     L2TaskId,
@@ -147,6 +148,26 @@ def _obj_to_memoryview(
     return obj.byte_array  # type: ignore[return-value]
 
 
+@dataclass(frozen=True)
+class _RawBatch:
+    """Arguments of a ``submit_batch_{get,set}_raw`` call, in call order.
+
+    ``kv_ranks``, ``object_group_ids``, ``buf_ptrs`` and ``buf_lens`` are
+    ``array("Q")``; ``chunk_hashes`` is the concatenation of every key's
+    ``chunk_hash``, each exactly ``hash_len`` bytes.
+    """
+
+    model_name: str
+    cache_salt: str
+    tags_token: str
+    kv_ranks: "array[int]"
+    object_group_ids: "array[int]"
+    chunk_hashes: bytes
+    hash_len: int
+    buf_ptrs: "array[int]"
+    buf_lens: "array[int]"
+
+
 class NativeConnectorL2Adapter(L2AdapterInterface):
     """
     Wraps a pybind-wrapped C++ IStorageConnector to
@@ -234,6 +255,10 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         # Delete capability detection
         self._has_delete = callable(getattr(native_client, "submit_batch_delete", None))
 
+        # Raw batch submit capability detection
+        self._has_raw_get = hasattr(native_client, "submit_batch_get_raw")
+        self._has_raw_set = hasattr(native_client, "submit_batch_set_raw")
+
         # Pending delete events for synchronous delete() calls
         self._pending_delete_events: dict[L2TaskId, threading.Event] = {}
 
@@ -303,21 +328,30 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         keys: list[ObjectKey],
         objects: list[MemoryObj],
     ) -> L2TaskId:
-        key_strings = [_object_key_to_string(k) for k in keys]
-        memviews = [
-            _obj_to_memoryview(obj, self._pad_buffers_to_alignment) for obj in objects
-        ]
-        # Charge the byte count actually submitted to the backend: the
-        # physical (alignment-padded) size when padding is enabled and
-        # present, otherwise the logical size.
-        per_key_sizes = [len(mv) for mv in memviews]
+        raw = self._pack_raw(keys, objects) if self._has_raw_set else None
+        if raw is not None:
+            # Charge the byte count actually submitted to the backend.
+            per_key_sizes = raw.buf_lens.tolist()
+        else:
+            key_strings = [_object_key_to_string(k) for k in keys]
+            memviews = [
+                _obj_to_memoryview(obj, self._pad_buffers_to_alignment)
+                for obj in objects
+            ]
+            # Charge the byte count actually submitted to the backend: the
+            # physical (alignment-padded) size when padding is enabled and
+            # present, otherwise the logical size.
+            per_key_sizes = [len(mv) for mv in memviews]
 
         # Register pending op BEFORE submit to avoid race
         # with demux thread. The native submit is
         # non-blocking so holding the lock is brief.
         with self._lock:
             task_id = self._get_next_task_id()
-            future_id = int(self._client.submit_batch_set(key_strings, memviews))
+            if raw is not None:
+                future_id = int(self._client.submit_batch_set_raw(**vars(raw)))
+            else:
+                future_id = int(self._client.submit_batch_set(key_strings, memviews))
             self._pending_ops[future_id] = (
                 self._OP_STORE,
                 task_id,
@@ -382,16 +416,21 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         keys: list[ObjectKey],
         objects: list[MemoryObj],
     ) -> L2TaskId:
-        key_strings = [_object_key_to_string(k) for k in keys]
-        memviews = [
-            _obj_to_memoryview(obj, self._pad_buffers_to_alignment) for obj in objects
-        ]
+        raw = self._pack_raw(keys, objects) if self._has_raw_get else None
 
         # The native submit runs without the lock, so the demux thread can
         # drain this load's completion before the entry below exists. Such
         # a completion is parked, and adopted here when registering.
         task_id = self._get_next_task_id()
-        future_id = int(self._client.submit_batch_get(key_strings, memviews))
+        if raw is not None:
+            future_id = int(self._client.submit_batch_get_raw(**vars(raw)))
+        else:
+            key_strings = [_object_key_to_string(k) for k in keys]
+            memviews = [
+                _obj_to_memoryview(obj, self._pad_buffers_to_alignment)
+                for obj in objects
+            ]
+            future_id = int(self._client.submit_batch_get(key_strings, memviews))
         with self._lock:
             if self._closing:
                 self._early_completions.pop(future_id, None)
@@ -412,6 +451,75 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                 self._wake_efd.notify()
 
         return task_id
+
+    def _pack_raw(
+        self, keys: list[ObjectKey], objects: list[MemoryObj]
+    ) -> _RawBatch | None:
+        """Pack a batch into the arguments of the raw native submit.
+
+        One pass over the batch. The raw submit needs every key to share
+        model name, cache salt, tags and a non-zero hash length, every object
+        to be a ``TensorMemoryObj`` and every rank and group id to fit
+        uint64.
+
+        Args:
+            keys: Keys of the batch.
+            objects: Memory objects parallel to ``keys``.
+
+        Returns:
+            The raw call arguments, or None when the batch is not eligible
+            and the string submit must be used.
+        """
+        if not keys or len(keys) != len(objects):
+            return None
+        first = keys[0].identity
+        model_name = first.model_name
+        cache_salt = first.cache_salt
+        tags = first.tags
+        hash_len = len(first.chunk_hash)
+        if hash_len == 0:
+            return None
+        pad = self._pad_buffers_to_alignment
+        ranks = array("Q")
+        groups = array("Q")
+        ptrs = array("Q")
+        lens = array("Q")
+        hashes: list[bytes] = []
+        try:
+            for key, obj in zip(keys, objects, strict=True):
+                ident = key.identity
+                chunk_hash = ident.chunk_hash
+                if (
+                    ident.model_name != model_name
+                    or ident.cache_salt != cache_salt
+                    or len(chunk_hash) != hash_len
+                    or (ident.tags is not tags and ident.tags != tags)
+                    or not isinstance(obj, TensorMemoryObj)
+                ):
+                    return None
+                size = obj.get_size()
+                if pad:
+                    phys = obj.get_physical_size()
+                    if phys > size:
+                        size = phys
+                ranks.append(ident.kv_rank)
+                groups.append(ident.object_group_id)
+                ptrs.append(obj.data_ptr)
+                lens.append(size)
+                hashes.append(chunk_hash)
+        except OverflowError:
+            return None
+        return _RawBatch(
+            model_name=model_name,
+            cache_salt=cache_salt,
+            tags_token=encode_tags(tags),
+            kv_ranks=ranks,
+            object_group_ids=groups,
+            chunk_hashes=b"".join(hashes),
+            hash_len=hash_len,
+            buf_ptrs=ptrs,
+            buf_lens=lens,
+        )
 
     def query_load_result(self, task_id: L2TaskId) -> Bitmap | None:
         with self._lock:

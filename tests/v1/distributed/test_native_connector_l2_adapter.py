@@ -2148,3 +2148,237 @@ class TestEarlyCompletionParking:
         assert bitmap.test(0) is False
         assert "unknown future_id" not in caplog.text
         assert "dropping 1 parked" in caplog.text
+
+
+# =============================================================================
+# Raw batch submit path
+# =============================================================================
+
+
+class RawRecordingConnector(MockNativeConnector):
+    """Mock client that exposes the raw submits and records which method ran."""
+
+    def __init__(self, with_raw: bool = True):
+        super().__init__()
+        self.calls: list[str] = []
+        self.raw_kwargs: list[dict] = []
+        self._with_raw = with_raw
+
+    def __getattribute__(self, name: str):
+        if name.endswith("_raw") and not object.__getattribute__(self, "_with_raw"):
+            raise AttributeError(name)
+        return object.__getattribute__(self, name)
+
+    def submit_batch_set(self, keys, memoryviews):
+        self.calls.append("set")
+        return super().submit_batch_set(keys, memoryviews)
+
+    def submit_batch_get(self, keys, memoryviews):
+        self.calls.append("get")
+        return super().submit_batch_get(keys, memoryviews)
+
+    def _raw(self, name: str, kwargs: dict) -> int:
+        self.calls.append(name)
+        self.raw_kwargs.append(kwargs)
+        with self._lock:
+            fid = self._next_id
+            self._next_id += 1
+        self._push_completion(fid, True, "", None)
+        return fid
+
+    def submit_batch_set_raw(self, **kwargs) -> int:
+        return self._raw("set_raw", kwargs)
+
+    def submit_batch_get_raw(self, **kwargs) -> int:
+        return self._raw("get_raw", kwargs)
+
+
+def _raw_adapter(with_raw: bool = True, pad: bool = False):
+    client = RawRecordingConnector(with_raw=with_raw)
+    return client, NativeConnectorL2Adapter(
+        client, _MEMORY_TAGS, pad_buffers_to_alignment=pad
+    )
+
+
+def _raw_key(i: int, **overrides) -> ObjectKey:
+    params = dict(
+        chunk_hash=ObjectKey.IntHash2Bytes(i),
+        model_name="m",
+        kv_rank=0,
+        object_group_id=0,
+        cache_salt="",
+    )
+    params.update(overrides)
+    return ObjectKey(**params)
+
+
+class TestRawBatchPath:
+    def test_raw_path_used_when_eligible(self):
+        client, adp = _raw_adapter()
+        try:
+            keys = [_raw_key(i, kv_rank=i, object_group_id=2) for i in range(3)]
+            objs = [create_memory_obj(size=16) for _ in keys]
+            adp.submit_store_task(keys, objs)
+            adp.submit_load_task(keys, objs)
+            assert client.calls == ["set_raw", "get_raw"]
+            kw = client.raw_kwargs[0]
+            assert set(kw) == {
+                "model_name",
+                "cache_salt",
+                "tags_token",
+                "kv_ranks",
+                "object_group_ids",
+                "chunk_hashes",
+                "hash_len",
+                "buf_ptrs",
+                "buf_lens",
+            }
+            assert kw["model_name"] == "m"
+            assert list(kw["kv_ranks"]) == [0, 1, 2]
+            assert list(kw["object_group_ids"]) == [2, 2, 2]
+            assert kw["hash_len"] == len(keys[0].chunk_hash)
+            assert kw["chunk_hashes"] == b"".join(k.chunk_hash for k in keys)
+            assert list(kw["buf_ptrs"]) == [o.data_ptr for o in objs]
+            assert list(kw["buf_lens"]) == [64, 64, 64]
+        finally:
+            adp.close()
+
+    def test_raw_path_passes_tags_token(self):
+        # First Party
+        from lmcache.v1.distributed.key_codec import encode_tags
+
+        client, adp = _raw_adapter()
+        try:
+            tags = {"a": "1"}
+            key = _raw_key(1, tags=tags)
+            adp.submit_store_task([key], [create_memory_obj(size=16)])
+            assert client.raw_kwargs[0]["tags_token"] == encode_tags(tags)
+        finally:
+            adp.close()
+
+    @pytest.mark.parametrize(
+        "other",
+        [
+            {"model_name": "other"},
+            {"cache_salt": "salt"},
+            {"tags": {"a": "1"}},
+        ],
+    )
+    def test_string_path_for_mixed_identity(self, other):
+        client, adp = _raw_adapter()
+        try:
+            keys = [_raw_key(1), _raw_key(2, **other)]
+            objs = [create_memory_obj(size=16) for _ in keys]
+            adp.submit_store_task(keys, objs)
+            adp.submit_load_task(keys, objs)
+            assert client.calls == ["set", "get"]
+        finally:
+            adp.close()
+
+    def test_string_path_for_mixed_salt(self):
+        client, adp = _raw_adapter()
+        try:
+            keys = [_raw_key(1, cache_salt="a"), _raw_key(2, cache_salt="b")]
+            adp.submit_store_task(keys, [create_memory_obj(size=16) for _ in keys])
+            assert client.calls == ["set"]
+        finally:
+            adp.close()
+
+    def test_string_path_for_bytes_buffer_obj(self):
+        client, adp = _raw_adapter()
+        try:
+            adp.submit_store_task([_raw_key(1)], [BytesBufferMemoryObj(b"x" * 100)])
+            assert client.calls == ["set"]
+        finally:
+            adp.close()
+
+    @pytest.mark.parametrize("rank", [-1, 2**64])
+    def test_string_path_for_unpackable_rank(self, rank):
+        client, adp = _raw_adapter()
+        try:
+            key = _raw_key(1, kv_rank=rank)
+            adp.submit_store_task([key], [create_memory_obj(size=16)])
+            assert client.calls == ["set"]
+        finally:
+            adp.close()
+
+    def test_string_path_for_empty_hash(self):
+        client, adp = _raw_adapter()
+        try:
+            key = _raw_key(1, chunk_hash=b"")
+            adp.submit_store_task([key], [create_memory_obj(size=16)])
+            assert client.calls == ["set"]
+        finally:
+            adp.close()
+
+    def test_string_path_for_mixed_hash_length(self):
+        client, adp = _raw_adapter()
+        try:
+            keys = [_raw_key(1, chunk_hash=b"ab"), _raw_key(2, chunk_hash=b"abc")]
+            adp.submit_store_task(keys, [create_memory_obj(size=16) for _ in keys])
+            assert client.calls == ["set"]
+        finally:
+            adp.close()
+
+    def test_string_path_for_client_without_raw(self):
+        client, adp = _raw_adapter(with_raw=False)
+        try:
+            key = _raw_key(1)
+            obj = create_memory_obj(size=16)
+            adp.submit_store_task([key], [obj])
+            adp.submit_load_task([key], [obj])
+            assert client.calls == ["set", "get"]
+        finally:
+            adp.close()
+
+    def test_raw_path_uses_padded_length(self):
+        client, adp = _raw_adapter(pad=True)
+        try:
+            obj, _arena = create_unaligned_memory_obj(4000, 4096)
+            adp.submit_store_task([_raw_key(1)], [obj])
+            expected = len(_obj_to_memoryview(obj, True))
+            assert expected == 4096
+            assert list(client.raw_kwargs[0]["buf_lens"]) == [expected]
+        finally:
+            adp.close()
+
+    @pytest.mark.parametrize("pad", [False, True])
+    def test_raw_store_sizes_match_string_path(self, pad):
+        sizes = []
+        for with_raw in (True, False):
+            client, adp = _raw_adapter(with_raw=with_raw, pad=pad)
+            try:
+                made = [create_unaligned_memory_obj(4000, 4096) for _ in range(3)]
+                keys = [_raw_key(i) for i in range(3)]
+                adp.submit_store_task(keys, [o for o, _ in made])
+                with adp._lock:
+                    sizes.append([s for _, s in adp._pending_store_sizes.values()])
+            finally:
+                adp.close()
+        assert sizes[0] == sizes[1]
+        assert sizes[0] == [[4096 if pad else 4000] * 3]
+
+
+class TestRawPathFSNative:
+    @pytest.mark.parametrize("count", [1, 4096])
+    def test_raw_path_single_and_large_submit(self, tmp_path, count):
+        lmcache_fs = pytest.importorskip("lmcache.lmcache_fs")
+        client = lmcache_fs.LMCacheFSClient(str(tmp_path), 4, "", False, 0)
+        adp = NativeConnectorL2Adapter(client, _MEMORY_TAGS)
+        assert hasattr(client, "submit_batch_get_raw")
+        try:
+            keys = [_raw_key(i) for i in range(count)]
+            objs = [
+                create_memory_obj(size=16, fill_value=float(i)) for i in range(count)
+            ]
+            adp.submit_store_task(keys, objs)
+            assert _wait_for(lambda: bool(adp.pop_completed_store_tasks()))
+            dst = [create_memory_obj(size=16, fill_value=-1.0) for _ in range(count)]
+            task = adp.submit_load_task(keys, dst)
+            bitmap = _wait_load_result(adp, task)
+            assert all(bitmap.test(i) for i in range(count))
+            for i in (0, count - 1):
+                assert torch.equal(dst[i].raw_data, objs[i].raw_data)
+        finally:
+            adp.close()
+            client.close()
