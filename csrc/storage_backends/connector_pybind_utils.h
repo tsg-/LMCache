@@ -30,7 +30,7 @@ example usage (see `redis/pybind.cpp`):
       LMCACHE_BIND_CONNECTOR_METHODS(MyConnector);
 */
 
-// Docstrings for the raw submit methods (bound by the macro above).
+// Docstrings for the raw submit methods (bound by the macro below).
 #define LMCACHE_RAW_DOC_BODY(VERB, SIBLING)                      \
   "Submit a batch " VERB                                         \
   " built from raw key fields.\n\n"                              \
@@ -43,10 +43,16 @@ constexpr const char* kRawGetDoc = LMCACHE_RAW_DOC_BODY(
     C-contiguous buffers of unsigned 64-bit items (format "Q" or "=Q",
     itemsize 8), all of the same non-zero length n.
   chunk_hashes: bytes, n hashes of hash_len bytes each, concatenated.
-  hash_len: int > 0.
+  hash_len: int > 0 (a value at or above 2^63 raises TypeError from
+    argument conversion).
+Memory safety: each buf_ptrs[i] must address live memory of at least
+  buf_lens[i] bytes, writable, from this call until its completion is drained
+  (or the client is closed). The binding dereferences these integers
+  without any check, so a bad pointer corrupts the process.
 Returns:
   The future id (int), as submit_batch_get.
 Raises:
+  TypeError: hash_len is at or above 2^63.
   ValueError: an array has the wrong format, rank or layout, the lengths
     disagree, n or hash_len is not positive, or model_name, cache_salt or
     tags_token contains "@".
@@ -62,10 +68,16 @@ constexpr const char* kRawSetDoc = LMCACHE_RAW_DOC_BODY(
     C-contiguous buffers of unsigned 64-bit items (format "Q" or "=Q",
     itemsize 8), all of the same non-zero length n.
   chunk_hashes: bytes, n hashes of hash_len bytes each, concatenated.
-  hash_len: int > 0.
+  hash_len: int > 0 (a value at or above 2^63 raises TypeError from
+    argument conversion).
+Memory safety: each buf_ptrs[i] must address live memory of at least
+  buf_lens[i] bytes from this call until its completion is drained
+  (or the client is closed). The binding dereferences these integers
+  without any check, so a bad pointer corrupts the process.
 Returns:
   The future id (int), as submit_batch_set.
 Raises:
+  TypeError: hash_len is at or above 2^63.
   ValueError: an array has the wrong format, rank or layout, the lengths
     disagree, n or hash_len is not positive, or model_name, cache_salt or
     tags_token contains "@".

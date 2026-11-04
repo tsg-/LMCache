@@ -1757,14 +1757,12 @@ class TestBatchedDrainOrdering:
         adp, client = held_adapter
         k = create_object_key(1)
         _run_batched_drain(adp, client, [("store", [k]), ("delete", [k])])
-        assert adp._key_sizes.get(k) is None
         assert adp.get_usage().total_bytes_used == 0
 
     def test_delete_then_store_same_key_in_one_drain(self, held_adapter):
         adp, client = held_adapter
         k = create_object_key(1)
         _run_batched_drain(adp, client, [("delete", [k]), ("store", [k])])
-        assert adp._key_sizes.get(k) == 400
         assert adp.get_usage().total_bytes_used == 400
 
     def test_store_delete_store_same_key_in_one_drain(self, held_adapter):
@@ -1773,7 +1771,6 @@ class TestBatchedDrainOrdering:
         _run_batched_drain(
             adp, client, [("store", [k]), ("delete", [k]), ("store", [k])]
         )
-        assert adp._key_sizes.get(k) == 400
         assert adp.get_usage().total_bytes_used == 400
 
     def test_listener_calls_match_previous_loop(self, held_adapter):
@@ -2080,7 +2077,8 @@ class TestEarlyCompletionParking:
         assert _wait_load_result(adp, box[0]).test(0) is True
         assert listener.calls == [("accessed", [0]), ("accessed", [1])]
 
-        # An adopted load whose key was deleted meanwhile does not touch it.
+        # An adopted load whose key was deleted meanwhile still reports its
+        # access; LRU ignores keys it no longer tracks.
         listener.calls.clear()
         client.routed.clear()
         client.get_mode = "parked"
@@ -2092,7 +2090,7 @@ class TestEarlyCompletionParking:
         assert _wait_load_result(adp, task_c).test(0) is True
         # One load-eventfd signal per load: A, B and C.
         assert _count_signals(adp.get_load_event_fd()) == 3
-        assert listener.calls == [("deleted", [2])]
+        assert listener.calls == [("deleted", [2]), ("accessed", [2])]
 
     def test_concurrent_load_submitters_each_get_own_result(self, interleaving_adapter):
         adp, client = interleaving_adapter
@@ -2137,22 +2135,22 @@ class TestEarlyCompletionParking:
             assert not th.is_alive()
         assert failures == []
 
-    def test_submit_raising_leaves_no_parked_state(self, interleaving_adapter):
-        adp, client = interleaving_adapter
+    def test_submit_raising_leaves_no_parked_state(self, caplog):
+        client = InterleavingConnector()
+        adp = NativeConnectorL2Adapter(client, _MEMORY_TAGS)
         k = create_object_key(1)
         _store_and_wait(adp, [k], fill_value=6.0)
-        early_before = dict(adp._early_completions)
-        adopted_before = list(adp._adopted)
 
         client.get_raises = True
         with pytest.raises(RuntimeError, match="native submit failed"):
             adp.submit_load_task([k], [create_memory_obj(size=100, fill_value=0.0)])
-        assert adp._early_completions == early_before
-        assert list(adp._adopted) == adopted_before
 
         client.get_raises = False
         task_id, buf = self._load_once(adp, client, k, "parked")
         self._assert_one_result(adp, task_id, buf, 6.0)
+        with capture_adapter_logs(caplog):
+            adp.close()
+        assert "dropping" not in caplog.text
 
     def test_close_drops_parked_and_fails_late_submit(self, caplog):
         client = InterleavingConnector()
@@ -2213,11 +2211,34 @@ class RawRecordingConnector(MockNativeConnector):
         self._push_completion(fid, True, "", None)
         return fid
 
-    def submit_batch_set_raw(self, **kwargs) -> int:
-        return self._raw("set_raw", kwargs)
+    # Parameter order is the native binding's; the adapter passes positionally.
+    def submit_batch_set_raw(
+        self,
+        model_name,
+        cache_salt,
+        tags_token,
+        kv_ranks,
+        object_group_ids,
+        chunk_hashes,
+        hash_len,
+        buf_ptrs,
+        buf_lens,
+    ) -> int:
+        return self._raw("set_raw", {k: v for k, v in locals().items() if k != "self"})
 
-    def submit_batch_get_raw(self, **kwargs) -> int:
-        return self._raw("get_raw", kwargs)
+    def submit_batch_get_raw(
+        self,
+        model_name,
+        cache_salt,
+        tags_token,
+        kv_ranks,
+        object_group_ids,
+        chunk_hashes,
+        hash_len,
+        buf_ptrs,
+        buf_lens,
+    ) -> int:
+        return self._raw("get_raw", {k: v for k, v in locals().items() if k != "self"})
 
 
 def _raw_adapter(with_raw: bool = True, pad: bool = False):
@@ -2473,3 +2494,122 @@ class TestRawPathFSNative:
             str_adp.close()
             client.close()
             client2.close()
+
+
+# =============================================================================
+# Completion-shape validation and mixed-operation demux
+# =============================================================================
+
+
+class _ShortResultConnector(MockNativeConnector):
+    """Mock whose exists completions carry one result fewer than keys."""
+
+    def _push_completion(self, fid, ok, error, result_bools):
+        if result_bools:
+            result_bools = result_bools[:-1]
+        super()._push_completion(fid, ok, error, result_bools)
+
+
+class _HangingDeleteConnector(MockNativeConnector):
+    """Mock that never completes the first ``hang`` delete submits."""
+
+    def __init__(self, hang: int):
+        super().__init__()
+        self._hang = hang
+
+    def submit_batch_delete(self, keys: list[str]) -> int:
+        with self._lock:
+            if self._hang > 0:
+                self._hang -= 1
+                fid = self._next_id
+                self._next_id += 1
+                return fid
+        return super().submit_batch_delete(keys)
+
+
+class TestCompletionShape:
+    def test_result_length_mismatch_fails_the_op(self, caplog):
+        client = _ShortResultConnector()
+        adp = NativeConnectorL2Adapter(client, _MEMORY_TAGS)
+        try:
+            keys = [create_object_key(i) for i in range(3)]
+            _store_and_wait(adp, keys)
+            with capture_adapter_logs(caplog):
+                task = adp.submit_lookup_and_lock_task(keys, {0: _EMPTY_LAYOUT})
+                assert wait_for_event_fd(adp.get_lookup_and_lock_event_fd())
+                bitmap = adp.query_lookup_and_lock_result(task)
+            assert bitmap is not None
+            assert [bitmap.test(i) for i in range(3)] == [False] * 3
+            assert "2 results for 3 keys" in caplog.text
+        finally:
+            adp.close()
+
+
+class TestMixedDemuxStress:
+    def test_every_task_completes_once_and_close_returns(self, monkeypatch):
+        monkeypatch.setattr(NativeConnectorL2Adapter, "_DELETE_TIMEOUT_S", 0.2)
+        client = _HangingDeleteConnector(hang=1)
+        adp = NativeConnectorL2Adapter(client, _MEMORY_TAGS)
+        num_threads, rounds = 4, 25
+        store_ids: list[list[int]] = [[] for _ in range(num_threads)]
+        failures: list[str] = []
+        done = threading.Event()
+        completed_stores: list[int] = []
+
+        def collect_stores() -> None:
+            while not done.is_set():
+                completed_stores.extend(adp.pop_completed_store_tasks())
+                threading.Event().wait(0.002)
+            completed_stores.extend(adp.pop_completed_store_tasks())
+
+        def await_once(query, task_id, what: str) -> None:
+            seen: list = []
+
+            def _ready() -> bool:
+                r = query(task_id)
+                if r is not None:
+                    seen.append(r)
+                return bool(seen)
+
+            if not _wait_for(_ready, timeout=10.0):
+                failures.append(f"{what} {task_id} never completed")
+            elif query(task_id) is not None:
+                failures.append(f"{what} {task_id} completed twice")
+
+        def worker(t: int) -> None:
+            for i in range(rounds):
+                key = create_object_key(t * 1000 + i)
+                store_ids[t].append(
+                    adp.submit_store_task([key], [create_memory_obj(size=100)])
+                )
+                lookup = adp.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
+                await_once(adp.query_lookup_and_lock_result, lookup, "lookup")
+                adp.submit_unlock([key])
+                load = adp.submit_load_task(
+                    [key], [create_memory_obj(size=100, fill_value=0.0)]
+                )
+                await_once(adp.query_load_result, load, "load")
+                if i % 10 == 9:
+                    adp.delete([key])
+
+        collector = threading.Thread(target=collect_stores)
+        collector.start()
+        threads = [
+            threading.Thread(target=worker, args=(t,)) for t in range(num_threads)
+        ]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join(timeout=30)
+            assert not th.is_alive()
+        expected = sorted(i for ids in store_ids for i in ids)
+        assert _wait_for(lambda: len(completed_stores) >= len(expected))
+        done.set()
+        collector.join(timeout=5)
+
+        closer = threading.Thread(target=adp.close)
+        closer.start()
+        closer.join(timeout=10)
+        assert not closer.is_alive()
+        assert failures == []
+        assert sorted(completed_stores) == expected

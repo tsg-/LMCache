@@ -95,6 +95,7 @@ def test_raw_pack_faster_than_string_path() -> None:
             [_obj_to_memoryview(o, False) for o in objs]
 
         def raw_path() -> None:
+            # Adapter-side packing only; the native call is not measured.
             assert adapter._pack_raw(keys, objs) is not None
 
         def per_submit_us(fn) -> float:

@@ -569,7 +569,7 @@ def _raw_keys(
 ) -> list[ObjectKey]:
     return [
         ObjectKey(
-            bytes([i + 1]) * hash_len,
+            (bytes([0x80 + i, 0xAB, 0xFF - i, 0xCD]) * hash_len)[:hash_len],
             "test_model",
             rank,
             group,
@@ -693,6 +693,7 @@ def _bad_overrides(bad: str, keys: list[ObjectKey]) -> dict[str, Any]:
         "len_mismatch": {"object_group_ids": array.array("Q", [0, 0])},
         "fmt_d": {"kv_ranks": array.array("d", [float(r) for r in ranks])},
         "fmt_q": {"kv_ranks": array.array("q", ranks)},
+        "itemsize_4": {"kv_ranks": array.array("I", ranks)},
         "fmt_be": {"kv_ranks": memoryview(be)},
         "two_d": {"kv_ranks": two_d},
         "noncontig": {"kv_ranks": strided},
@@ -717,6 +718,7 @@ def _bad_overrides(bad: str, keys: list[ObjectKey]) -> dict[str, Any]:
         "len_mismatch",
         "fmt_d",
         "fmt_q",
+        "itemsize_4",
         "fmt_be",
         "two_d",
         "noncontig",

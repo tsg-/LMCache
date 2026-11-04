@@ -160,12 +160,12 @@ class _RawBatch:
     model_name: str
     cache_salt: str
     tags_token: str
-    kv_ranks: "array[int]"
-    object_group_ids: "array[int]"
+    kv_ranks: array[int]
+    object_group_ids: array[int]
     chunk_hashes: bytes
     hash_len: int
-    buf_ptrs: "array[int]"
-    buf_lens: "array[int]"
+    buf_ptrs: array[int]
+    buf_lens: array[int]
 
 
 class NativeConnectorL2Adapter(L2AdapterInterface):
@@ -181,6 +181,14 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
       - drain_completions()
           -> list[tuple[int, bool, str, list[bool]|None]]
       - close()
+
+    It may also expose ``submit_batch_get_raw`` and
+    ``submit_batch_set_raw``, which the adapter uses when present.
+
+    The client must accept concurrent ``submit_batch_*`` calls from
+    several threads, as ``ConnectorBase`` does: load submits do not hold
+    the adapter lock. Out-of-tree plugins were previously serialized by
+    that lock and must now be thread-safe on their own.
     """
 
     # Operation type tags for the pending-ops map
@@ -349,7 +357,19 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         with self._lock:
             task_id = self._get_next_task_id()
             if raw is not None:
-                future_id = int(self._client.submit_batch_set_raw(**vars(raw)))
+                future_id = int(
+                    self._client.submit_batch_set_raw(
+                        raw.model_name,
+                        raw.cache_salt,
+                        raw.tags_token,
+                        raw.kv_ranks,
+                        raw.object_group_ids,
+                        raw.chunk_hashes,
+                        raw.hash_len,
+                        raw.buf_ptrs,
+                        raw.buf_lens,
+                    )
+                )
             else:
                 future_id = int(self._client.submit_batch_set(key_strings, memviews))
             self._pending_ops[future_id] = (
@@ -423,7 +443,19 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         # a completion is parked, and adopted here when registering.
         task_id = self._get_next_task_id()
         if raw is not None:
-            future_id = int(self._client.submit_batch_get_raw(**vars(raw)))
+            future_id = int(
+                self._client.submit_batch_get_raw(
+                    raw.model_name,
+                    raw.cache_salt,
+                    raw.tags_token,
+                    raw.kv_ranks,
+                    raw.object_group_ids,
+                    raw.chunk_hashes,
+                    raw.hash_len,
+                    raw.buf_ptrs,
+                    raw.buf_lens,
+                )
+            )
         else:
             key_strings = [_object_key_to_string(k) for k in keys]
             memviews = [
@@ -623,7 +655,10 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         first. A load whose native submit returns after close() has begun
         is failed at once: its result is an all-failure bitmap. Load
         completions still parked or adopted when the demux thread stops
-        are logged with their count and dropped.
+        are logged with their count and dropped. A load failed this way
+        may still have its native read in flight, writing its buffers
+        until the client is closed, so callers must not reuse those
+        buffers before close() returns.
         """
         with self._lock:
             self._closing = True
@@ -718,13 +753,6 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                     self._route_completion(
                         future_id, ok, error, result_bools, bitmap, out
                     )
-                # Keys deleted since an adopted load completed are not
-                # reported as accessed. ``out`` holds only adopted loads'
-                # accesses at this point.
-                if out.keys_accessed:
-                    out.keys_accessed = [
-                        k for k in out.keys_accessed if k in self._key_sizes
-                    ]
                 for (future_id, ok, error, result_bools), bitmap in zip(
                     completions, bitmaps, strict=True
                 ):
@@ -783,6 +811,11 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                 self._abandoned.discard(fid)
                 return
             self._early_completions[fid] = (ok, error, result_bools)
+            logger.debug(
+                "parked completion for unregistered id %d (%d parked)",
+                fid,
+                len(self._early_completions),
+            )
             return
 
         (
@@ -791,6 +824,17 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
             num_keys,
             lookup_keys,
         ) = entry
+
+        if result_bools is not None and len(result_bools) != num_keys:
+            logger.warning(
+                "completion %d has %d results for %d keys; failing the op",
+                fid,
+                len(result_bools),
+                num_keys,
+            )
+            ok = False
+            result_bools = [False] * num_keys
+            bitmap = Bitmap(num_keys)
 
         if op_type == self._OP_STORE:
             store_info = self._pending_store_sizes.pop(fid, None)
