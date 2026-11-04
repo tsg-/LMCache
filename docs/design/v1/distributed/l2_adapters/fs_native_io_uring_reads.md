@@ -1,6 +1,8 @@
 # io_uring reads in the native filesystem connector
 
-Status: proposed design, not implemented. Builds on
+Status: implemented on this branch as PR 1, with `read_engine` defaulting to
+`pool`. Flipping the default to `auto` is PR 2, after benchmarks; the in-tree
+engine has not been benchmarked yet (the numbers below are from the PoC). Builds on
 [fs_native_read_depth.md](fs_native_read_depth.md), which introduced the read
 pool this design replaces as the default read engine.
 
@@ -12,9 +14,10 @@ crosses threads or takes a connector-wide lock per object. The read pool
 stays as the fallback engine. Stores, deletes, sharding, in-shard recycling
 and the store/delete lanes do not change.
 
-io_uring is the default read engine when the extension was built with
-liburing and the kernel accepts a ring at connector start. Otherwise the
-connector uses the read pool and logs which engine it chose.
+In PR 1 the default read engine is `pool`; `read_engine=auto` selects io_uring
+when the extension was built with liburing and the kernel accepts a ring at
+connector start, and otherwise uses the read pool and logs why. PR 2 makes
+`auto` the default.
 
 ## The problem
 
@@ -160,7 +163,8 @@ worker's ring is full. So the engine adds a guard that also covers the pool:
 - Parking a deleted file records the monotonic time at which it was renamed
   into the pool.
 - The store path, before reusing a parked file, takes the budget mutex and
-  reads the oldest registered start time. It reuses the file only if it was
+  reads the oldest start time across all budgets (pool, io_uring and the
+  legacy registry). It reuses the file only if it was
   parked before that time (and the quarantine has passed); otherwise it
   creates a new file, as when the pool is empty.
 
@@ -217,7 +221,9 @@ budget released).
   budget, fails the batch's unfinished keys, tears down and recreates the ring
   (`io_uring_queue_exit` discards SQEs the kernel never saw), and continues.
   If the new ring cannot be created, that worker fails later batches; other
-  workers continue.
+  workers continue. A transient `-EAGAIN` or `-EBUSY` from submit is not
+  retried: it counts as an engine error, so the batch fails and the ring is
+  recreated.
 - If reaping itself cannot make progress (the wait keeps failing for 10 s of
   retries), the worker cannot prove the kernel is done with the buffers. The
   buffers belong to the caller's L1 memory, so neither reporting the batch nor
@@ -242,8 +248,16 @@ shared-pool worker, before any worker thread starts, as the PoC does.
 failure there (`connector_base.h:540`), so relying on it would let
 construction succeed with missing workers. If any ring fails to initialize,
 the constructor destroys the rings already created and either falls back to
-the pool (`auto`) or throws (`io_uring`). Each worker thread is handed its ring
-by index; store and delete lane threads never get one.
+the pool (`auto`) or throws (`io_uring`). Each worker thread claims a ring from
+the pre-built set at its first get (rings are not handed out by index); store
+and delete lane threads never get one.
+
+After each ring is created the engine probes it with `io_uring_get_probe_ring`
+and `io_uring_opcode_supported(IORING_OP_READ)`. Kernels 5.1-5.5 create rings
+but reject `IORING_OP_READ`, which would fail every read, so an unsupported
+opcode is treated like a ring-creation failure: `auto` destroys the rings and
+uses the pool with one warning naming the reason, and a forced `io_uring`
+throws.
 
 These rules are taken from the PoC, which implements them. They are the main
 correctness risk, so each gets its own test (below).
@@ -252,7 +266,7 @@ correctness risk, so each gets its own test (below).
 
 | field | values | default | meaning |
 |---|---|---|---|
-| `read_engine` | `auto`, `io_uring`, `pool` | `auto` | `auto` picks io_uring when available, else the pool. `io_uring` fails connector construction if it is unavailable. `pool` forces today's path. |
+| `read_engine` | `auto`, `io_uring`, `pool` | `pool` in PR 1 (`auto` in PR 2) | `auto` picks io_uring when available, else the pool. `io_uring` fails connector construction if it is unavailable. `pool` forces today's path. |
 | `io_depth` | 1 to 4096 | 64 | Reads in flight per worker ring. Ignored by the pool. |
 | `read_max_bytes_in_flight` | bytes | 1,536 MiB | Unchanged; now applies to both engines. |
 | `num_read_workers` | unchanged | 256 | Sizes the read pool. With io_uring the pool is not started and no read connections are created. |
@@ -260,7 +274,8 @@ correctness risk, so each gets its own test (below).
 The byte budget applies whenever the io_uring engine is selected, whatever
 `num_read_workers` is: `read_max_bytes_in_flight` 0 means the 1,536 MiB
 default under io_uring. Under the pool, `num_read_workers` 0 keeps today's
-legacy path with no budget. If `auto` falls back to the pool at runtime, the
+legacy path with no byte budget; it still registers read start times when
+recycling is on. If `auto` falls back to the pool at runtime, the
 pool starts with the configured `num_read_workers`.
 
 Rings exist only on the threads that run gets: the shared worker pool
@@ -342,10 +357,9 @@ like the existing connector tests. Each runs against both engines:
 
 The fault tests live in
 `tests/inprocess/v1/storage_backend/test_fs_native_uring_faults.py`. They
-need an extension built with `LMCACHE_FS_FAULT_INJECTION=1` and skip on any
-other build, so CI must run a job that builds with
-`LMCACHE_FS_FAULT_INJECTION=1 bash scripts/ipu-poc/build_lmcache_fs.sh .` or
-the file never runs. Each case runs in a subprocess, so the injected fault and
+need an extension built with `LMCACHE_WITH_LIBURING=1
+LMCACHE_FS_FAULT_INJECTION=1` and skip on any other build. No CI job builds
+that yet, so the file does not run in CI until one is added. Each case runs in a subprocess, so the injected fault and
 any `RLIMIT_NOFILE` change stay isolated. `read_bytes_in_flight()` lets the
 error-path cases check that a missing key, a reaped engine error and `EMFILE`
 requeueing all return the whole byte budget.

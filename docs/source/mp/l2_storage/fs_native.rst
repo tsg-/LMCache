@@ -75,6 +75,35 @@ I/O queue depth on a single Python thread.
   ``num_workers`` pool, where their blocking metadata work queues ahead
   of loads.
 
+**io_uring read engine (experimental, opt-in).**  Instead of the read pool,
+each worker can pipeline the reads of a batch through its own io_uring.
+
+- ``read_engine`` (str, default ``pool``): ``pool`` uses the read pool;
+  ``io_uring`` uses the io_uring engine and fails construction if it is
+  unavailable; ``auto`` uses io_uring when available and otherwise falls
+  back to the pool with a logged reason.
+- ``io_depth`` (int, default ``64``, 1 to 4096): Reads in flight per worker
+  ring.  Under ``auto``, a depth that the descriptor limit forces below 16
+  selects the pool instead.
+
+The engine is compiled in only when ``lmcache_fs`` is built with
+``LMCACHE_WITH_LIBURING=1`` (system prefixes) or ``LMCACHE_LIBURING_DIR``
+(an install prefix) pointing at liburing 2.2 or newer with a
+position-independent ``liburing.a``, which is linked statically.  Published
+wheels do not include it yet.  ``auto`` falls back to the pool when the
+extension was built without liburing, when a ring cannot be created, or when
+the kernel does not support ``IORING_OP_READ``; ``io_uring`` raises in each
+case.
+
+Under ``auto`` and ``io_uring`` the connector raises the process-wide soft
+``RLIMIT_NOFILE`` toward ``num_workers`` x ``io_depth`` + 1024, never past the
+hard limit and never down.  The raise stays in effect even if ``auto`` then
+falls back to the pool.  If the limit is still short, ``io_uring`` raises and
+``auto`` lowers ``io_depth`` to fit.  If the fitted depth would be below 16,
+``auto`` uses the pool.  If reaping completions fails for good after an
+engine error, the process aborts, because the kernel may still be writing
+into the caller's buffers.
+
 .. important::
 
    ``O_DIRECT`` has two independent alignment requirements:
