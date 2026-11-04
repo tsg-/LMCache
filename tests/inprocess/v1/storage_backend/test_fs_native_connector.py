@@ -8,6 +8,7 @@ import array
 import ctypes
 import hashlib
 import os
+import resource
 import select
 import shutil
 import struct
@@ -634,6 +635,9 @@ def test_nofile_limit_lowers_depth_or_raises(tmp_path: Path) -> None:
     fails construction naming the numbers."""
     if not _has_io_uring():
         pytest.skip("lmcache_fs was built without the io_uring engine")
+    hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)[1]
+    if hard_limit != resource.RLIM_INFINITY and hard_limit < 3072:
+        pytest.skip(f"needs a hard RLIMIT_NOFILE of at least 3072, got {hard_limit}")
     child = _run_child(
         """
         import os, resource
@@ -1162,7 +1166,7 @@ def test_delayed_read_never_returns_new_object(
     if read_engine == "io_uring" and not _has_io_uring():
         pytest.skip("lmcache_fs was built without the io_uring engine")
     # Every read sleeps this long between opening its file and reading it.
-    monkeypatch.setenv("LMCACHE_FS_FAULT_DELAY_MS", "1500")
+    monkeypatch.setenv("LMCACHE_FS_FAULT_DELAY_MS", "3000")
     size = 8192
     first = "test_model@00000000@0@" + "1" * 16
     second = "test_model@00000000@0@" + "2" * 16

@@ -230,6 +230,8 @@ class ConnectorBase : public IStorageConnector {
     req_cv_.notify_all();
     for (auto& [key, lane] : lanes_) {
       {
+        // Ordering barrier: a waiter past its predicate has blocked by the
+        // time this acquires, so the notify below cannot be lost.
         std::lock_guard<std::mutex> lk(lane->mu);
       }
       lane->cv.notify_all();

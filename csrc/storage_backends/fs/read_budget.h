@@ -32,7 +32,8 @@ uint64_t monotonic_ns();
 // and reserve()/release() take it.  Built with a caller's mutex, the budget
 // state is guarded by that mutex, so a caller already holding it for its
 // own state uses reserve_locked()/release_locked() and pays one acquisition
-// for both; reserve()/release() still work and take it themselves.
+// for both; reserve()/release() still work and take it themselves, so they
+// must not be called while holding that mutex.
 class ReadBudget {
  public:
   // max_bytes: bytes allowed in flight; reads beyond it are admitted only
