@@ -2214,9 +2214,16 @@ def _raw_key(i: int, **overrides) -> ObjectKey:
 
 class TestRawBatchPath:
     def test_raw_path_used_when_eligible(self):
+        # First Party
+        from lmcache.v1.distributed.key_codec import encode_tags
+
         client, adp = _raw_adapter()
         try:
-            keys = [_raw_key(i, kv_rank=i, object_group_id=2) for i in range(3)]
+            tags = {"a": "1", "b": "2"}
+            keys = [
+                _raw_key(i, kv_rank=i, object_group_id=2, cache_salt="salt1", tags=tags)
+                for i in range(3)
+            ]
             objs = [create_memory_obj(size=16) for _ in keys]
             adp.submit_store_task(keys, objs)
             adp.submit_load_task(keys, objs)
@@ -2234,6 +2241,8 @@ class TestRawBatchPath:
                 "buf_lens",
             }
             assert kw["model_name"] == "m"
+            assert kw["cache_salt"] == "salt1"
+            assert kw["tags_token"] == encode_tags(tags)
             assert list(kw["kv_ranks"]) == [0, 1, 2]
             assert list(kw["object_group_ids"]) == [2, 2, 2]
             assert kw["hash_len"] == len(keys[0].chunk_hash)
@@ -2344,19 +2353,42 @@ class TestRawBatchPath:
 
     @pytest.mark.parametrize("pad", [False, True])
     def test_raw_store_sizes_match_string_path(self, pad):
-        sizes = []
-        for with_raw in (True, False):
-            client, adp = _raw_adapter(with_raw=with_raw, pad=pad)
-            try:
-                made = [create_unaligned_memory_obj(4000, 4096) for _ in range(3)]
-                keys = [_raw_key(i) for i in range(3)]
-                adp.submit_store_task(keys, [o for o, _ in made])
-                with adp._lock:
-                    sizes.append([s for _, s in adp._pending_store_sizes.values()])
-            finally:
-                adp.close()
-        assert sizes[0] == sizes[1]
-        assert sizes[0] == [[4096 if pad else 4000] * 3]
+        usage = [_store_and_get_usage(with_raw, pad) for with_raw in (True, False)]
+        assert usage[0] == usage[1]
+        assert usage[0][0] == 3 * (4096 if pad else 4000)
+
+
+def _store_and_get_usage(with_raw: bool, pad: bool) -> tuple[int, dict]:
+    """Store 3 unaligned chunks; return public usage totals once accounted."""
+    _client, adp = _raw_adapter(with_raw=with_raw, pad=pad)
+    try:
+        made = [create_unaligned_memory_obj(4000, 4096) for _ in range(3)]
+        keys = [_raw_key(i, cache_salt="s") for i in range(3)]
+        task = adp.submit_store_task(keys, [o for o, _ in made])
+        done: dict = {}
+
+        def _stored() -> bool:
+            done.update(adp.pop_completed_store_tasks())
+            return task in done
+
+        assert _wait_for(_stored)
+        assert _wait_for(lambda: adp.get_usage().total_bytes_used > 0)
+        usage = adp.get_usage()
+        return usage.total_bytes_used, dict(usage.bytes_by_cache_salt)
+    finally:
+        adp.close()
+
+
+class _NoRawClient:
+    """Wraps a client and hides its raw submit methods (forces string path)."""
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def __getattr__(self, name: str):
+        if name.endswith("_raw"):
+            raise AttributeError(name)
+        return getattr(self._inner, name)
 
 
 class TestRawPathFSNative:
@@ -2382,3 +2414,35 @@ class TestRawPathFSNative:
         finally:
             adp.close()
             client.close()
+
+    @pytest.mark.parametrize("raw_writes", [True, False])
+    def test_raw_and_string_paths_share_keys(self, tmp_path, raw_writes):
+        lmcache_fs = pytest.importorskip("lmcache.lmcache_fs")
+        # One client per adapter: each adapter's demux thread drains its own
+        # client, and a shared client would split completions between them.
+        client = lmcache_fs.LMCacheFSClient(str(tmp_path), 2, "", False, 0)
+        client2 = lmcache_fs.LMCacheFSClient(str(tmp_path), 2, "", False, 0)
+        raw_adp = NativeConnectorL2Adapter(client, _MEMORY_TAGS)
+        str_adp = NativeConnectorL2Adapter(_NoRawClient(client2), _MEMORY_TAGS)
+        assert hasattr(client, "submit_batch_set_raw")
+        assert not hasattr(_NoRawClient(client2), "submit_batch_set_raw")
+        writer, reader = (raw_adp, str_adp) if raw_writes else (str_adp, raw_adp)
+        try:
+            tags = {"a": "1"}
+            keys = [
+                _raw_key(i, kv_rank=i, object_group_id=1, cache_salt="salt", tags=tags)
+                for i in range(8)
+            ]
+            objs = [create_memory_obj(size=16, fill_value=float(i)) for i in range(8)]
+            writer.submit_store_task(keys, objs)
+            assert _wait_for(lambda: bool(writer.pop_completed_store_tasks()))
+            dst = [create_memory_obj(size=16, fill_value=-1.0) for _ in keys]
+            bitmap = _wait_load_result(reader, reader.submit_load_task(keys, dst))
+            assert all(bitmap.test(i) for i in range(8))
+            for o, d in zip(objs, dst, strict=True):
+                assert torch.equal(o.raw_data, d.raw_data)
+        finally:
+            raw_adp.close()
+            str_adp.close()
+            client.close()
+            client2.close()

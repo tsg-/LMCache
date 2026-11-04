@@ -7,6 +7,7 @@ no-op client.
 """
 
 # Standard
+import os
 import time
 
 # Third Party
@@ -72,6 +73,8 @@ def _make_obj() -> TensorMemoryObj:
 
 @pytest.mark.slow
 def test_raw_pack_faster_than_string_path() -> None:
+    if os.environ.get("LMCACHE_RUN_BENCH") != "1":
+        pytest.skip("timing benchmark; set LMCACHE_RUN_BENCH=1 to run")
     client = _NoopClient()
     adapter = NativeConnectorL2Adapter(
         client, MemoryTags(MemorySegment.STORAGE, MemoryResidency.REMOTE)
