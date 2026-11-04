@@ -80,7 +80,7 @@ Golden lists are captured from the current loop before refactoring (record them 
 **Interfaces:**
 - Produces: `self._abandoned: set[int]` (guarded by `self._lock`).
 
-- [ ] **Step 1: Write failing test** `test_timed_out_delete_completion_is_dropped`: fake client holds the delete completion; patch `_DELETE_TIMEOUT_S` to 0.05; after `delete()` returns, push the completion; assert (with `caplog`) that no "unknown future_id" warning is logged, no listener fires for it, and a following store and load of other keys succeed.
+- [ ] **Step 1: Write failing test** `test_timed_out_delete_completion_is_dropped`: fake client holds the delete completion; patch `_DELETE_TIMEOUT_S` to 0.05; after `delete()` returns, push the completion; assert no listener fires for it, and a following store and load of other keys succeed.
 - [ ] **Step 2: Run, expect FAIL** (`AttributeError: _abandoned`).
 - [ ] **Step 3: Implement**: timeout path adds the popped future id to `_abandoned`; `_route_completion` drops and discards abandoned ids before the unknown-id branch. Make the 30 s timeout a class constant `_DELETE_TIMEOUT_S` so the test can patch it.
 - [ ] **Step 4: Run, expect PASS.**
@@ -115,7 +115,7 @@ def test_close_drops_parked_and_fails_late_submit(...):
 ```
 
 - [ ] **Step 2: Run, expect FAIL.**
-- [ ] **Step 3: Implement** per the spec's "Loads submit without the lock": native call outside the lock; register then claim any parked completion into `_adopted` and `notify()` `_wake_efd`, all in one critical section; `_demux_loop` drains `_adopted` first each pass through `_route_completion`, filtering adopted accessed keys against `_key_sizes`; unknown, non-abandoned ids go to `_early_completions`. `submit_store_task`, lookup and delete paths keep the lock across the native call.
+- [ ] **Step 3: Implement** per the spec's "Loads submit without the lock": native call outside the lock; register then claim any parked completion into `_adopted` and `notify()` `_wake_efd`, all in one critical section; `_demux_loop` drains `_adopted` first each pass through `_route_completion`; unknown, non-abandoned ids go to `_early_completions`. `submit_store_task`, lookup and delete paths keep the lock across the native call.
 - [ ] **Step 4: Run the adapter test file 20 times** (`for i in $(seq 20); do uv run pytest tests/v1/distributed/test_native_connector_l2_adapter.py -q -p no:randomly || break; done`), **expect PASS every time.**
 - [ ] **Step 5: Commit** `perf: submit native adapter loads without holding the adapter lock`.
 

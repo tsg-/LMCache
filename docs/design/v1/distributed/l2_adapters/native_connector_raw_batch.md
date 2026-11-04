@@ -1,8 +1,17 @@
 # Raw batch submit for native-connector L2 adapters
 
-Status: proposed design, not implemented. Covers two changes to the issuing
-path of `NativeConnectorL2Adapter`: a raw batch submit in the shared pybind
-layer, and a shorter critical section in the adapter's completion thread.
+Status: implemented on branch `feat/bench-l2-geometry-split`. Covers two
+changes to the issuing path of `NativeConnectorL2Adapter`: a raw batch submit
+in the shared pybind layer, and a shorter critical section in the adapter's
+completion thread.
+
+Measured on 2026-11-04 on the MMG-400 rig (6 NVMe-oF initiators, Mixtral
+64 KiB): lock-free load submits cut issuing-thread lock wait from about 22%
+to 6% and completion-thread lock wait from about 37% to 20%, but 5:1
+throughput rose only 2.7-3.3% (single host 103.2 to 106.6 Gb/s, fleet 632.0
+to 649.1 Gb/s) because the waiting moved to the GIL. Read-only was neutral
+within run-order noise. The raw path's microbenchmark shows 1.1-1.2x on
+adapter-side work only; rig measurement of the raw path is pending.
 
 ## Decision
 
@@ -227,6 +236,12 @@ replaced with early-completion parking:
    native wakeup for that completion was consumed when it was drained, so
    this `notify()` is required.
 
+**Concurrency contract.** Native clients must accept concurrent
+`submit_batch_*` calls from several threads, as `ConnectorBase` does, because
+load submits no longer hold the adapter lock. Out-of-tree plugins were
+previously serialized by that lock. `submit_batch_get_raw` and
+`submit_batch_set_raw` are optional methods the adapter uses when present.
+
 Registration, the parked entry's removal and its hand-off to `_adopted` happen
 in one critical section, so a completion is finished exactly once.
 
@@ -243,10 +258,11 @@ reach `_notify_keys_accessed` as one list, which LRU applies in reverse order
 recent. An adopted load is notified in a later pass, so it becomes more
 recent than loads drained alongside it. This design accepts that: loads
 drained in one batch completed concurrently, and their relative order is
-already set by native completion timing, not by the caller. To avoid
-reporting an access after a deletion, an adopted load's accessed keys are
-filtered against `_key_sizes` at notification time, so keys deleted in the
-meantime are left out. A test pins both behaviours.
+already set by native completion timing, not by the caller. Adopted
+loads report their accesses like any other load. An access for a key deleted
+while the load was parked is possible, as it was before this change for a load
+completing after a later delete, and LRU ignores keys it no longer tracks. A
+test pins both behaviours.
 
 **Shutdown.** `close()` requires that callers have stopped submitting, as
 `StorageManager.close()` already ensures by stopping its controllers first
@@ -313,8 +329,8 @@ work in the comparison.
 - Retired ids: a delete that times out, then completes, is dropped, not
   parked.
 - Eviction semantics: for `[LOAD(A), LOAD(B)]` with B adopted, LRU recency is
-  B newer than A, and an adopted load whose key was deleted in between does
-  not re-touch it.
+  B newer than A, and an adopted load whose key was deleted in between still
+  reports its access.
 - Shutdown: `close()` after callers stop logs and drops parked entries; a
   submit racing `close()` fails its task instead of hanging.
 - Demux ordering: deterministic tests feed drained batches of

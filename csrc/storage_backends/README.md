@@ -152,8 +152,9 @@ What `ConnectorBase` gives you for free:
 
 ### Step 2: Pybind module
 
-Use the `LMCACHE_BIND_CONNECTOR_METHODS` macro which binds all 6 methods
-(`event_fd`, `submit_batch_get/set/exists`, `drain_completions`, `close`)
+Use the `LMCACHE_BIND_CONNECTOR_METHODS` macro which binds all 9 methods
+(`event_fd`, `submit_batch_get/set/exists/delete`,
+`submit_batch_get_raw/set_raw`, `drain_completions`, `close`)
 with proper GIL release and buffer protocol handling.
 
 ```cpp
@@ -287,9 +288,9 @@ handles this transparently:
 
 | L2 Adapter method | Native connector call | Extra logic |
 |---|---|---|
-| `submit_store_task(keys, objs)` | `submit_batch_set` | ObjectKey→str, MemoryObj→memoryview |
+| `submit_store_task(keys, objs)` | `submit_batch_set_raw` when bound, else `submit_batch_set` | ObjectKey→str, MemoryObj→memoryview (raw: key fields and buffer pointers packed into arrays) |
 | `submit_lookup_and_lock_task(keys)` | `submit_batch_exists` | + client-side lock refcount |
-| `submit_load_task(keys, objs)` | `submit_batch_get` | ObjectKey→str, MemoryObj→memoryview |
+| `submit_load_task(keys, objs)` | `submit_batch_get_raw` when bound, else `submit_batch_get` | ObjectKey→str, MemoryObj→memoryview (raw: as store); submitted without the adapter lock |
 | `submit_unlock(keys)` | _(none)_ | client-side lock decrement |
 | `pop_completed_store_tasks()` | via `drain_completions` | demux by op type |
 | `query_lookup_and_lock_result()` | via `drain_completions` | exists→Bitmap, apply locks |
