@@ -1478,3 +1478,33 @@ def test_module_reports_io_uring_support() -> None:
     assert isinstance(lmcache_fs.has_io_uring(), bool)
     if sys.platform == "linux" and os.environ.get("LMCACHE_EXPECT_IO_URING") == "1":
         assert lmcache_fs.has_io_uring()
+
+
+def test_close_right_after_construction_does_not_hang(tmp_path: Path) -> None:
+    """close() must wake workers that have not yet blocked on their queue.
+
+    Without stop_ being stored under the waiters' mutex, a worker that checked
+    its predicate but had not blocked yet missed the notify and close() hung
+    in join(). The loop runs in a child so a hang fails by timeout.
+    """
+    code = """
+        import os
+        from lmcache.lmcache_fs import LMCacheFSClient
+
+        base = os.environ["FS_TEST_DIR"]
+        for i in range(300):
+            c = LMCacheFSClient(
+                base, 2, "", False, 0, 2, 0, 0, 0, 2, 2, "pool", 8
+            )
+            c.close()
+            c = LMCacheFSClient(base, 4)
+            c.close()
+        print("done")
+    """
+    _import_fs_client()
+    try:
+        result = _run_child(code, tmp_path)
+    except subprocess.TimeoutExpired:
+        pytest.fail("close() hung: lost wakeup on worker shutdown")
+    assert result.returncode == 0, result.stderr
+    assert "done" in result.stdout

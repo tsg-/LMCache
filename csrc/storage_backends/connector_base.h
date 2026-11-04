@@ -219,10 +219,19 @@ class ConnectorBase : public IStorageConnector {
       return;  // Already closed
     }
 
-    // Signal all worker threads to stop
-    stop_.store(true, std::memory_order_release);
+    // Signal all worker threads to stop. The flag is stored under the mutex
+    // each waiter checks its predicate under; otherwise a worker that has
+    // evaluated the predicate but not yet blocked misses the notify and
+    // close() hangs in join().
+    {
+      std::lock_guard<std::mutex> lk(req_mu_);
+      stop_.store(true, std::memory_order_release);
+    }
     req_cv_.notify_all();
     for (auto& [key, lane] : lanes_) {
+      {
+        std::lock_guard<std::mutex> lk(lane->mu);
+      }
       lane->cv.notify_all();
     }
 
