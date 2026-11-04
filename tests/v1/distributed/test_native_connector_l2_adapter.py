@@ -7,6 +7,7 @@ C++ IStorageConnector interface, so no Redis or C++ build is needed.
 """
 
 # Standard
+import contextlib
 from types import ModuleType
 import ctypes
 import os
@@ -26,6 +27,7 @@ from lmcache.v1.distributed.api import (
     MemoryTags,
     ObjectKey,
 )
+from lmcache.v1.distributed.l2_adapters import native_connector_l2_adapter
 from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
     NativeConnectorL2Adapter,
     _obj_to_memoryview,
@@ -206,6 +208,31 @@ def wait_for_event_fd(event_fd: int, timeout: float = 5.0) -> bool:
             pass
         return True
     return False
+
+
+@contextlib.contextmanager
+def capture_adapter_logs(caplog, level="WARNING"):
+    """Make ``caplog`` see the adapter logger's records at ``level``.
+
+    lmcache loggers set ``propagate = False``, so the root-level caplog
+    handler only sees their records if something else forwards them. Attach
+    the handler directly, for the duration of the block. This must run inside
+    the test body: pytest swaps ``caplog.handler`` per phase and ``caplog.text``
+    reads the call-phase handler, so a setup-time fixture would attach the
+    wrong one.
+    """
+    adapter_logger = native_connector_l2_adapter.logger
+    # Newer pytest already attaches its handler to non-propagating loggers;
+    # only detach what this block attached.
+    attached = caplog.handler not in adapter_logger.handlers
+    if attached:
+        adapter_logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(level):
+            yield
+    finally:
+        if attached:
+            adapter_logger.removeHandler(caplog.handler)
 
 
 @pytest.fixture
@@ -1789,10 +1816,9 @@ class TestBatchedDrainOrdering:
         listener = _RecordingListener(names)
         adp.register_listener(listener)
 
-        adp.delete(keys[:1])  # times out; the completion is still held
-        assert client.pending_count() == 1
-
-        with caplog.at_level("WARNING"):
+        with capture_adapter_logs(caplog):
+            adp.delete(keys[:1])  # times out; the completion is still held
+            assert client.pending_count() == 1
             client.release()
             adp.submit_store_task(
                 keys[1:], [create_memory_obj(size=100) for _ in range(2)]
@@ -1805,6 +1831,8 @@ class TestBatchedDrainOrdering:
 
         bitmap = adp.query_load_result(load_id)
         assert bitmap is not None and bitmap.test(0) is True
+        # Positive control: capture works, so the absence check below is real.
+        assert "delete() timed out" in caplog.text
         assert "unknown future_id" not in caplog.text
         assert all(0 not in call[1] for call in listener.calls)
 
@@ -2133,7 +2161,7 @@ class TestEarlyCompletionParking:
         _store_and_wait(adp, [k])
 
         # A completion no submitter ever registers stays parked until close.
-        with caplog.at_level("WARNING"):
+        with capture_adapter_logs(caplog):
             client._push_completion(10_000, True, "", None)
             assert _wait_for(lambda: client.pending_count() == 0)
             # The late load's own completion is never delivered.
