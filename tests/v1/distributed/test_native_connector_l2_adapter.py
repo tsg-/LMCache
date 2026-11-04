@@ -1778,3 +1778,32 @@ class TestBatchedDrainOrdering:
         assert bitmap is not None and bitmap.test(0) is True
 
         assert listener.calls == GOLDEN_LISTENER_CALLS
+
+    def test_timed_out_delete_completion_is_dropped(
+        self, held_adapter, monkeypatch, caplog
+    ):
+        adp, client = held_adapter
+        monkeypatch.setattr(NativeConnectorL2Adapter, "_DELETE_TIMEOUT_S", 0.05)
+        keys = [create_object_key(i) for i in range(3)]
+        names = {k: i for i, k in enumerate(keys)}
+        listener = _RecordingListener(names)
+        adp.register_listener(listener)
+
+        adp.delete(keys[:1])  # times out; the completion is still held
+        assert client.pending_count() == 1
+
+        with caplog.at_level("WARNING"):
+            client.release()
+            adp.submit_store_task(
+                keys[1:], [create_memory_obj(size=100) for _ in range(2)]
+            )
+            assert wait_for_event_fd(adp.get_store_event_fd(), timeout=5.0)
+            load_id = adp.submit_load_task(
+                keys[1:2], [create_memory_obj(size=100, fill_value=0.0)]
+            )
+            assert wait_for_event_fd(adp.get_load_event_fd(), timeout=5.0)
+
+        bitmap = adp.query_load_result(load_id)
+        assert bitmap is not None and bitmap.test(0) is True
+        assert "unknown future_id" not in caplog.text
+        assert all(0 not in call[1] for call in listener.calls)

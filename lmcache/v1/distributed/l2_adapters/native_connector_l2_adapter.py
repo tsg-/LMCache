@@ -167,6 +167,9 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
     _OP_LOAD = "load"
     _OP_DELETE = "delete"
 
+    # Seconds delete() waits for the backend before giving up.
+    _DELETE_TIMEOUT_S = 30.0
+
     def __init__(
         self,
         native_client: Any,
@@ -242,6 +245,11 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         # Bridges the async store submit → demux completion gap so the
         # demux thread can fire ``_notify_keys_stored(keys, sizes)``.
         self._pending_store_sizes: dict[int, tuple[list[ObjectKey], list[int]]] = {}
+
+        # Future ids of deletes whose delete() call timed out. A late
+        # completion for one of these is dropped silently instead of being
+        # treated as an unknown id. Guarded by ``_lock``.
+        self._abandoned: set[int] = set()
 
         # Task ID counter
         self._next_task_id: L2TaskId = 0
@@ -388,7 +396,8 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         """Delete a batch of keys from the remote backend.
 
         Submits a batch delete to the native connector and blocks
-        until the demux thread signals completion (up to 30s timeout).
+        until the demux thread signals completion (up to
+        ``_DELETE_TIMEOUT_S`` seconds).
         Fires ``_notify_keys_deleted`` on success so eviction policy
         tracking stays in sync.
 
@@ -413,17 +422,18 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
             self._pending_delete_events[task_id] = done_event
 
         # Block until demux thread signals completion
-        if not done_event.wait(timeout=30.0):
+        if not done_event.wait(timeout=self._DELETE_TIMEOUT_S):
             with self._lock:
                 self._pending_delete_events.pop(task_id, None)
                 # Note: _pending_ops entry may already be consumed
-                # by the demux thread; pop is safe either way.
-                for fid, entry in list(self._pending_ops.items()):
-                    if entry[1] == task_id:
-                        self._pending_ops.pop(fid, None)
-                        break
+                # by the demux thread; pop is safe either way. Only a
+                # popped id can still complete later, so only that one
+                # is recorded as abandoned.
+                if self._pending_ops.pop(future_id, None) is not None:
+                    self._abandoned.add(future_id)
             logger.warning(
-                "delete() timed out after 30s for %d keys",
+                "delete() timed out after %.1fs for %d keys",
+                self._DELETE_TIMEOUT_S,
                 len(keys),
             )
             return
@@ -573,6 +583,9 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         """
         entry = self._pending_ops.pop(fid, None)
         if entry is None:
+            if fid in self._abandoned:
+                self._abandoned.discard(fid)
+                return
             logger.warning(
                 "Received completion for unknown future_id=%d",
                 fid,
