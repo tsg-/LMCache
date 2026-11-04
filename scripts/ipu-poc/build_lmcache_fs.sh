@@ -55,5 +55,6 @@ c++ -O3 -std=c++17 -shared -fPIC "${DEFS[@]}" \
   -I"$PYBIND_INC" -I"$PY_INC" "${INCS[@]}" \
   -Icsrc/storage_backends -Icsrc/storage_backends/fs \
   csrc/storage_backends/fs/pybind.cpp csrc/storage_backends/fs/connector.cpp \
+  csrc/storage_backends/fs/read_budget.cpp \
   "${LIBS[@]}" -o "$OUT"
 echo "built $OUT (liburing: $([ "${NO_LIBURING:-0}" = 1 ] && echo off || echo "$PREFIX"))"

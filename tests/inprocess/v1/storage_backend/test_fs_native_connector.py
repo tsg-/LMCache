@@ -301,6 +301,89 @@ def test_the_default_budget_is_used_when_none_is_configured(tmp_path: Path) -> N
         unused.close()
 
 
+def _pooled_round_trip(
+    tmp_path: Path,
+    reader: Any,
+    size: int,
+    count: int,
+    batch_size: int,
+) -> None:
+    """Store `count` objects of `size` bytes, then read them back through
+    `reader` in concurrent batches of `batch_size`, checking every byte.
+
+    Args:
+        tmp_path: Directory the reader serves.
+        reader: An LMCacheFSClient with a read pool, rooted at tmp_path.
+        size: Bytes per object.
+        count: Number of objects; a multiple of batch_size.
+        batch_size: Objects per submitted batch; all batches are in flight
+            together.
+    """
+    LMCacheFSClient = _import_fs_client()
+    keys = [f"test_model@00000000@0@{i:016x}" for i in range(count)]
+    sources, dests, _keep_alive = _aligned_pairs(count, size, 4096)
+    writer = LMCacheFSClient(str(tmp_path), 2)
+    try:
+        _write_corpus(writer, keys, sources)
+    finally:
+        writer.close()
+
+    future_ids = [
+        reader.submit_batch_get(
+            keys[start : start + batch_size], dests[start : start + batch_size]
+        )
+        for start in range(0, count, batch_size)
+    ]
+    # One drain can return several batches' completions, so collect them all
+    # rather than waiting for each future in turn.
+    completions: dict[int, tuple[int, bool, str, list[bool] | None]] = {}
+    deadline = time.monotonic() + 10.0
+    while len(completions) < len(future_ids) and time.monotonic() < deadline:
+        for completion in reader.drain_completions():
+            completions[completion[0]] = completion
+        select.select([reader.event_fd()], [], [], 0.1)
+    assert sorted(completions) == sorted(future_ids)
+    for completion in completions.values():
+        assert completion[1], completion[2]
+        assert completion[3] is not None
+        assert list(completion[3]) == [True] * batch_size
+    for index, dest in enumerate(dests):
+        assert bytes(dest) == bytes(sources[index]), f"object {index} differs"
+
+
+def test_pool_peak_bytes_never_exceed_small_budget(tmp_path: Path) -> None:
+    """Concurrent batches share one budget: bytes in flight stay within it."""
+    LMCacheFSClient = _import_fs_client()
+    budget = 1 << 20
+    reader = LMCacheFSClient(str(tmp_path), 4, "", False, 0, 64, budget)
+    try:
+        assert reader.read_peak_bytes() == 0
+        # 32 objects of 256 KiB, read as 4 concurrent batches
+        _pooled_round_trip(tmp_path, reader, 256 << 10, 32, 8)
+        assert 0 < reader.read_peak_bytes() <= budget
+    finally:
+        reader.close()
+
+
+def test_oversized_read_admitted_under_two_read_rule(tmp_path: Path) -> None:
+    """Objects larger than the budget still load, at most two at a time."""
+    LMCacheFSClient = _import_fs_client()
+    reader = LMCacheFSClient(str(tmp_path), 2, "", False, 0, 8, 64 << 10)
+    try:
+        # Three 1 MiB objects against a 64 KiB budget: each is admitted only
+        # while fewer than two reads are in flight.
+        _pooled_round_trip(tmp_path, reader, 1 << 20, 3, 3)
+        assert reader.read_peak_bytes() == 2 << 20
+    finally:
+        reader.close()
+
+    legacy = LMCacheFSClient(str(tmp_path), 2)
+    try:
+        assert legacy.read_peak_bytes() == 0
+    finally:
+        legacy.close()
+
+
 def test_negative_num_read_workers_is_rejected(tmp_path: Path) -> None:
     """A negative num_read_workers is a configuration error, not a silent fallback."""
     LMCacheFSClient = _import_fs_client()

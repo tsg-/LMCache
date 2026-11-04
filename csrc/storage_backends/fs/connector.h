@@ -2,6 +2,7 @@
 #pragma once
 
 #include "../connector_base.h"
+#include "read_budget.h"
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
@@ -32,14 +33,6 @@ static constexpr const char* TMP_EXT = ".tmp";
 // is best; the sweep is in
 // docs/design/v1/distributed/l2_adapters/fs_native_read_depth.md.
 static constexpr size_t kDefaultReadMaxBytesInFlight = size_t{1536} << 20;
-// A worker blocked on a full budget is woken once 1/kReadBudgetWakeSlices of
-// it is free.
-static constexpr size_t kReadBudgetWakeSlices = 8;
-// Reads always admitted whatever the budget, so an object larger than half
-// of it still overlaps with the next one instead of draining the device
-// between them: one 1 GiB object alone reads ~40 GB/s on an array that
-// two in flight bring to ~49.
-static constexpr size_t kMinReadsInFlight = 2;
 
 // Per-worker connection state for the FS connector.
 // Each worker maintains its own I/O buffer for O_DIRECT.
@@ -86,6 +79,10 @@ class FSConnector : public ConnectorBase<WorkerFSConn> {
 
   // The byte budget in force, or 0 when there is no read pool.
   size_t read_budget_bytes() const;
+
+  // The most bytes the read pool has had in flight at once; 0 when there is
+  // no read pool or nothing has been read.
+  size_t read_peak_bytes() const;
 
  protected:
   WorkerFSConn create_connection() override;
@@ -154,15 +151,12 @@ class FSConnector : public ConnectorBase<WorkerFSConn> {
     size_t index = 0;  // into req->keys and tile->ok
     ReadTile* tile = nullptr;
     ReadTask* next = nullptr;
+    uint64_t start_ns = 0;  // from read_budget_.reserve()
   };
 
   // Hand a tile to the readers one object at a time, each dispatched as
   // soon as the byte budget has room, and wait for all of them.
   void do_batch_get_pooled(const Request& req);
-
-  // Whether an object of `len` bytes may be dispatched now.  Requires
-  // read_mu_.
-  bool read_budget_admits(size_t len) const;
 
   void start_read_pool(int num_read_workers);
   void stop_read_pool();
@@ -181,22 +175,16 @@ class FSConnector : public ConnectorBase<WorkerFSConn> {
   std::string pool_prefix_;
 
   // Read pool.  read_conns_ is sized once and never resized, so reader
-  // references stay valid; read_max_bytes_in_flight_ is 0 without a pool
-  // and never 0 with one.  Everything after read_mu_ is guarded by it.
-  size_t read_max_bytes_in_flight_;
+  // references stay valid.  read_budget_ has max_bytes() 0 without a pool
+  // and never 0 with one; it has its own lock, never held together with
+  // read_mu_.  Everything after read_mu_ is guarded by it.
+  ReadBudget read_budget_;
   std::vector<WorkerFSConn> read_conns_;
   std::vector<std::thread> read_threads_;
   std::mutex read_mu_;
   std::condition_variable read_cv_;  // a task was queued, or stop
-  // Budget room opened.  Signalled only once a slice of the budget is
-  // free, so a worker blocked on a full budget wakes once per slice and
-  // dispatches a run of objects, not once per finished read.
-  std::condition_variable read_budget_cv_;
-  size_t read_budget_waiters_ = 0;
   ReadTask* read_queue_head_ = nullptr;
   ReadTask* read_queue_tail_ = nullptr;
-  size_t read_bytes_in_flight_ = 0;  // dispatched and not yet finished
-  size_t reads_in_flight_ = 0;       // objects behind read_bytes_in_flight_
   bool read_stop_ = false;
 };
 

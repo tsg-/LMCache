@@ -68,6 +68,7 @@ COMMON_EXTENSIONS: list[CommonExtSpec] = [
         sources=[
             "csrc/storage_backends/fs/pybind.cpp",
             "csrc/storage_backends/fs/connector.cpp",
+            "csrc/storage_backends/fs/read_budget.cpp",
         ],
         include_dirs=[
             "csrc/storage_backends",

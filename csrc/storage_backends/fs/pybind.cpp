@@ -29,5 +29,9 @@ PYBIND11_MODULE(lmcache_fs, m) {
            &lmcache::connector::FSConnector::read_budget_bytes,
            "Bytes allowed outstanding against the device; 0 when there is "
            "no read pool.")
+      .def("read_peak_bytes",
+           &lmcache::connector::FSConnector::read_peak_bytes,
+           "Most bytes the read pool has had in flight at once; 0 when there "
+           "is no read pool.")
           LMCACHE_BIND_CONNECTOR_METHODS(lmcache::connector::FSConnector);
 }

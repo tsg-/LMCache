@@ -233,7 +233,7 @@ FSConnector::FSConnector(std::string base_path, int num_workers,
       read_ahead_size_(read_ahead_size),
       num_shard_dirs_(num_shard_dirs),
       recycle_max_files_(recycle_max_files),
-      read_max_bytes_in_flight_(
+      read_budget_(
           effective_read_budget(num_read_workers, read_max_bytes_in_flight)) {
   if (num_read_workers < 0) {
     throw std::runtime_error("num_read_workers must be >= 0");
@@ -436,7 +436,11 @@ bool FSConnector::do_single_delete(WorkerFSConn& conn, const std::string& key) {
 // ---------------------------------------------------------------
 
 size_t FSConnector::read_budget_bytes() const {
-  return read_max_bytes_in_flight_;
+  return read_budget_.max_bytes();
+}
+
+size_t FSConnector::read_peak_bytes() const {
+  return read_budget_.peak_bytes();
 }
 
 size_t FSConnector::choose_num_tiles(Op op, size_t num_items) const {
@@ -456,11 +460,6 @@ void FSConnector::do_batch_get(WorkerFSConn& conn, const Request& req) {
 
 void FSConnector::on_workers_stopped() { stop_read_pool(); }
 
-bool FSConnector::read_budget_admits(size_t len) const {
-  return reads_in_flight_ < kMinReadsInFlight ||
-         read_bytes_in_flight_ + len <= read_max_bytes_in_flight_;
-}
-
 void FSConnector::do_batch_get_pooled(const Request& req) {
   const size_t num_keys = req.keys.size();
   ReadTile tile;
@@ -469,28 +468,42 @@ void FSConnector::do_batch_get_pooled(const Request& req) {
   // Allocated before anything is published, so nothing below can throw
   // while readers hold pointers into this frame.
   std::vector<ReadTask> tasks(num_keys);
+  std::vector<uint64_t> start_ns(num_keys);
+
+  // Each run of admitted objects is queued before the next reservation can
+  // block, so every reserved read is one a reader will finish and release.
+  // The budget lock and read_mu_ are never held together.
+  size_t queued = 0;
+  try {
+    while (queued < num_keys) {
+      const size_t admitted =
+          read_budget_.reserve(req.buf_lens.data() + queued, num_keys - queued,
+                               true, start_ns.data() + queued);
+      std::lock_guard<std::mutex> lk(read_mu_);
+      for (size_t i = queued; i < queued + admitted; ++i) {
+        tasks[i] = ReadTask{&req, i, &tile, nullptr, start_ns[i]};
+        if (read_queue_tail_ != nullptr) {
+          read_queue_tail_->next = &tasks[i];
+        } else {
+          read_queue_head_ = &tasks[i];
+        }
+        read_queue_tail_ = &tasks[i];
+        read_cv_.notify_one();
+      }
+      queued += admitted;
+    }
+  } catch (...) {
+    // Readers hold pointers into this frame, so the objects not queued
+    // fail and the queued ones are still waited for.
+    std::lock_guard<std::mutex> lk(read_mu_);
+    for (size_t i = queued; i < num_keys; ++i) {
+      tile.ok[i] = 0;
+    }
+    tile.remaining -= num_keys - queued;
+  }
 
   {
     std::unique_lock<std::mutex> lk(read_mu_);
-    for (size_t i = 0; i < num_keys; ++i) {
-      const size_t len = req.buf_lens[i];
-      if (!read_budget_admits(len)) {
-        ++read_budget_waiters_;
-        read_budget_cv_.wait(lk,
-                             [this, len] { return read_budget_admits(len); });
-        --read_budget_waiters_;
-      }
-      read_bytes_in_flight_ += len;
-      ++reads_in_flight_;
-      tasks[i] = ReadTask{&req, i, &tile, nullptr};
-      if (read_queue_tail_ != nullptr) {
-        read_queue_tail_->next = &tasks[i];
-      } else {
-        read_queue_head_ = &tasks[i];
-      }
-      read_queue_tail_ = &tasks[i];
-      read_cv_.notify_one();
-    }
     tile.done_cv.wait(lk, [&tile] { return tile.remaining == 0; });
   }
 
@@ -565,27 +578,18 @@ void FSConnector::read_thread_main(WorkerFSConn& conn) {
               key.c_str());
     }
 
+    // Released before the completion is recorded, while the tile cannot
+    // yet be done, so `task` is still alive here.
+    read_budget_.release(req.buf_lens[task->index], 1, &task->start_ns, 1);
+
     // The submitting worker may destroy `task` and its tile as soon as it
     // takes read_mu_ and sees remaining == 0, so nothing touches them
     // after the notify below; notifying under the lock keeps the tile
     // alive until then.
     lk.lock();
     task->tile->ok[task->index] = ok;
-    read_bytes_in_flight_ -= req.buf_lens[task->index];
-    --reads_in_flight_;
     if (--task->tile->remaining == 0) {
       task->tile->done_cv.notify_one();
-    }
-    // Large objects can hold more than the budget, so the free bytes are
-    // computed without wrapping.
-    const size_t free_bytes =
-        read_bytes_in_flight_ < read_max_bytes_in_flight_
-            ? read_max_bytes_in_flight_ - read_bytes_in_flight_
-            : 0;
-    if (read_budget_waiters_ != 0 &&
-        (reads_in_flight_ < kMinReadsInFlight ||
-         free_bytes >= read_max_bytes_in_flight_ / kReadBudgetWakeSlices)) {
-      read_budget_cv_.notify_all();
     }
   }
 }
