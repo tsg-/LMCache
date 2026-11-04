@@ -338,6 +338,16 @@ like the existing connector tests. Each runs against both engines:
 - engine selection: `auto` without a usable ring picks the pool and logs it;
   forcing `io_uring` without one fails construction.
 
+The fault tests live in
+`tests/inprocess/v1/storage_backend/test_fs_native_uring_faults.py`. They
+need an extension built with `LMCACHE_FS_FAULT_INJECTION=1` and skip on any
+other build, so CI must run a job that builds with
+`LMCACHE_FS_FAULT_INJECTION=1 bash scripts/ipu-poc/build_lmcache_fs.sh .` or
+the file never runs. Each case runs in a subprocess, so the injected fault and
+any `RLIMIT_NOFILE` change stay isolated. `read_bytes_in_flight()` lets the
+error-path cases check that a missing key, a reaped engine error and `EMFILE`
+requeueing all return the whole byte budget.
+
 The PoC's suite (`scripts/ipu-poc/fs_uring/tests`) covers engine errors
 through a forced-include fault API that wraps `io_uring_queue_init`,
 `io_uring_submit` and `io_uring_wait_cqe`. It has no hook for short reads or
