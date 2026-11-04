@@ -21,11 +21,12 @@ Architecture:
 from __future__ import annotations
 
 # Standard
-from collections import defaultdict
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from functools import cache
 from typing import Any
 import ctypes
+import itertools
 import select
 import threading
 
@@ -251,8 +252,22 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         # treated as an unknown id. Guarded by ``_lock``.
         self._abandoned: set[int] = set()
 
-        # Task ID counter
-        self._next_task_id: L2TaskId = 0
+        # Load completions drained before their submitter registered:
+        # future_id -> (ok, error, result_bools). Guarded by ``_lock``.
+        self._early_completions: dict[int, tuple[bool, str, list[bool] | None]] = {}
+        # Parked load completions claimed by their registered submitter,
+        # waiting for the demux thread to route them. Guarded by ``_lock``.
+        self._adopted: deque[tuple[int, bool, str, list[bool] | None]] = deque()
+        # Wakes the demux thread when a submitter adopts a parked completion.
+        self._wake_efd = create_event_notifier()
+        # Set under ``_lock`` by close(); loads registering after it fail.
+        self._closing = False
+        # Set under ``_lock`` once close() has closed the eventfds.
+        self._notifiers_closed = False
+
+        # Task ID counter; ``next()`` on it is atomic under the GIL, so it
+        # needs no lock.
+        self._task_ids: itertools.count[int] = itertools.count(0)
 
         # Lock for all shared state above
         self._lock = threading.Lock()
@@ -372,15 +387,29 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
             _obj_to_memoryview(obj, self._pad_buffers_to_alignment) for obj in objects
         ]
 
+        # The native submit runs without the lock, so the demux thread can
+        # drain this load's completion before the entry below exists. Such
+        # a completion is parked, and adopted here when registering.
+        task_id = self._get_next_task_id()
+        future_id = int(self._client.submit_batch_get(key_strings, memviews))
         with self._lock:
-            task_id = self._get_next_task_id()
-            future_id = int(self._client.submit_batch_get(key_strings, memviews))
+            if self._closing:
+                self._early_completions.pop(future_id, None)
+                self._completed_loads[task_id] = Bitmap(len(keys))
+                if not self._notifiers_closed:
+                    self._load_efd.notify()
+                return task_id
             self._pending_ops[future_id] = (
                 self._OP_LOAD,
                 task_id,
                 len(keys),
                 list(keys),
             )
+            parked = self._early_completions.pop(future_id, None)
+            if parked is not None:
+                ok, error, result_bools = parked
+                self._adopted.append((future_id, ok, error, result_bools))
+                self._wake_efd.notify()
 
         return task_id
 
@@ -479,52 +508,92 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         return self._memory_tags
 
     def close(self) -> None:
+        """Stop the demux thread, then close the client and eventfds.
+
+        Callers must stop submitting before calling this;
+        ``StorageManager.close()`` does so by stopping its controllers
+        first. A load whose native submit returns after close() has begun
+        is failed at once: its result is an all-failure bitmap. Load
+        completions still parked or adopted when the demux thread stops
+        are logged with their count and dropped.
+        """
+        with self._lock:
+            self._closing = True
         self._stop.set()
         self._demux_thread.join(timeout=5)
 
         self._client.close()
 
-        self._store_efd.close()
-        self._lookup_efd.close()
-        self._load_efd.close()
+        with self._lock:
+            dropped = len(self._early_completions) + len(self._adopted)
+            if dropped:
+                logger.warning(
+                    "close(): dropping %d parked or adopted load completions",
+                    dropped,
+                )
+            self._early_completions.clear()
+            self._adopted.clear()
+            self._store_efd.close()
+            self._lookup_efd.close()
+            self._load_efd.close()
+            self._wake_efd.close()
+            self._notifiers_closed = True
 
     # ---------------------------------------------------------------
     # Internal helpers
     # ---------------------------------------------------------------
 
     def _get_next_task_id(self) -> L2TaskId:
-        """Increment and return the next task ID.
-        Must be called under _lock."""
-        task_id = self._next_task_id
-        self._next_task_id += 1
-        return task_id
+        """Return the next task ID. Safe to call without ``_lock``."""
+        return next(self._task_ids)
 
     def _demux_loop(self) -> None:
         """Background thread that polls the native
         connector's eventfd, drains completions, and
         routes them to the correct L2 result category.
+
+        Each pass first routes the load completions that submitters
+        adopted (see ``submit_load_task``), then the newly drained ones.
         """
+        wake_fd = self._wake_efd.fileno()
         poller = select.poll()
         poller.register(self._client_fd, select.POLLIN)
+        poller.register(wake_fd, select.POLLIN)
 
         while not self._stop.is_set():
             events = poller.poll(500)
             if not events:
                 continue
+            ready = {fd for fd, _ in events}
 
-            try:
-                completions = self._client.drain_completions()
-            except Exception:
-                logger.exception("drain_completions failed")
-                continue
+            # Consume the wakeup before taking ``_adopted``, so an adoption
+            # that misses this pass signals the next one.
+            adopted: list[tuple[int, bool, str, list[bool] | None]] = []
+            if wake_fd in ready:
+                self._wake_efd.consume()
+            if self._adopted:
+                with self._lock:
+                    adopted = list(self._adopted)
+                    self._adopted.clear()
 
-            if not completions:
+            completions: list[tuple[int, bool, str, list[bool] | None]] = []
+            if self._client_fd in ready:
+                try:
+                    completions = self._client.drain_completions()
+                except Exception:
+                    logger.exception("drain_completions failed")
+
+            if not adopted and not completions:
                 continue
 
             # Bitmaps for completions that carry per-key results are
             # built before taking the lock; the ones that need the
             # pending entry's ``num_keys`` are built in
             # ``_route_completion``.
+            adopted_bitmaps = [
+                _build_bitmap(result_bools) if result_bools is not None else None
+                for _, _, _, result_bools in adopted
+            ]
             bitmaps = [
                 _build_bitmap(result_bools) if result_bools is not None else None
                 for _, _, _, result_bools in completions
@@ -532,6 +601,22 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
 
             out = _Notifications()
             with self._lock:
+                # Adopted loads publish their result and notify the load
+                # eventfd here; the native wakeup for them was consumed
+                # when they were drained.
+                for (future_id, ok, error, result_bools), bitmap in zip(
+                    adopted, adopted_bitmaps, strict=True
+                ):
+                    self._route_completion(
+                        future_id, ok, error, result_bools, bitmap, out
+                    )
+                # Keys deleted since an adopted load completed are not
+                # reported as accessed. ``out`` holds only adopted loads'
+                # accesses at this point.
+                if out.keys_accessed:
+                    out.keys_accessed = [
+                        k for k in out.keys_accessed if k in self._key_sizes
+                    ]
                 for (future_id, ok, error, result_bools), bitmap in zip(
                     completions, bitmaps, strict=True
                 ):
@@ -569,7 +654,10 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         Must be called under ``_lock``. Pops the pending entry for
         ``fid``, updates byte/lock accounting, publishes the result and
         signals the matching eventfd. Listener work is only recorded in
-        ``out``; the caller fires it after releasing the lock.
+        ``out``; the caller fires it after releasing the lock. A
+        completion for an abandoned delete is dropped; one for any other
+        unregistered id is a load whose submitter has not registered yet,
+        and is parked in ``_early_completions`` for it to adopt.
 
         Args:
             fid: Native future id of the completion.
@@ -586,10 +674,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
             if fid in self._abandoned:
                 self._abandoned.discard(fid)
                 return
-            logger.warning(
-                "Received completion for unknown future_id=%d",
-                fid,
-            )
+            self._early_completions[fid] = (ok, error, result_bools)
             return
 
         (

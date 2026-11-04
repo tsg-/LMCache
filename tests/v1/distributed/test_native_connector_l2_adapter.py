@@ -1807,3 +1807,344 @@ class TestBatchedDrainOrdering:
         assert bitmap is not None and bitmap.test(0) is True
         assert "unknown future_id" not in caplog.text
         assert all(0 not in call[1] for call in listener.calls)
+
+
+# =============================================================================
+# Lock-free load submit and early-completion parking
+# =============================================================================
+
+
+def _wait_for(predicate, timeout: float = 5.0) -> bool:
+    deadline = timeout
+    while not predicate():
+        if deadline <= 0:
+            return False
+        threading.Event().wait(0.002)
+        deadline -= 0.002
+    return True
+
+
+def _count_signals(fd: int, settle: float = 0.1) -> int:
+    """Return how many times ``fd`` was signalled since it was last read.
+
+    Waits ``settle`` seconds first so late signals are counted, then reads
+    the eventfd counter (Linux) or the pending pipe bytes (elsewhere).
+    """
+    threading.Event().wait(settle)
+    if not select.select([fd], [], [], 0)[0]:
+        return 0
+    if hasattr(os, "eventfd_read"):
+        return int(os.eventfd_read(fd))
+    return len(os.read(fd, 4096))
+
+
+class InterleavingConnector(HeldCompletionConnector):
+    """Mock whose ``submit_batch_get`` races the adapter's demux thread.
+
+    ``get_mode`` places the get's completion relative to the adapter
+    registering it:
+
+    - ``"inline"``: pushed before ``submit_batch_get`` returns, as in
+      MockNativeConnector; the demux may or may not have seen it.
+    - ``"parked"``: pushed, and ``submit_batch_get`` returns only after the
+      demux has routed the drained batch holding it, so the completion
+      reaches the adapter before its pending entry exists.
+    - ``"between"``: pushed, and ``submit_batch_get`` returns once the demux
+      has drained it; that drain returns only after the test sets
+      ``release_drain``, so the submitter registers between drain and route.
+
+    ``held`` (from HeldCompletionConnector) starts False here; set it to
+    deliver completions only on ``release()``. ``before_get_return`` runs on
+    the submitting thread just before ``submit_batch_get`` returns.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.held = False
+        self.get_mode = "inline"
+        self.get_raises = False
+        self.before_get_return = None
+        self.drained = threading.Event()
+        self.routed = threading.Event()
+        self.release_drain = threading.Event()
+        self.drain_thread_ids: set[int] = set()
+        self._arm: str | None = None
+        self._signal_routed_next = False
+
+    def submit_batch_get(self, keys: list[str], memoryviews: list) -> int:
+        if self.get_raises:
+            raise RuntimeError("native submit failed")
+        mode = self.get_mode
+        with self._lock:
+            self._arm = None if mode == "inline" else mode
+        fid = super().submit_batch_get(keys, memoryviews)
+        if mode == "parked":
+            assert self.routed.wait(5.0)
+        elif mode == "between":
+            assert self.drained.wait(5.0)
+        if self.before_get_return is not None:
+            self.before_get_return()
+        return fid
+
+    def drain_completions(self) -> list[tuple[int, bool, str, list[bool] | None]]:
+        self.drain_thread_ids.add(threading.get_ident())
+        if self._signal_routed_next:
+            # The previous batch has been routed before this drain began.
+            self._signal_routed_next = False
+            self.routed.set()
+        completions = super().drain_completions()
+        with self._lock:
+            arm = self._arm if completions else None
+            if arm is not None:
+                self._arm = None
+        if arm == "parked":
+            self._signal_routed_next = True
+            self._efd.notify()  # force another pass after routing
+        elif arm == "between":
+            self.drained.set()
+            assert self.release_drain.wait(5.0)
+        return completions
+
+
+class _ThreadRecordingListener(_RecordingListener):
+    def __init__(self, names: dict[ObjectKey, int]):
+        super().__init__(names)
+        self.thread_ids: set[int] = set()
+
+    def on_l2_keys_stored(self, keys, sizes):
+        self.thread_ids.add(threading.get_ident())
+        super().on_l2_keys_stored(keys, sizes)
+
+    def on_l2_keys_accessed(self, keys):
+        self.thread_ids.add(threading.get_ident())
+        super().on_l2_keys_accessed(keys)
+
+    def on_l2_keys_deleted(self, keys):
+        self.thread_ids.add(threading.get_ident())
+        super().on_l2_keys_deleted(keys)
+
+
+@pytest.fixture
+def interleaving_adapter():
+    client = InterleavingConnector()
+    adp = NativeConnectorL2Adapter(client, _MEMORY_TAGS)
+    yield adp, client
+    client.held = False
+    client.release_drain.set()
+    adp.close()
+
+
+def _store_and_wait(adp, keys, fill_value: float = 1.0) -> None:
+    adp.submit_store_task(
+        keys, [create_memory_obj(size=100, fill_value=fill_value) for _ in keys]
+    )
+    assert wait_for_event_fd(adp.get_store_event_fd(), timeout=5.0)
+
+
+def _wait_load_result(adp, task_id):
+    results = []
+
+    def _ready() -> bool:
+        bitmap = adp.query_load_result(task_id)
+        if bitmap is not None:
+            results.append(bitmap)
+        return bool(results)
+
+    assert _wait_for(_ready)
+    return results[0]
+
+
+class TestEarlyCompletionParking:
+    def _load_once(self, adp, client, key, mode: str):
+        client.get_mode = mode
+        buf = create_memory_obj(size=100, fill_value=0.0)
+        if mode == "between":
+            box: list[int] = []
+            t = threading.Thread(
+                target=lambda: box.append(adp.submit_load_task([key], [buf]))
+            )
+            t.start()
+            t.join(timeout=5)
+            assert not t.is_alive()
+            client.release_drain.set()
+            task_id = box[0]
+        else:
+            task_id = adp.submit_load_task([key], [buf])
+        return task_id, buf
+
+    def _assert_one_result(self, adp, task_id, buf, fill_value: float) -> None:
+        bitmap = _wait_load_result(adp, task_id)
+        assert bitmap.test(0) is True
+        assert torch.all(buf.tensor == fill_value)
+        assert _count_signals(adp.get_load_event_fd()) == 1
+        assert adp.query_load_result(task_id) is None
+
+    def test_early_completion_before_submit_returns(self, interleaving_adapter):
+        adp, client = interleaving_adapter
+        k = create_object_key(1)
+        _store_and_wait(adp, [k], fill_value=3.0)
+        task_id, buf = self._load_once(adp, client, k, "parked")
+        assert client.routed.is_set()
+        self._assert_one_result(adp, task_id, buf, 3.0)
+
+    def test_completion_in_next_drain(self, interleaving_adapter):
+        adp, client = interleaving_adapter
+        k = create_object_key(1)
+        _store_and_wait(adp, [k], fill_value=4.0)
+        client.held = True
+        task_id, buf = self._load_once(adp, client, k, "inline")
+        assert client.pending_count() == 1
+        client.release()
+        self._assert_one_result(adp, task_id, buf, 4.0)
+
+    def test_register_between_drain_and_route(self, interleaving_adapter):
+        adp, client = interleaving_adapter
+        k = create_object_key(1)
+        _store_and_wait(adp, [k], fill_value=5.0)
+        task_id, buf = self._load_once(adp, client, k, "between")
+        assert client.drained.is_set()
+        self._assert_one_result(adp, task_id, buf, 5.0)
+
+    def test_listeners_only_on_demux_thread(self, interleaving_adapter):
+        adp, client = interleaving_adapter
+        keys = [create_object_key(i) for i in range(3)]
+        listener = _ThreadRecordingListener({k: i for i, k in enumerate(keys)})
+        adp.register_listener(listener)
+        _store_and_wait(adp, keys)
+        for key, mode in zip(keys, ["parked", "inline", "between"], strict=True):
+            task_id, _ = self._load_once(adp, client, key, mode)
+            assert _wait_load_result(adp, task_id).test(0) is True
+        adp.delete(keys[:1])
+
+        accessed = [c for c in listener.calls if c[0] == "accessed"]
+        assert sorted(i for c in accessed for i in c[1]) == [0, 1, 2]
+        assert listener.thread_ids
+        assert listener.thread_ids <= client.drain_thread_ids
+        assert threading.get_ident() not in listener.thread_ids
+
+    def test_adopted_load_recency_and_deleted_key(self, interleaving_adapter):
+        adp, client = interleaving_adapter
+        keys = [create_object_key(i) for i in range(3)]
+        listener = _RecordingListener({k: i for i, k in enumerate(keys)})
+        _store_and_wait(adp, keys)
+        adp.register_listener(listener)
+
+        # [LOAD(A), LOAD(B)] in one drain; A is registered, B is adopted.
+        client.held = True
+        task_a = adp.submit_load_task(
+            keys[:1], [create_memory_obj(size=100, fill_value=0.0)]
+        )
+        client.get_mode = "parked"
+        box: list[int] = []
+        t = threading.Thread(
+            target=lambda: box.append(
+                adp.submit_load_task(
+                    keys[1:2], [create_memory_obj(size=100, fill_value=0.0)]
+                )
+            )
+        )
+        t.start()
+        assert _wait_for(lambda: client.pending_count() == 2)
+        client.release()
+        t.join(timeout=5)
+        assert not t.is_alive()
+        assert _wait_load_result(adp, task_a).test(0) is True
+        assert _wait_load_result(adp, box[0]).test(0) is True
+        assert listener.calls == [("accessed", [0]), ("accessed", [1])]
+
+        # An adopted load whose key was deleted meanwhile does not touch it.
+        listener.calls.clear()
+        client.routed.clear()
+        client.get_mode = "parked"
+        client.before_get_return = lambda: adp.delete(keys[2:3])
+        task_c = adp.submit_load_task(
+            keys[2:3], [create_memory_obj(size=100, fill_value=0.0)]
+        )
+        client.before_get_return = None
+        assert _wait_load_result(adp, task_c).test(0) is True
+        # One load-eventfd signal per load: A, B and C.
+        assert _count_signals(adp.get_load_event_fd()) == 3
+        assert listener.calls == [("deleted", [2])]
+
+    def test_concurrent_load_submitters_each_get_own_result(self, interleaving_adapter):
+        adp, client = interleaving_adapter
+        num_threads, per_thread = 8, 200
+        keys = [create_object_key(i) for i in range(num_threads)]
+        for i, k in enumerate(keys):
+            _store_and_wait(adp, [k], fill_value=float(i + 1))
+        missing = create_object_key(10_000)
+        failures: list[str] = []
+
+        def worker(t: int) -> None:
+            submitted = []
+            for i in range(per_thread):
+                hit = (t + i) % 2 == 0
+                buf = create_memory_obj(size=100, fill_value=0.0)
+                key = keys[t] if hit else missing
+                submitted.append((adp.submit_load_task([key], [buf]), hit, buf))
+            for task_id, hit, buf in submitted:
+                results: list = []
+
+                def _ready(task_id=task_id, results=results) -> bool:
+                    bitmap = adp.query_load_result(task_id)
+                    if bitmap is not None:
+                        results.append(bitmap)
+                    return bool(results)
+
+                if not _wait_for(_ready, timeout=10.0):
+                    failures.append(f"thread {t}: task {task_id} never completed")
+                    continue
+                if results[0].test(0) is not hit:
+                    failures.append(f"thread {t}: task {task_id} wrong result")
+                if hit and not torch.all(buf.tensor == float(t + 1)):
+                    failures.append(f"thread {t}: task {task_id} wrong data")
+                if adp.query_load_result(task_id) is not None:
+                    failures.append(f"thread {t}: task {task_id} completed twice")
+
+        threads = [threading.Thread(target=worker, args=(t,)) for t in range(8)]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join(timeout=60)
+            assert not th.is_alive()
+        assert failures == []
+
+    def test_submit_raising_leaves_no_parked_state(self, interleaving_adapter):
+        adp, client = interleaving_adapter
+        k = create_object_key(1)
+        _store_and_wait(adp, [k], fill_value=6.0)
+        early_before = dict(adp._early_completions)
+        adopted_before = list(adp._adopted)
+
+        client.get_raises = True
+        with pytest.raises(RuntimeError, match="native submit failed"):
+            adp.submit_load_task([k], [create_memory_obj(size=100, fill_value=0.0)])
+        assert adp._early_completions == early_before
+        assert list(adp._adopted) == adopted_before
+
+        client.get_raises = False
+        task_id, buf = self._load_once(adp, client, k, "parked")
+        self._assert_one_result(adp, task_id, buf, 6.0)
+
+    def test_close_drops_parked_and_fails_late_submit(self, caplog):
+        client = InterleavingConnector()
+        adp = NativeConnectorL2Adapter(client, _MEMORY_TAGS)
+        k = create_object_key(1)
+        _store_and_wait(adp, [k])
+
+        # A completion no submitter ever registers stays parked until close.
+        with caplog.at_level("WARNING"):
+            client._push_completion(10_000, True, "", None)
+            assert _wait_for(lambda: client.pending_count() == 0)
+            # The late load's own completion is never delivered.
+            client.held = True
+            client.before_get_return = adp.close
+            task_id = adp.submit_load_task(
+                [k], [create_memory_obj(size=100, fill_value=0.0)]
+            )
+
+        bitmap = adp.query_load_result(task_id)
+        assert bitmap is not None
+        assert bitmap.test(0) is False
+        assert "unknown future_id" not in caplog.text
+        assert "dropping 1 parked" in caplog.text
